@@ -5,6 +5,11 @@
  * Copyright (c) 2022, The littlefs authors.
  * Copyright (c) 2017, Arm Limited. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * FASTFFS modifications:
+ * Copyright (c) 2026, FASTFFS contributors.
+ * - This fork is used as the FASTFFS verification backend.
+ * - Program operations model NOR flash monotonic 1->0 writes.
  */
 #ifndef LFS_EMUBD_H
 #define LFS_EMUBD_H
@@ -174,9 +179,10 @@ int lfs_emubd_destroy(const struct lfs_config *cfg);
 int lfs_emubd_read(const struct lfs_config *cfg, lfs_block_t block,
         lfs_off_t off, void *buffer, lfs_size_t size);
 
-// Program a block
+// Program a block.
 //
-// The block must have previously been erased.
+// FASTFFS fork: bytes may be programmed more than once as long as each write
+// only clears bits. Attempted 0->1 transitions assert.
 int lfs_emubd_prog(const struct lfs_config *cfg, lfs_block_t block,
         lfs_off_t off, const void *buffer, lfs_size_t size);
 

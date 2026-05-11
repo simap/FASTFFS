@@ -5,6 +5,12 @@
  * Copyright (c) 2022, The littlefs authors.
  * Copyright (c) 2017, Arm Limited. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * FASTFFS modifications:
+ * Copyright (c) 2026, FASTFFS contributors.
+ * - Program operations model NOR flash bit transitions by allowing only
+ *   monotonic 1->0 changes instead of requiring every programmed byte to
+ *   still be erased.
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -369,15 +375,24 @@ int lfs_emubd_prog(const struct lfs_config *cfg, lfs_block_t block,
         }
     }
 
-    // were we erased properly?
+    // Were we programmed properly?
+    //
+    // Upstream littlefs emubd requires every destination byte to still equal
+    // erase_value here. FASTFFS uses this fork to model NOR flash directly:
+    // programming may revisit a byte, but only bits that are still 1 may be
+    // cleared to 0. Any attempted 0->1 transition is invalid.
     if (bd->cfg->erase_value != -1) {
+        const uint8_t *data = buffer;
         for (lfs_off_t i = 0; i < size; i++) {
-            LFS_ASSERT(b->data[off+i] == bd->cfg->erase_value);
+            LFS_ASSERT((uint8_t)(b->data[off+i] & data[i]) == data[i]);
         }
     }
 
     // prog data
-    memcpy(&b->data[off], buffer, size);
+    const uint8_t *data = buffer;
+    for (lfs_off_t i = 0; i < size; i++) {
+        b->data[off+i] &= data[i];
+    }
 
     // mirror to disk file?
     if (bd->disk) {
@@ -390,7 +405,7 @@ int lfs_emubd_prog(const struct lfs_config *cfg, lfs_block_t block,
             return err;
         }
 
-        ssize_t res2 = write(bd->disk->fd, buffer, size);
+        ssize_t res2 = write(bd->disk->fd, &b->data[off], size);
         if (res2 < 0) {
             int err = -errno;
             LFS_EMUBD_TRACE("lfs_emubd_prog -> %d", err);
@@ -736,4 +751,3 @@ int lfs_emubd_copy(const struct lfs_config *cfg, lfs_emubd_t *copy) {
     LFS_EMUBD_TRACE("lfs_emubd_copy -> %d", 0);
     return 0;
 }
-

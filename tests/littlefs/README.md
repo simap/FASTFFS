@@ -1,12 +1,12 @@
-# Imported littlefs files
+# FASTFFS littlefs emubd fork
 
-This directory contains a small reference import from upstream littlefs:
+This directory contains a small fork of upstream littlefs:
 
 - Repository: https://github.com/littlefs-project/littlefs
 - Release tag: `v2.11.2`
 - License: BSD-3-Clause, preserved in `LICENSE.md`
-- Import purpose: seed/reference code for the FASTFFS host verification
-  framework, especially the emulated block-device testing hooks.
+- Fork purpose: FASTFFS host verification framework, especially the emulated
+  block-device testing hooks.
 
 Copied files:
 
