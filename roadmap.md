@@ -22,7 +22,7 @@ This stage builds an emulated NOR flash layer that can:
 - enforce erased/programmed bit transitions
 - track every read, program, erase, and blank-check operation
 - preserve operation ordering and sequences
-- count operations by type, size, sector group, and call site
+- count operations by type, size, FASTFFS sector, and call site
 - model fake time using configurable flash timing stats
 - expose deterministic failure injection
 - simulate crashes and power loss before, after, or in the middle of operations
@@ -41,12 +41,13 @@ The first milestone is a host-runnable filesystem image, not hardware.
 
 This stage defines the exact binary layout for:
 
-- superblock / format marker
-- index sector header
+- index sector header with magic/version, index count/serial, sector size, and flags
 - 4-byte index records
 - baseline "does everything" metadata record
 - local tombstone bit
-- sector-group data/metadata layout
+- sector-local data/metadata layout
+
+The host image should be self-describing through index headers and image size. Mount should be able to discover the FASTFFS sector size and active index sequence even if sector `0` is erased or tombstoned.
 
 The implementation should include a fake NOR flash backend with the same monotonic write and erase behavior as real flash. That lets the format evolve quickly without device flashing overhead.
 
@@ -58,7 +59,7 @@ Before adding much complexity, build tools that make the image explain itself.
 
 Needed tools:
 
-- image dump: show superblock, index sectors, sector groups, metadata records, tombstones, extents, and live namespace
+- image dump: show index headers, index sectors, FASTFFS sectors, metadata records, tombstones, extents, and live namespace
 - fsck/check: replay the index, validate root metadata, validate extent chains, identify orphaned data, and report corruption
 - workload generator: deterministic tiny/medium/large create, overwrite, delete, list, and read streams
 
@@ -83,8 +84,13 @@ Fault tests should interrupt both between operations and inside operations:
 - metadata writes
 - index appends
 - index rotation
+- index header valid/tombstone transitions
+- erased sector `0` and index-header discovery
+- conflicting index header version/count/sector-size data
+- partial/clobbered index entries, including all-ones and all-zeros cases
 - local tombstone updates
 - erases
+- failed data-sector writes that must not be committed through the index
 - GC scans
 - staged flash mutations
 
@@ -97,9 +103,10 @@ After basic correctness, the allocator and GC need to behave well under churn.
 Allocator direction:
 
 - first-available from `alloc_cursor`
-- dense fill of usable sector groups
-- contiguous extension when adjacent groups are available
+- dense fill of usable FASTFFS sectors
+- contiguous extension when adjacent sectors are available
 - simple range check for "largest metadata record plus minimum useful data"
+- reserve some metadata slack for tombstones and future amendment records
 - blank-check before programming
 
 GC direction:
@@ -108,7 +115,7 @@ GC direction:
 - read valid-looking metadata
 - check liveness through the current index and root chain
 - program local tombstones for dead records
-- erase groups that are entirely dead/orphaned/tombstoned
+- erase sectors that are entirely dead/orphaned/tombstoned
 
 This stage should focus on sustained create/overwrite/delete workloads and low-space behavior. Sector compaction can remain future work unless churn shows that plain GC is not enough.
 
@@ -143,6 +150,12 @@ The first comparison should reuse the current workload shape:
 - warm and cold list/open/read measurements
 - delete and write latency percentiles
 
+Additional benchmarks:
+
+- append-log growth and readback
+- truncate/replace config-style writes
+- seek/readback over medium and larger files
+
 The goal is not just peak throughput. The important numbers are open/list latency, tiny-file storage overhead, write tail latency under churn, and cold recovery cost.
 
 ## Stage 8: Optimization and Variants
@@ -153,9 +166,14 @@ Likely optimization lanes:
 
 - tiny-file metadata record
 - compact continuation record
+- reverse tail/root metadata for append-oriented files
+- metadata amendment records for fields such as next extent and total size
+- index transactions with optional CRC records
 - long-filename extension record
 - optional metadata CRC
 - optional file-data CRC
+- metadata slack tuning
+- index wear modeling / index-count tuning
 - larger-MCU metadata cache mode
 - low-RAM scan mode refinement
 - sector compaction / defrag
@@ -170,11 +188,15 @@ The first useful implementation should be deliberately narrow:
 - verification harness and emulated flash first
 - host fake flash only
 - 16-bit slots
-- one-sector groups
+- default 4 KB FASTFFS sectors
+- 8-byte index sector header
+- self-describing host image
 - max probe distance 50
 - 32-byte filenames
 - baseline metadata record only
 - no CRC
+- no index transactions
+- no reverse-tail or amendment records
 - default index cache
 - create/overwrite/delete/list/read
 - basic GC
