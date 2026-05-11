@@ -1,4 +1,5 @@
 build/
+build-sanitize/
 
 # ESP-IDF benchmark project outputs
 benchmarks/*/sdkconfig

@@ -2,39 +2,45 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g
 CPPFLAGS ?= -Iinclude
 CPPFLAGS += -Itests/littlefs
+BUILD_DIR ?= build
+SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test clean
+.PHONY: all test test-sanitize clean
 
-all: build/test_verify_flash
+all: $(BUILD_DIR)/test_verify_flash
 
-build:
-	mkdir -p build
-	mkdir -p build/tests/littlefs/bd
-	mkdir -p build/tests/littlefs
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)/tests/littlefs/bd
+	mkdir -p $(BUILD_DIR)/tests/littlefs
 
-build/src_verify_flash.o: src/verify_flash.c include/fastffs/verify_flash.h \
-		tests/littlefs/bd/lfs_emubd.h | build
+$(BUILD_DIR)/src_verify_flash.o: src/verify_flash.c include/fastffs/verify_flash.h \
+		tests/littlefs/bd/lfs_emubd.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-build/tests/littlefs/bd/lfs_emubd.o: \
+$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o: \
 		tests/littlefs/bd/lfs_emubd.c \
-		tests/littlefs/bd/lfs_emubd.h | build
+		tests/littlefs/bd/lfs_emubd.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-build/tests/littlefs/lfs_util.o: tests/littlefs/lfs_util.c | build
+$(BUILD_DIR)/tests/littlefs/lfs_util.o: tests/littlefs/lfs_util.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-build/test_verify_flash.o: tests/test_verify_flash.c include/fastffs/verify_flash.h | build
+$(BUILD_DIR)/test_verify_flash.o: tests/test_verify_flash.c include/fastffs/verify_flash.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-build/test_verify_flash: build/src_verify_flash.o \
-		build/tests/littlefs/bd/lfs_emubd.o \
-		build/tests/littlefs/lfs_util.o \
-		build/test_verify_flash.o
+$(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
+		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
+		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
+		$(BUILD_DIR)/test_verify_flash.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-test: build/test_verify_flash
-	./build/test_verify_flash
+test: $(BUILD_DIR)/test_verify_flash
+	./$(BUILD_DIR)/test_verify_flash
+
+test-sanitize:
+	$(MAKE) BUILD_DIR=build-sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test
 
 clean:
 	rm -rf build
+	rm -rf build-sanitize

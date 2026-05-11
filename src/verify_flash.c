@@ -45,6 +45,58 @@ static int checked_config(const struct ffsv_flash_config *cfg) {
     return FFSV_OK;
 }
 
+int ffsv_flash_config_preset(struct ffsv_flash_config *cfg,
+        enum ffsv_flash_preset preset, size_t total_size) {
+    if (!cfg || total_size == 0) {
+        return FFSV_ERR_INVALID;
+    }
+
+    *cfg = (struct ffsv_flash_config){
+        .total_size = total_size,
+        .sector_size = 4096,
+        .program_granule = 4,
+        .read_granule = 1,
+        .erased_value = 0xff,
+        .erase_cycles = 100000,
+        .timing = {
+            .read_fixed_ns = 500,
+            .read_per_byte_ns = 20,
+            .program_fixed_ns = 8000,
+            .program_per_byte_ns = 180,
+            .erase_fixed_ns = 45000000,
+            .erase_per_byte_ns = 0,
+            .blank_check_fixed_ns = 500,
+            .blank_check_per_byte_ns = 20,
+        },
+        .max_log_entries = 4096,
+    };
+
+    switch (preset) {
+    case FFSV_PRESET_GENERIC_NOR:
+        break;
+    case FFSV_PRESET_ESP32S3_QIO:
+        cfg->program_granule = 16;
+        cfg->timing.read_fixed_ns = 300;
+        cfg->timing.read_per_byte_ns = 8;
+        cfg->timing.program_fixed_ns = 12000;
+        cfg->timing.program_per_byte_ns = 120;
+        cfg->timing.erase_fixed_ns = 50000000;
+        break;
+    case FFSV_PRESET_SMALL_SPI_NOR:
+        cfg->program_granule = 1;
+        cfg->timing.read_fixed_ns = 1500;
+        cfg->timing.read_per_byte_ns = 80;
+        cfg->timing.program_fixed_ns = 12000;
+        cfg->timing.program_per_byte_ns = 1500;
+        cfg->timing.erase_fixed_ns = 30000000;
+        break;
+    default:
+        return FFSV_ERR_INVALID;
+    }
+
+    return checked_config(cfg);
+}
+
 static int check_range(const struct ffsv_flash *flash,
         size_t offset, size_t size) {
     if (offset > flash->cfg.total_size ||
@@ -310,6 +362,28 @@ static int raw_corrupt(struct ffsv_flash *flash, size_t offset,
     return FFSV_OK;
 }
 
+static int raw_load_image(struct ffsv_flash *flash, const uint8_t *image,
+        size_t size, const uint32_t *wear) {
+    if (size != flash->cfg.total_size) {
+        return FFSV_ERR_INVALID;
+    }
+
+    for (size_t sector = 0; sector < flash->sector_count; sector++) {
+        int err = lfs_emubd_setwear(&flash->lfs_cfg, (lfs_block_t)sector,
+                wear ? (lfs_emubd_wear_t)wear[sector] :
+                    (lfs_emubd_wear_t)lfs_emubd_wear(&flash->lfs_cfg,
+                        (lfs_block_t)sector));
+        if (err) {
+            return map_lfs_error(err);
+        }
+        memcpy(flash->emu.blocks[sector]->data,
+                image + sector * flash->cfg.sector_size,
+                flash->cfg.sector_size);
+    }
+    refresh_image_cache(flash);
+    return FFSV_OK;
+}
+
 int ffsv_flash_create(struct ffsv_flash **out,
         const struct ffsv_flash_config *cfg) {
     if (!out) {
@@ -368,6 +442,16 @@ int ffsv_flash_create(struct ffsv_flash **out,
     refresh_image_cache(flash);
     *out = flash;
     return FFSV_OK;
+}
+
+int ffsv_flash_create_with_preset(struct ffsv_flash **out,
+        enum ffsv_flash_preset preset, size_t total_size) {
+    struct ffsv_flash_config cfg;
+    int err = ffsv_flash_config_preset(&cfg, preset, total_size);
+    if (err) {
+        return err;
+    }
+    return ffsv_flash_create(out, &cfg);
 }
 
 void ffsv_flash_destroy(struct ffsv_flash *flash) {
@@ -651,6 +735,10 @@ int ffsv_flash_drop_staged(struct ffsv_flash *flash,
         return finish_op(flash, rec, FFSV_OP_DROP_STAGED, 0,
                 FFSV_ERR_NO_STAGED_MUTATION, 0);
     }
+    if (inject && flash->failure.phase == FFSV_FAIL_BEFORE) {
+        return finish_op(flash, rec, FFSV_OP_DROP_STAGED,
+                flash->staged.size, injected_status(flash), 0);
+    }
     size_t size = flash->staged.size;
     free(flash->staged.data);
     flash->staged = (struct staged_mutation){0};
@@ -658,22 +746,45 @@ int ffsv_flash_drop_staged(struct ffsv_flash *flash,
     return finish_op(flash, rec, FFSV_OP_DROP_STAGED, size, result, 0);
 }
 
+static int corrupt_with_injection(struct ffsv_flash *flash, size_t offset,
+        const uint8_t *buffer, size_t size, const char *call_site,
+        bool xor_data) {
+    int err = check_range(flash, offset, size);
+    bool inject = false;
+    struct ffsv_op_record *rec = begin_op(flash, FFSV_OP_CORRUPT,
+            offset, size, call_site, &inject);
+    if (err) {
+        return finish_op(flash, rec, FFSV_OP_CORRUPT, size, err, 0);
+    }
+    if (inject && flash->failure.phase == FFSV_FAIL_BEFORE) {
+        return finish_op(flash, rec, FFSV_OP_CORRUPT, size,
+                injected_status(flash), 0);
+    }
+
+    size_t commit = size;
+    int result = FFSV_OK;
+    if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
+        commit = injected_partial(flash, size, 1);
+        result = injected_status(flash);
+    } else if (inject && flash->failure.phase == FFSV_FAIL_AFTER) {
+        result = injected_status(flash);
+    }
+    if (commit > 0) {
+        err = raw_corrupt(flash, offset, buffer, commit, xor_data);
+        if (err) {
+            return finish_op(flash, rec, FFSV_OP_CORRUPT, size, err, 0);
+        }
+    }
+    return finish_op(flash, rec, FFSV_OP_CORRUPT, size, result, commit);
+}
+
 int ffsv_flash_corrupt(struct ffsv_flash *flash, size_t offset,
         const void *buffer, size_t size, const char *call_site) {
     if (!flash || (!buffer && size)) {
         return FFSV_ERR_INVALID;
     }
-    int err = check_range(flash, offset, size);
-    bool inject = false;
-    struct ffsv_op_record *rec = begin_op(flash, FFSV_OP_CORRUPT,
-            offset, size, call_site, &inject);
-    if (!err && !(inject && flash->failure.phase == FFSV_FAIL_BEFORE)) {
-        err = raw_corrupt(flash, offset, buffer, size, false);
-    } else if (inject && flash->failure.phase == FFSV_FAIL_BEFORE) {
-        err = injected_status(flash);
-    }
-    return finish_op(flash, rec, FFSV_OP_CORRUPT, size, err,
-            err == FFSV_OK ? size : 0);
+    return corrupt_with_injection(flash, offset, buffer, size, call_site,
+            false);
 }
 
 int ffsv_flash_xor(struct ffsv_flash *flash, size_t offset,
@@ -681,17 +792,72 @@ int ffsv_flash_xor(struct ffsv_flash *flash, size_t offset,
     if (!flash || (!mask && size)) {
         return FFSV_ERR_INVALID;
     }
-    int err = check_range(flash, offset, size);
-    bool inject = false;
-    struct ffsv_op_record *rec = begin_op(flash, FFSV_OP_CORRUPT,
-            offset, size, call_site, &inject);
-    if (!err && !(inject && flash->failure.phase == FFSV_FAIL_BEFORE)) {
-        err = raw_corrupt(flash, offset, mask, size, true);
-    } else if (inject && flash->failure.phase == FFSV_FAIL_BEFORE) {
-        err = injected_status(flash);
+    return corrupt_with_injection(flash, offset, mask, size, call_site,
+            true);
+}
+
+int ffsv_flash_snapshot_create(const struct ffsv_flash *flash,
+        struct ffsv_flash_snapshot *snapshot) {
+    if (!flash || !snapshot) {
+        return FFSV_ERR_INVALID;
     }
-    return finish_op(flash, rec, FFSV_OP_CORRUPT, size, err,
-            err == FFSV_OK ? size : 0);
+    *snapshot = (struct ffsv_flash_snapshot){0};
+    snapshot->image = malloc(flash->cfg.total_size);
+    snapshot->wear = calloc(flash->sector_count, sizeof(*snapshot->wear));
+    if (!snapshot->image || !snapshot->wear) {
+        ffsv_flash_snapshot_destroy(snapshot);
+        return FFSV_ERR_NOMEM;
+    }
+
+    const uint8_t *image = ffsv_flash_image((struct ffsv_flash *)flash);
+    memcpy(snapshot->image, image, flash->cfg.total_size);
+    for (size_t i = 0; i < flash->sector_count; i++) {
+        snapshot->wear[i] = ffsv_flash_sector_wear(flash, i);
+    }
+    snapshot->cfg = flash->cfg;
+    snapshot->size = flash->cfg.total_size;
+    snapshot->sector_count = flash->sector_count;
+    snapshot->next_sequence = flash->next_sequence;
+    snapshot->time_ns = flash->time_ns;
+    return FFSV_OK;
+}
+
+void ffsv_flash_snapshot_destroy(struct ffsv_flash_snapshot *snapshot) {
+    if (!snapshot) {
+        return;
+    }
+    free(snapshot->image);
+    free(snapshot->wear);
+    *snapshot = (struct ffsv_flash_snapshot){0};
+}
+
+int ffsv_flash_reopen_from_snapshot(struct ffsv_flash **out,
+        const struct ffsv_flash_snapshot *snapshot) {
+    if (!out || !snapshot || !snapshot->image || !snapshot->wear ||
+            checked_config(&snapshot->cfg) != FFSV_OK ||
+            snapshot->size != snapshot->cfg.total_size) {
+        return FFSV_ERR_INVALID;
+    }
+    if (snapshot->sector_count !=
+            snapshot->cfg.total_size / snapshot->cfg.sector_size) {
+        return FFSV_ERR_INVALID;
+    }
+
+    struct ffsv_flash *flash = NULL;
+    int err = ffsv_flash_create(&flash, &snapshot->cfg);
+    if (err) {
+        return err;
+    }
+    err = raw_load_image(flash, snapshot->image, snapshot->size,
+            snapshot->wear);
+    if (err) {
+        ffsv_flash_destroy(flash);
+        return err;
+    }
+    flash->next_sequence = snapshot->next_sequence;
+    flash->time_ns = snapshot->time_ns;
+    *out = flash;
+    return FFSV_OK;
 }
 
 void ffsv_flash_clear_failure(struct ffsv_flash *flash) {
@@ -717,6 +883,28 @@ const uint8_t *ffsv_flash_image(struct ffsv_flash *flash) {
 
 size_t ffsv_flash_size(const struct ffsv_flash *flash) {
     return flash ? flash->cfg.total_size : 0;
+}
+
+uint8_t ffsv_flash_image_byte(struct ffsv_flash *flash, size_t offset) {
+    const uint8_t *image = ffsv_flash_image(flash);
+    if (!image || offset >= flash->cfg.total_size) {
+        return 0;
+    }
+    return image[offset];
+}
+
+bool ffsv_flash_image_span_is_erased(struct ffsv_flash *flash,
+        size_t offset, size_t size) {
+    if (!flash || check_range(flash, offset, size) != FFSV_OK) {
+        return false;
+    }
+    const uint8_t *image = ffsv_flash_image(flash);
+    for (size_t i = 0; i < size; i++) {
+        if (image[offset + i] != flash->cfg.erased_value) {
+            return false;
+        }
+    }
+    return true;
 }
 
 uint64_t ffsv_flash_time_ns(const struct ffsv_flash *flash) {
@@ -798,6 +986,40 @@ int ffsv_flash_dump_image(struct ffsv_flash *flash, const char *path) {
         return FFSV_ERR_IO;
     }
     return FFSV_OK;
+}
+
+int ffsv_flash_load_image(struct ffsv_flash *flash,
+        const void *image, size_t size) {
+    if (!flash || (!image && size)) {
+        return FFSV_ERR_INVALID;
+    }
+    return raw_load_image(flash, image, size, NULL);
+}
+
+int ffsv_flash_load_image_file(struct ffsv_flash *flash, const char *path) {
+    if (!flash || !path) {
+        return FFSV_ERR_INVALID;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return FFSV_ERR_IO;
+    }
+    uint8_t *image = malloc(flash->cfg.total_size);
+    if (!image) {
+        fclose(f);
+        return FFSV_ERR_NOMEM;
+    }
+    size_t n = fread(image, 1, flash->cfg.total_size, f);
+    int extra = fgetc(f);
+    int close_err = fclose(f);
+    int err = FFSV_OK;
+    if (n != flash->cfg.total_size || extra != EOF || close_err != 0) {
+        err = FFSV_ERR_IO;
+    } else {
+        err = ffsv_flash_load_image(flash, image, flash->cfg.total_size);
+    }
+    free(image);
+    return err;
 }
 
 int ffsv_flash_dump_log(const struct ffsv_flash *flash, FILE *out) {

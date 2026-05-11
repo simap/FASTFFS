@@ -36,6 +36,12 @@ enum ffsv_op_type {
     FFSV_OP_COUNT = 8,
 };
 
+enum ffsv_flash_preset {
+    FFSV_PRESET_GENERIC_NOR = 0,
+    FFSV_PRESET_ESP32S3_QIO = 1,
+    FFSV_PRESET_SMALL_SPI_NOR = 2,
+};
+
 enum ffsv_failure_phase {
     FFSV_FAIL_BEFORE = 0,
     FFSV_FAIL_MIDDLE = 1,
@@ -103,13 +109,27 @@ struct ffsv_sector_counts {
 
 struct ffsv_flash;
 
+struct ffsv_flash_snapshot {
+    struct ffsv_flash_config cfg;
+    uint8_t *image;
+    uint32_t *wear;
+    size_t size;
+    size_t sector_count;
+    uint64_t next_sequence;
+    uint64_t time_ns;
+};
+
 #define FFSV_STRINGIFY_(x) #x
 #define FFSV_STRINGIFY(x) FFSV_STRINGIFY_(x)
 #define FFSV_CALLSITE __FILE__ ":" FFSV_STRINGIFY(__LINE__)
 
 int ffsv_flash_create(struct ffsv_flash **out,
         const struct ffsv_flash_config *cfg);
+int ffsv_flash_create_with_preset(struct ffsv_flash **out,
+        enum ffsv_flash_preset preset, size_t total_size);
 void ffsv_flash_destroy(struct ffsv_flash *flash);
+int ffsv_flash_config_preset(struct ffsv_flash_config *cfg,
+        enum ffsv_flash_preset preset, size_t total_size);
 
 int ffsv_flash_read(struct ffsv_flash *flash, size_t offset,
         void *buffer, size_t size, const char *call_site);
@@ -132,12 +152,21 @@ int ffsv_flash_corrupt(struct ffsv_flash *flash, size_t offset,
 int ffsv_flash_xor(struct ffsv_flash *flash, size_t offset,
         const uint8_t *mask, size_t size, const char *call_site);
 
+int ffsv_flash_snapshot_create(const struct ffsv_flash *flash,
+        struct ffsv_flash_snapshot *snapshot);
+void ffsv_flash_snapshot_destroy(struct ffsv_flash_snapshot *snapshot);
+int ffsv_flash_reopen_from_snapshot(struct ffsv_flash **out,
+        const struct ffsv_flash_snapshot *snapshot);
+
 void ffsv_flash_clear_failure(struct ffsv_flash *flash);
 void ffsv_flash_set_failure(struct ffsv_flash *flash,
         const struct ffsv_failure_injection *failure);
 
 const uint8_t *ffsv_flash_image(struct ffsv_flash *flash);
 size_t ffsv_flash_size(const struct ffsv_flash *flash);
+uint8_t ffsv_flash_image_byte(struct ffsv_flash *flash, size_t offset);
+bool ffsv_flash_image_span_is_erased(struct ffsv_flash *flash,
+        size_t offset, size_t size);
 uint64_t ffsv_flash_time_ns(const struct ffsv_flash *flash);
 uint64_t ffsv_flash_next_sequence(const struct ffsv_flash *flash);
 uint32_t ffsv_flash_sector_wear(const struct ffsv_flash *flash,
@@ -154,6 +183,9 @@ uint64_t ffsv_flash_count_matching(const struct ffsv_flash *flash,
         const char *call_site);
 
 int ffsv_flash_dump_image(struct ffsv_flash *flash, const char *path);
+int ffsv_flash_load_image(struct ffsv_flash *flash,
+        const void *image, size_t size);
+int ffsv_flash_load_image_file(struct ffsv_flash *flash, const char *path);
 int ffsv_flash_dump_log(const struct ffsv_flash *flash, FILE *out);
 int ffsv_flash_dump_timeline(const struct ffsv_flash *flash, FILE *out);
 

@@ -11,9 +11,15 @@ Run the host tests with:
 
 ```sh
 make test
+make test-sanitize
 ```
 
 The current harness covers NOR monotonic program semantics, erase/read/blank
 checks, wear accounting from the littlefs emulator, operation logs/counters,
 fake timing, deterministic failure injection, staged writes, direct corruption
-helpers, and image/log dump helpers.
+helpers, crash/reopen snapshots, image dump/load/inspection helpers, cross-sector
+mutations, realistic config presets, log filtering, and before/middle/after
+failure matrices.
+
+See `docs/verify_flash_api.md` for the Stage 1 API contract and the decision to
+use explicit image dump/load instead of the upstream `emubd` live disk mirror.
