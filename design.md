@@ -220,6 +220,7 @@ If power fails before the new sector is marked valid, the old sequence remains a
 Index maintenance can run in the background like erase. Under pressure, a writer can fall back to on-demand rotation if it needs append space before the background task has freed any.
 
 Index transactions are deferred. A likely design is to reserve `head == 1` as a control-record marker, since `head == 0` is a delete tombstone and sector `1` is always inside the index range. Transaction begin/end metadata can be encoded in `slot`; full CRC mode can burn one following 32-bit record for the CRC. That keeps ordinary records unchanged while allowing atomic multi-record updates later.
+This would allow multiple index changes to be atomic, and CRC protected. Similar to LittleFS metadata commit batches.
 
 It also allows for a CRC-backed index update even for single 
 records, though would consume 4 records worth of index space.
@@ -264,6 +265,7 @@ The bitmap is an optimization, not the source of truth:
 - If stale, the allocator may skip usable space temporarily.
 - Successful writes can update the bitmap lazily.
 - Full truth can be reconstructed from the index and sector metadata.
+- A failed data-sector erase/program can be skipped without committing an index record pointing at it. Persistent bad-sector tracking can remain a later backend feature.
 
 The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector densely until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space. The allocator does not try to hunt for sparse holes before filling the current usable sector.
 
@@ -310,6 +312,8 @@ Small files can share a sector. Larger files can spill into continuation sectors
 
 New files prefer a sector with enough free space for the largest supported metadata record plus at least a configured minimum threshold of file data. A reasonable starting threshold is 128-256 bytes. The exact formula is a tunable definition, but runtime allocation should be a simple range check.
 
+Allocator policy should also reserve some metadata slack for later tombstones and amendment records. The exact reserve is TBD. Might be configurable, with reserve = 0 effectively disables MD ammendment records.
+
 ## Sector Metadata
 
 Sector metadata is out-of-line from the global index. It describes file data, extents, continuations, sizes, names, and local placement.
@@ -326,6 +330,8 @@ All metadata records include:
 
 The default file layout is linked single-extent metadata. Each metadata record describes one contiguous data extent. If a file continues into a non-contiguous sector, the current extent metadata links to the next extent's head sector.
 
+The index-visible metadata record may represent either the beginning of a forward chain or the current tail of an append-optimized reverse chain. This does not change index replay or lookup; it only changes how open/read/write/seek enumerate extents.
+
 Default root metadata should include:
 
 - name length and filename, up to the default configured limit of 32 bytes
@@ -339,6 +345,10 @@ Continuation metadata can be smaller:
 - no total file size unless needed for validation
 
 Continuations do not need the full root metadata fields.
+
+Later metadata variants can add reverse tail records for cheap append. A tail/root record would carry the filename, total size, this extent, and links needed to find the previous and/or first extent. Runtime can read both forward and reverse-chain files; writing reverse-chain records can be a configuration choice.
+
+Amendment records are also a later metadata variant. They are small slot-scoped records that update logical fields such as `next_extent_sector` or `total_size`; newest valid non-tombstoned amendment for a slot and field wins. Amendments do not change identity fields such as slot, filename, or data offset/length, and they do not mutate another record's lifecycle flags.
 
 Continuation metadata still carries the resolved slot so GC can check liveness against the global index. A continuation from an overwritten file must not look live merely because the same slot was reused by a newer root.
 
