@@ -129,6 +129,8 @@ The `head` points to a FASTFFS sector, not an arbitrary byte, page, or backend e
 
 Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is considered valid only if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
 
+Version 1 stores index record fields as little-endian integers. `head == 0` is a delete tombstone. Nonzero heads must point outside the index sector range and below the derived sector count. `slot == 0xffff` remains legal unless the whole record is erased.
+
 For an 8 MB flash with 256-byte pages:
 
 - 32K pages maximum.
@@ -174,12 +176,12 @@ struct fffs_index_header_disk {
 };
 ```
 
-The index count is 2-15. Version 1 uses 16-bit slots, 16-bit sector heads, and 4-byte index records.
+The index count is 2-15. Version 1 uses 16-bit slots, 16-bit sector heads, and 4-byte index records. The encoded sector size applies to index sectors and data sectors. All valid index sectors in one image must agree on version, index count, and sector shift.
 
 The `flags` byte uses cleared bits for state:
 
 - clear `0x80`: header is committed/valid
-- clear `0x40`: index sector is obsolete/tombstoned
+- clear `0x40`: index sector is tombstoned
 - clear `0x20`: metadata CRC is required
 
 Unknown cleared bits cause mount failure. Unknown bits still set are reserved.
@@ -217,15 +219,21 @@ If power fails before the new sector is marked valid, the old sequence remains a
 
 Index maintenance can run in the background like erase. Under pressure, a writer can fall back to on-demand rotation if it needs append space before the background task has freed any.
 
+Index transactions are deferred. A likely design is to reserve `head == 1` as a control-record marker, since `head == 0` is a delete tombstone and sector `1` is always inside the index range. Transaction begin/end metadata can be encoded in `slot`; full CRC mode can burn one following 32-bit record for the CRC. That keeps ordinary records unchanged while allowing atomic multi-record updates later.
+
+It also allows for a CRC-backed index update even for single 
+records, though would consume 4 records worth of index space.
+
 ## Startup
 
 On startup:
 
-1. Scan index sector headers and select valid, non-obsolete sectors with compatible magic, version, and sector size.
-2. Replay the index into RAM.
-3. Later entries replace earlier entries.
-4. Delete records remove earlier live entries.
-5. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
+1. If not given in mount data, discover the sector size by scanning for valid index headers at plausible `256 << sector_shift` boundaries, so mount can recover even when sector `0` is erased.
+2. Select valid, non-tombstoned index sectors whose headers agree on magic, version, index count, and sector shift.
+3. Replay the index into RAM.
+4. Later entries replace earlier entries.
+5. Delete records remove earlier live entries.
+6. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
 
 Cold start cost is bounded by reading the compact index plus any needed file-header probes.
 
@@ -306,33 +314,35 @@ New files prefer a sector with enough free space for the largest supported metad
 
 Sector metadata is out-of-line from the global index. It describes file data, extents, continuations, sizes, names, and local placement.
 
-Metadata has multiple record variants with different storage costs. The default implementation can start with a "does everything" record that supports file heads, extents, continuations, tombstones, size, and the configured filename limit. Later variants can specialize for long filenames, tiny files with short inline names, compact continuation records, or lightweight key/value records. Some variants may be compile-time configuration; others can be selected at runtime based on the file shape.
+Metadata has multiple fixed-size record variants with different storage costs. Each record type has a known size. The type byte is placed at the physical end of the record so a reverse scanner can read the type first, derive the size, then read and validate the full record. The default implementation can start with a "does everything" record that supports file heads, extents, continuations, tombstones, size, and the configured filename limit. Later variants can specialize for long filenames, tiny files with short inline names, compact continuation records, or lightweight key/value records. Some variants may be compile-time configuration; others can be selected at runtime based on the file shape.
+
+All metadata records include:
+
+- type
+- flags with valid/tombstone state
+- resolved slot
+- sector-local data offset/length for this extent
+- optional CRC when required by the index header
 
 The default file layout is linked single-extent metadata. Each metadata record describes one contiguous data extent. If a file continues into a non-contiguous sector, the current extent metadata links to the next extent's head sector.
 
 Default root metadata should include:
 
-- resolved slot
-- filename, up to the default configured limit of 32 bytes
-- sector-local data offset/length for this extent
+- name length and filename, up to the default configured limit of 32 bytes
 - total file size for fast `stat`
 - next extent head sector, if any
-- local tombstone bit/state
 
 Continuation metadata can be smaller:
 
-- resolved slot
-- sector-local data offset/length for this extent
 - next extent head sector, if any
-- local tombstone bit/state
 - no filename
 - no total file size unless needed for validation
 
-Metadata records can be typed variable-length records, or a few compact fixed variants. Continuations do not need the full root metadata fields.
+Continuations do not need the full root metadata fields.
 
 Continuation metadata still carries the resolved slot so GC can check liveness against the global index. A continuation from an overwritten file must not look live merely because the same slot was reused by a newer root.
 
-Additional owner identity, such as root head or generation, is not part of the baseline unless GC needs it to avoid re-following from the index. The first implementation can validate continuation liveness by resolved slot plus the current index/root chain.
+Additional owner identity, such as root head, generation, or extent ordinal, is not part of the baseline. Liveness is validated by starting at the current index entry for the slot and walking the current root extent chain. A continuation with the same slot but not reachable from that chain is dead.
 
 Metadata CRC support is optional, but if enabled it is a format-level policy advertised in index sector headers. A CRC-required image must not accept metadata records without valid CRC coverage as non-CRC records. CRC is not part of the 4-byte index record because that would destroy the compact index density.
 
@@ -346,7 +356,7 @@ Sector-local tombstones are physical hints:
 - allow metadata updates by writing a new metadata entry and tombstoning the old one
 - are not required for namespace correctness
 
-Tombstone state must be encoded as a monotonic NOR transition, e.g. valid -> obsolete by clearing one bit in the metadata record.
+Tombstone state must be encoded as a monotonic NOR transition by clearing one bit in the metadata record. Tombstoned is persisted state; obsolete means a record has been superseded and is derived during replay or GC.
 
 ## Reads
 
