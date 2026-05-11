@@ -20,12 +20,15 @@ Design notes for a small NOR-flash filesystem optimized for named file replaceme
 
 - NOR erased state is all `1` bits, typically `0xff`.
 - Programming only flips bits one direction, typically `1 -> 0`.
-- Erase flips a whole sector back to erased state.
+- Erase flips a backend erase unit back to erased state.
 - State transitions must be monotonic: committed/tombstoned values must be reachable by clearing bits only.
 - Blank checks are cheap enough to use before allocation.
 - Background erase is expected for sectors belonging only to dead/orphaned data.
 - Flash wear is on erase cycles, not programming/overwrite cycles.
 - Expected NOR endurance is around 100K erase cycles, so v1 should prefer simple rotating allocation over moving otherwise-stable data solely for static wear leveling.
+- Flash will have an erasable unit that is some power of 2.
+ 
+FASTFFS uses "sector" for its logical allocation, index, scan, and reclaim unit. This must be >= to the minimum backend flash erase unit. The sector size is encoded as `256 << sector_shift`; the default is 4 KB (`sector_shift = 4`).
 
 Measured / datasheet timing notes for the target NOR flash:
 
@@ -62,7 +65,7 @@ Measured timing will vary by chip, driver, OS, and test harness. One ESP32-S3 bu
 
 The global index is an append-only namespace journal. It is the authoritative source for file existence.
 
-Conceptually, the namespace is a hash table using open addressing with bounded linear probing. Index records store the resolved hash slot and point to the sector group where the file root metadata resides.
+Conceptually, the namespace is a hash table using open addressing with bounded linear probing. Index records store the resolved hash slot and point to the sector where the file root metadata resides.
 
 The probe rule is:
 
@@ -92,7 +95,7 @@ abcd,3
 
 Meaning:
 
-- `abcd,1`: create/update file at slot `abcd`, head sector group `1`
+- `abcd,1`: create/update file at slot `abcd`, head sector `1`
 - `abcd,2`: newer version
 - `abcd,0`: delete tombstone
 - `abcd,3`: recreated/newer version
@@ -116,15 +119,15 @@ Compact default record:
 ```c
 struct index_record {
     uint16_t slot;  // collision-resolved namespace slot
-    uint16_t head;  // 0 = delete, otherwise sector group containing file root metadata
+    uint16_t head;  // 0 = delete, otherwise sector containing file root metadata
 };
 ```
 
 The `slot` is not merely a raw hash. It is a resolved slot chosen by bounded probing. Full filename verification happens in out-of-line file metadata.
 
-The `head` points to a sector group, not an arbitrary byte or page. A sector group is a configurable multiple of erase sectors; the default group size is one erase sector. File root metadata is found by scanning the metadata records at the end of the head group. This allows one head group to contain multiple small files, one large file beginning, or a mix of both.
+The `head` points to a FASTFFS sector, not an arbitrary byte, page, or backend erase unit. File root metadata is found by scanning the metadata records at the end of the head sector. This allows one head sector to contain multiple small files, one large file beginning, or a mix of both.
 
-Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is considered valid only if its `head` points to a valid sector group containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
+Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is considered valid only if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
 
 For an 8 MB flash with 256-byte pages:
 
@@ -152,18 +155,34 @@ The last row is the physical maximum number of one-page files on an 8 MB flash b
 
 The index can be treated as a circular buffer of index sectors. Compaction does not need to rebuild the whole namespace at once; it only needs to compact enough old index data to free append space.
 
-With 4-byte records in a 4 KB sector:
+With 4-byte records and the 8-byte v1 header in a 4 KB sector:
 
 - a raw sector holds 1024 records
-- reserving the first record/header leaves 1023 file records per sector
-- `n + 1` index sectors can store up to `n * 1023` compacted live entries while keeping one erased sector available for safe compaction
+- reserving the header leaves 1022 file records per sector
+- `n + 1` index sectors can store up to `n * 1022` compacted live entries while keeping one erased sector available for safe compaction
 - at least two index sectors are needed, because erase happens a sector at a time
 
-Each index sector reserves a small header area, such as the first 4 bytes, for a combination of:
+Version 1 reserves an 8-byte header at the start of each index sector:
 
-- magic/valid marker
-- tombstone/obsolete marker
-- serial/generation bits
+```c
+struct fffs_index_header_disk {
+    uint8_t magic[4];      // "FFFS"
+    uint8_t version;       // 1
+    uint8_t index_meta;    // high nibble: index sector count, low nibble: serial
+    uint8_t sector_shift;  // sector_size = 256 << sector_shift
+    uint8_t flags;         // lifecycle and format policy bits
+};
+```
+
+The index count is 2-15. Version 1 uses 16-bit slots, 16-bit sector heads, and 4-byte index records.
+
+The `flags` byte uses cleared bits for state:
+
+- clear `0x80`: header is committed/valid
+- clear `0x40`: index sector is obsolete/tombstoned
+- clear `0x20`: metadata CRC is required
+
+Unknown cleared bits cause mount failure. Unknown bits still set are reserved.
 
 Serial values only need to distinguish the active sequence of index sectors. The baseline uses a 4-bit serial, enough for up to 15 index sectors before ambiguity. Wrapping is fine when the sequence is known, e.g. `14 -> 15 -> 0 -> 1`. With 4 KB index sectors and 4-byte records, 15 sectors is about 15K index records.
 
@@ -202,10 +221,11 @@ Index maintenance can run in the background like erase. Under pressure, a writer
 
 On startup:
 
-1. Replay the index into RAM.
-2. Later entries replace earlier entries.
-3. Delete records remove earlier live entries.
-4. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
+1. Scan index sector headers and select valid, non-obsolete sectors with compatible magic, version, and sector size.
+2. Replay the index into RAM.
+3. Later entries replace earlier entries.
+4. Delete records remove earlier live entries.
+5. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
 
 Cold start cost is bounded by reading the compact index plus any needed file-header probes.
 
@@ -227,25 +247,25 @@ An optional background blank check can rebuild/update in-memory free/used state 
 
 ## Free/Used Tracking
 
-Free/used state is tracked at sector-group level with a bitmap. A sector group is a configurable multiple of erase sectors, defaulting to one sector.
+Free/used state is tracked at FASTFFS sector level with a bitmap.
 
 The bitmap is an optimization, not the source of truth:
 
 - It can be stale after a crash.
-- Allocation checks candidate groups for blank state before writing.
+- Allocation checks candidate sectors for blank state before writing.
 - If stale, the allocator may skip usable space temporarily.
 - Successful writes can update the bitmap lazily.
 - Full truth can be reconstructed from the index and sector metadata.
 
-The allocator also keeps an `alloc_cursor`, the next sector group to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector group densely until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space. The allocator does not try to hunt for sparse holes before filling the current usable group.
+The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector densely until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space. The allocator does not try to hunt for sparse holes before filling the current usable sector.
 
-GC keeps a separate `gc_cursor`, the next sector group to inspect for reclaim. Keeping these cursors separate lets foreground allocation, background reclaim, and wear distribution progress independently.
+GC keeps a separate `gc_cursor`, the next sector to inspect for reclaim. Keeping these cursors separate lets foreground allocation, background reclaim, and wear distribution progress independently.
 
 ## Commit Order
 
 File create/overwrite:
 
-1. Allocate candidate sector groups.
+1. Allocate candidate sectors.
 2. Blank-check before programming.
 3. Write file data.
 4. Write sector-local metadata.
@@ -278,9 +298,9 @@ data________________md1
 dataDDDDAAAATTTAAA_MD2md1
 ```
 
-Small files can share a sector group. Larger files can spill into continuation groups. A continuation tail may still leave room for other file starts or small files.
+Small files can share a sector. Larger files can spill into continuation sectors. A continuation tail may still leave room for other file starts or small files.
 
-New files prefer a sector group with enough free space for the largest supported metadata record plus at least a configured minimum threshold of file data. A reasonable starting threshold is 128-256 bytes. The exact formula is a tunable definition, but runtime allocation should be a simple range check.
+New files prefer a sector with enough free space for the largest supported metadata record plus at least a configured minimum threshold of file data. A reasonable starting threshold is 128-256 bytes. The exact formula is a tunable definition, but runtime allocation should be a simple range check.
 
 ## Sector Metadata
 
@@ -288,7 +308,7 @@ Sector metadata is out-of-line from the global index. It describes file data, ex
 
 Metadata has multiple record variants with different storage costs. The default implementation can start with a "does everything" record that supports file heads, extents, continuations, tombstones, size, and the configured filename limit. Later variants can specialize for long filenames, tiny files with short inline names, compact continuation records, or lightweight key/value records. Some variants may be compile-time configuration; others can be selected at runtime based on the file shape.
 
-The default file layout is linked single-extent metadata. Each metadata record describes one contiguous data extent. If a file continues into a non-contiguous sector group, the current extent metadata links to the next extent's head group.
+The default file layout is linked single-extent metadata. Each metadata record describes one contiguous data extent. If a file continues into a non-contiguous sector, the current extent metadata links to the next extent's head sector.
 
 Default root metadata should include:
 
@@ -296,14 +316,14 @@ Default root metadata should include:
 - filename, up to the default configured limit of 32 bytes
 - sector-local data offset/length for this extent
 - total file size for fast `stat`
-- next extent head group, if any
+- next extent head sector, if any
 - local tombstone bit/state
 
 Continuation metadata can be smaller:
 
 - resolved slot
 - sector-local data offset/length for this extent
-- next extent head group, if any
+- next extent head sector, if any
 - local tombstone bit/state
 - no filename
 - no total file size unless needed for validation
@@ -314,7 +334,7 @@ Continuation metadata still carries the resolved slot so GC can check liveness a
 
 Additional owner identity, such as root head or generation, is not part of the baseline unless GC needs it to avoid re-following from the index. The first implementation can validate continuation liveness by resolved slot plus the current index/root chain.
 
-CRC/checksum support is optional and should be evaluated at the metadata or file-data level. It is not part of the 4-byte index record, because that would destroy the compact index density.
+Metadata CRC support is optional, but if enabled it is a format-level policy advertised in index sector headers. A CRC-required image must not accept metadata records without valid CRC coverage as non-CRC records. CRC is not part of the 4-byte index record because that would destroy the compact index density.
 
 ## Local Tombstones
 
@@ -360,10 +380,10 @@ Erase cost is moved to a background task where possible.
 
 The streaming write path does not need to know the final file length up front:
 
-1. Open for write and find a sector group with enough free space for metadata plus a minimum amount of data.
-2. Blank-check and write data into the group's data area.
-3. If the next contiguous group is usable, continue the same extent and defer writing the current extent metadata.
-4. If allocation must jump to a non-contiguous group, write the current extent metadata, pointing at the new extent head group.
+1. Open for write and find a sector with enough free space for metadata plus a minimum amount of data.
+2. Blank-check and write data into the sector's data area.
+3. If the next contiguous sector is usable, continue the same extent and defer writing the current extent metadata.
+4. If allocation must jump to a non-contiguous sector, write the current extent metadata, pointing at the new extent head sector.
 5. Repeat until close.
 6. On close, write the final extent metadata with no next pointer.
 7. Append the global index record last.
@@ -372,7 +392,7 @@ Metadata may be physically valid before the file is committed. Namespace visibil
 
 ## Expected Performance
 
-These estimates assume candidate sector groups are already erased or can be blank-checked before use.
+These estimates assume candidate sectors are already erased or can be blank-checked before use.
 
 | Operation | Estimate |
 |---|---:|
@@ -427,9 +447,9 @@ Several parts of the design can be optional or compile-time/runtime configuratio
 | no preload / lazy metadata reads | Lowest startup work; cold operations may probe flash |
 | background blank-check scan on boot | Refreshes in-memory free/used state before writes |
 | skip boot scan and blank-check on allocation | Faster boot; bitmap may be stale until writes complete |
-| 16/24/32-bit slot width | Trade index density against large-namespace collision behavior |
-| sector group size | Allocation and GC granularity; default is one erase sector |
-| minimum first-write threshold | Avoids starting files in groups with too little data space |
+| sector size | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |
+| backend erase unit | Runtime backend constraint; must divide FASTFFS sector size |
+| minimum first-write threshold | Avoids starting files in sectors with too little data space |
 | packed small files | Baseline density feature for tiny files |
 | sector-local tombstones | Baseline physical hint for GC/defrag; not required for namespace correctness |
 | linked single-extent metadata | Baseline continuation model |
@@ -446,15 +466,15 @@ Index compaction:
 
 Sector reclaim:
 
-- background task advances `gc_cursor` through sector groups
+- background task advances `gc_cursor` through sectors
 - scans sector-local metadata records
 - checks each valid-looking, non-tombstoned metadata record against the current index by resolved slot
 - programs local tombstone bits for records that are deleted, overwritten, or orphaned
-- erases sector groups that contain only deleted/orphaned/tombstoned data
-- advances allocation state so erased groups can be found by the allocator
+- erases sectors that contain only deleted/orphaned/tombstoned data
+- advances allocation state so erased sectors can be found by the allocator
 
-Sector-local compaction is TBD. It can behave like defrag: copy whole live files elsewhere, append normal overwrite records to the index, and allow the old sector group to become reclaimable through ordinary GC. Because file size is known during compaction, it can try to choose contiguous sector groups and reduce the number of extents. Flash does not materially care about sequential access, but contiguous placement benefits the linked-extent representation slightly by reducing metadata and seek traversal.
+Sector-local compaction is TBD. It can behave like defrag: copy whole live files elsewhere, append normal overwrite records to the index, and allow the old sector to become reclaimable through ordinary GC. Because file size is known during compaction, it can try to choose contiguous sectors and reduce the number of extents. Flash does not materially care about sequential access, but contiguous placement benefits the linked-extent representation slightly by reducing metadata and seek traversal.
 
-Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sector groups before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count groups or a bounded low-count candidate near the cursor.
+Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
 
 Local tombstones are hints for reclaim and compaction; the global index remains the authoritative namespace state.
