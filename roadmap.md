@@ -1,5 +1,8 @@
 # FASTFFS Roadmap
 
+The design document is authoritative. If this roadmap and `design.md`
+disagree, `design.md` wins.
+
 ## Roadmap Shape
 
 The initial work should move in layers:
@@ -51,7 +54,9 @@ The host image should be self-describing through index headers and image size. M
 
 The implementation should include a fake NOR flash backend with the same monotonic write and erase behavior as real flash. That lets the format evolve quickly without device flashing overhead.
 
-The embedded-facing core API should be shaped around caller-provided static buffers, even though host tools and tests can use dynamic allocation.
+The embedded-facing core API must not allocate heap memory. When the core needs
+persistent caches or scratch storage, the application provides those buffers;
+host tools and tests can use dynamic allocation freely.
 
 The expected output is a small host library and image file that can format, mount, create files, list files, read files, overwrite files, delete files, and remount successfully.
 
@@ -71,7 +76,10 @@ Before adding much complexity, build tools that make the image explain itself.
 Needed tools:
 
 - image dump: show index headers, index sectors, FASTFFS sectors, metadata records, tombstones, extents, and live namespace
-- fsck/check: replay the index, validate root metadata, validate extent chains, identify orphaned data, and report corruption
+- fsck/check: replay the index first, then validate current live namespace
+  entries against root metadata and extent chains; classify sector metadata as
+  live, obsolete/orphaned, tombstoned, erased, or corrupt, where obsolete and
+  orphaned metadata are expected COW states rather than corruption
 - workload generator: deterministic tiny/medium/large create, overwrite, delete, list, and read streams
 
 These tools are part of the filesystem, not nice-to-have extras. FASTFFS depends on replay, orphan tolerance, and local metadata scanning; without inspection tools, debugging crash and GC behavior will be too slow.
@@ -107,9 +115,10 @@ Fault tests should interrupt both between operations and inside operations:
 
 The expected output is confidence that any interrupted operation remounts into either the old committed state or the new committed state, with only reclaimable orphaned data left behind.
 
-## Stage 5: Allocator and GC Maturity
+## Stage 5: Allocator, Sector Metadata, and GC Maturity
 
-After basic correctness, the allocator and GC need to behave well under churn.
+After basic correctness, the allocator, sector-local metadata, and GC need to
+behave well under churn.
 
 Allocator direction:
 
@@ -118,15 +127,25 @@ Allocator direction:
 - contiguous extension when adjacent sectors are available
 - simple range check for "largest metadata record plus minimum useful data"
 - reserve some metadata slack for tombstones and future amendment records
+- reuse orphaned sectors that have valid footer/metadata state and enough erased
+  free space for another file record
 - blank-check before programming
+
+Sector metadata direction:
+
+- packed small files with multiple metadata records per sector
+- linked continuation extents for files larger than one contiguous allocation
+- reverse metadata scanning from the sector tail/footer
+- local tombstone state encoded as a monotonic bit transition
 
 GC direction:
 
 - scan from `gc_cursor`
-- read valid-looking metadata
-- check liveness through the current index and root chain
-- program local tombstones for dead records
-- erase sectors that are entirely dead/orphaned/tombstoned
+- classify sector-local metadata records against the replayed current index and
+  reachable extent chains
+- program local tombstone bits for obsolete, orphaned, and deleted records
+- erase sectors only after all metadata records in the sector are tombstoned,
+  invalid only in erased space, or otherwise reclaimable by policy
 
 This stage should focus on sustained create/overwrite/delete workloads and low-space behavior. Sector compaction can remain future work unless churn shows that plain GC is not enough.
 

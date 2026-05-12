@@ -127,7 +127,7 @@ The `slot` is not merely a raw hash. It is a resolved slot chosen by bounded pro
 
 The `head` points to a FASTFFS sector, not an arbitrary byte, page, or backend erase unit. File root metadata is found by scanning the metadata records at the end of the head sector. This allows one head sector to contain multiple small files, one large file beginning, or a mix of both.
 
-Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is considered valid only if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
+Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is presumed valid. File lookup/exists are a higher standard and would only show an existing file if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
 
 Version 1 stores index record fields as little-endian integers. `head == 0` is a delete tombstone. Nonzero heads must point outside the index sector range and below the derived sector count. `slot == 0xffff` remains legal unless the whole record is erased.
 
