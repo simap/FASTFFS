@@ -31,7 +31,10 @@
 #define FFFS_MD_TYPE_BASELINE 0x01
 #define FFFS_SECTOR_FOOTER_SIZE 12
 #define FFFS_SECTOR_MAGIC "FFSD"
+#define FFFS_SECTOR_FLAG_VALID 0x80
+#define FFFS_SECTOR_FLAG_TOMBSTONED 0x40
 #define FFFS_SECTOR_FLAGS_VALID 0x7f
+#define FFFS_SECTOR_FLAGS_TOMBSTONED 0x3f
 #define FFFS_SECTOR_TYPE_MIXED 0x01
 
 int fffs_map_backend_status(int status);
@@ -41,6 +44,8 @@ uint16_t fffs_hash16(const char *name);
 int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size);
 int fffs_flash_program(struct fffs *fs, size_t offset,
+        const void *buffer, size_t size);
+int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
 
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
@@ -60,17 +65,23 @@ int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
 int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t *serial);
-int fffs_write_sector_footer(struct fffs_file *file);
+int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
+        uint32_t serial);
+size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector);
+size_t fffs_sector_footer_offset(struct fffs *fs, uint16_t sector);
 int fffs_read_metadata(struct fffs *fs, uint16_t sector,
         struct fffs_stat *st, uint16_t *slot, uint16_t *data_off,
-        uint16_t *data_len);
-int fffs_write_root_metadata(struct fffs_file *file);
+        uint16_t *data_len, uint16_t *next);
+int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint32_t serial, uint16_t data_len, uint32_t total_size,
+        uint16_t next, bool commit_index);
 
-int fffs_index_find(struct fffs *fs, uint16_t slot, uint16_t *head);
+int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
+        uint16_t *head, bool *end);
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head);
 int fffs_index_remove(struct fffs *fs, uint16_t slot);
 int fffs_index_set(struct fffs *fs, uint16_t slot, uint16_t head);
-bool fffs_index_head_count_valid(size_t count);
+bool fffs_index_hash_table_size_valid(size_t count);
 
 size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
 int fffs_find_free_sector(struct fffs *fs, uint16_t *sector);

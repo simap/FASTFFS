@@ -37,9 +37,8 @@ enum ffsv_op_type {
 };
 
 enum ffsv_flash_preset {
-    FFSV_PRESET_GENERIC_NOR = 0,
-    FFSV_PRESET_ESP32S3_QIO = 1,
-    FFSV_PRESET_SMALL_SPI_NOR = 2,
+    FFSV_PRESET_TARGET_NOR_NOTES = 0,
+    FFSV_PRESET_ESP32S3_MEASURED = 1,
 };
 
 enum ffsv_failure_phase {
@@ -163,6 +162,8 @@ void ffsv_flash_set_failure(struct ffsv_flash *flash,
         const struct ffsv_failure_injection *failure);
 
 const uint8_t *ffsv_flash_image(struct ffsv_flash *flash);
+const struct ffsv_flash_config *ffsv_flash_config(
+        const struct ffsv_flash *flash);
 size_t ffsv_flash_size(const struct ffsv_flash *flash);
 uint8_t ffsv_flash_image_byte(struct ffsv_flash *flash, size_t offset);
 bool ffsv_flash_image_span_is_erased(struct ffsv_flash *flash,

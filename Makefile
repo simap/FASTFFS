@@ -5,9 +5,10 @@ CPPFLAGS += -Itests/littlefs
 BUILD_DIR ?= build
 SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test test-sanitize test-full-index clean
+.PHONY: all test test-timing test-workload test-sanitize test-full-index clean
 
-all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs
+all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
+	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -34,6 +35,11 @@ $(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c src/fffs_internal.h \
 		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/src_fffs_inspect.o: src/fffs_inspect.c \
+		src/fffs_internal.h include/fastffs/fastffs_inspect.h \
+		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/src_fastffs_host.o: src/fastffs_host.c \
 		include/fastffs/fastffs_host.h include/fastffs/fastffs.h \
 		include/fastffs/verify_flash.h | $(BUILD_DIR)
@@ -51,7 +57,18 @@ $(BUILD_DIR)/test_verify_flash.o: tests/test_verify_flash.c include/fastffs/veri
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/test_fastffs.o: tests/test_fastffs.c include/fastffs/fastffs.h \
-		include/fastffs/fastffs_host.h include/fastffs/verify_flash.h | $(BUILD_DIR)
+		include/fastffs/fastffs_host.h include/fastffs/fastffs_inspect.h \
+		include/fastffs/verify_flash.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/fffs_tool.o: tools/fffs_tool.c include/fastffs/fastffs.h \
+		include/fastffs/fastffs_host.h include/fastffs/fastffs_inspect.h \
+		include/fastffs/verify_flash.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/fffs_time_probe.o: tools/fffs_time_probe.c \
+		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
+		include/fastffs/verify_flash.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
@@ -64,6 +81,7 @@ $(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_io.o \
 		$(BUILD_DIR)/src_fffs_ram_index.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
 		$(BUILD_DIR)/src_verify_flash.o \
 		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
@@ -71,9 +89,46 @@ $(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/test_fastffs.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs
+$(BUILD_DIR)/fffs_tool: $(BUILD_DIR)/src_fastffs.o \
+		$(BUILD_DIR)/src_fffs_io.o \
+		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_inspect.o \
+		$(BUILD_DIR)/src_fastffs_host.o \
+		$(BUILD_DIR)/src_verify_flash.o \
+		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
+		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
+		$(BUILD_DIR)/fffs_tool.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fffs_time_probe: $(BUILD_DIR)/src_fastffs.o \
+		$(BUILD_DIR)/src_fffs_io.o \
+		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_inspect.o \
+		$(BUILD_DIR)/src_fastffs_host.o \
+		$(BUILD_DIR)/src_verify_flash.o \
+		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
+		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
+		$(BUILD_DIR)/fffs_time_probe.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
+		$(BUILD_DIR)/fffs_tool
 	./$(BUILD_DIR)/test_verify_flash
 	./$(BUILD_DIR)/test_fastffs
+	./$(BUILD_DIR)/fffs_tool workload $(BUILD_DIR)/workload.img 524288 4
+	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/workload.img
+	./$(BUILD_DIR)/fffs_tool create 4096 32 $(BUILD_DIR)/load.img
+	./$(BUILD_DIR)/fffs_tool load tests/fixtures/load_root $(BUILD_DIR)/load.img
+	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/load.img
+
+test-timing: $(BUILD_DIR)/fffs_time_probe
+	./$(BUILD_DIR)/fffs_time_probe
+
+test-workload: $(BUILD_DIR)/fffs_tool
+	./$(BUILD_DIR)/fffs_tool workload $(BUILD_DIR)/workload-long.img 4194304 16
+	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/workload-long.img
 
 test-sanitize:
 	$(MAKE) BUILD_DIR=build-sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test

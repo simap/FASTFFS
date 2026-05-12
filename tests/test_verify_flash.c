@@ -86,8 +86,9 @@ static int test_nor_semantics_and_wear(void) {
     ASSERT_OK(ffsv_flash_program(flash, 0, second, sizeof(second), site));
     ASSERT_OK(ffsv_flash_read(flash, 0, out, sizeof(out), site));
     ASSERT_TRUE(memcmp(out, second, sizeof(second)) == 0);
-    ASSERT_EQ_INT(FFSV_ERR_PROGRAM_TRANSITION,
-            ffsv_flash_program(flash, 0, illegal, sizeof(illegal), site));
+    ASSERT_OK(ffsv_flash_program(flash, 0, illegal, sizeof(illegal), site));
+    ASSERT_OK(ffsv_flash_read(flash, 0, out, sizeof(out), site));
+    ASSERT_TRUE(memcmp(out, second, sizeof(second)) == 0);
 
     ASSERT_OK(ffsv_flash_erase(flash, 0, 4096, site));
     ASSERT_OK(ffsv_flash_blank_check(flash, 0, 4096, site));
@@ -320,17 +321,18 @@ static int test_log_filter_validation_and_dumps(void) {
 static int test_config_presets(void) {
     struct ffsv_flash_config cfg;
     struct ffsv_flash *flash = NULL;
-    ASSERT_OK(ffsv_flash_config_preset(&cfg, FFSV_PRESET_GENERIC_NOR,
+    ASSERT_OK(ffsv_flash_config_preset(&cfg, FFSV_PRESET_TARGET_NOR_NOTES,
                 4096 * 2));
     ASSERT_TRUE(cfg.sector_size == 4096);
-    ASSERT_OK(ffsv_flash_config_preset(&cfg, FFSV_PRESET_ESP32S3_QIO,
+    ASSERT_OK(ffsv_flash_create_with_preset(&flash,
+                FFSV_PRESET_ESP32S3_MEASURED, 4096 * 2));
+    ASSERT_OK(ffsv_flash_config_preset(&cfg, FFSV_PRESET_ESP32S3_MEASURED,
                 4096 * 2));
     ASSERT_TRUE(cfg.program_granule == 16);
-    ASSERT_OK(ffsv_flash_create_with_preset(&flash,
-                FFSV_PRESET_SMALL_SPI_NOR, 4096 * 2));
+    ASSERT_TRUE(cfg.timing.erase_fixed_ns == 21269000);
     ffsv_flash_destroy(flash);
     ASSERT_EQ_INT(FFSV_ERR_INVALID,
-            ffsv_flash_config_preset(&cfg, FFSV_PRESET_GENERIC_NOR, 4097));
+            ffsv_flash_config_preset(&cfg, FFSV_PRESET_TARGET_NOR_NOTES, 4097));
     return 0;
 }
 

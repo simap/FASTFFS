@@ -18,11 +18,15 @@ int fffs_host_backend_from_verify_flash(struct fffs_backend *backend,
     if (!backend || !flash) {
         return FFFS_ERR_INVALID;
     }
+    const struct ffsv_flash_config *cfg = ffsv_flash_config(flash);
+    if (!cfg) {
+        return FFFS_ERR_INVALID;
+    }
     *backend = (struct fffs_backend){
         .ctx = flash,
         .size = ffsv_flash_size(flash),
-        .read_granule = 1,
-        .program_granule = 4,
+        .read_granule = cfg->read_granule,
+        .program_granule = cfg->program_granule,
         .read = host_read,
         .program = host_program,
         .erase = host_erase,

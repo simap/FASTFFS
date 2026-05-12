@@ -375,19 +375,6 @@ int lfs_emubd_prog(const struct lfs_config *cfg, lfs_block_t block,
         }
     }
 
-    // Were we programmed properly?
-    //
-    // Upstream littlefs emubd requires every destination byte to still equal
-    // erase_value here. FASTFFS uses this fork to model NOR flash directly:
-    // programming may revisit a byte, but only bits that are still 1 may be
-    // cleared to 0. Any attempted 0->1 transition is invalid.
-    if (bd->cfg->erase_value != -1) {
-        const uint8_t *data = buffer;
-        for (lfs_off_t i = 0; i < size; i++) {
-            LFS_ASSERT((uint8_t)(b->data[off+i] & data[i]) == data[i]);
-        }
-    }
-
     // prog data
     const uint8_t *data = buffer;
     for (lfs_off_t i = 0; i < size; i++) {

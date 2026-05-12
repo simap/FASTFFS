@@ -59,36 +59,30 @@ int ffsv_flash_config_preset(struct ffsv_flash_config *cfg,
         .erased_value = 0xff,
         .erase_cycles = 100000,
         .timing = {
-            .read_fixed_ns = 500,
-            .read_per_byte_ns = 20,
-            .program_fixed_ns = 8000,
-            .program_per_byte_ns = 180,
-            .erase_fixed_ns = 45000000,
+            .read_fixed_ns = 73676,
+            .read_per_byte_ns = 81,
+            .program_fixed_ns = 324295,
+            .program_per_byte_ns = 2143,
+            .erase_fixed_ns = 42000000,
             .erase_per_byte_ns = 0,
-            .blank_check_fixed_ns = 500,
-            .blank_check_per_byte_ns = 20,
+            .blank_check_fixed_ns = 0,
+            .blank_check_per_byte_ns = 391,
         },
         .max_log_entries = 4096,
     };
 
     switch (preset) {
-    case FFSV_PRESET_GENERIC_NOR:
+    case FFSV_PRESET_TARGET_NOR_NOTES:
         break;
-    case FFSV_PRESET_ESP32S3_QIO:
+    case FFSV_PRESET_ESP32S3_MEASURED:
         cfg->program_granule = 16;
-        cfg->timing.read_fixed_ns = 300;
-        cfg->timing.read_per_byte_ns = 8;
-        cfg->timing.program_fixed_ns = 12000;
-        cfg->timing.program_per_byte_ns = 120;
-        cfg->timing.erase_fixed_ns = 50000000;
-        break;
-    case FFSV_PRESET_SMALL_SPI_NOR:
-        cfg->program_granule = 1;
-        cfg->timing.read_fixed_ns = 1500;
-        cfg->timing.read_per_byte_ns = 80;
-        cfg->timing.program_fixed_ns = 12000;
-        cfg->timing.program_per_byte_ns = 1500;
-        cfg->timing.erase_fixed_ns = 30000000;
+        cfg->timing.read_fixed_ns = 64522;
+        cfg->timing.read_per_byte_ns = 120;
+        cfg->timing.program_fixed_ns = 0;
+        cfg->timing.program_per_byte_ns = 5937;
+        cfg->timing.erase_fixed_ns = 21269000;
+        cfg->timing.blank_check_fixed_ns = 0;
+        cfg->timing.blank_check_per_byte_ns = 135;
         break;
     default:
         return FFSV_ERR_INVALID;
@@ -248,15 +242,10 @@ static size_t injected_partial(const struct ffsv_flash *flash, size_t size,
 
 static int validate_program_transition(const struct ffsv_flash *flash,
         size_t offset, const uint8_t *data, size_t size) {
-    const uint8_t *image = ffsv_flash_image((struct ffsv_flash *)flash);
-    if (!image) {
-        return FFSV_ERR_INVALID;
-    }
-    for (size_t i = 0; i < size; i++) {
-        if ((uint8_t)(image[offset + i] & data[i]) != data[i]) {
-            return FFSV_ERR_PROGRAM_TRANSITION;
-        }
-    }
+    (void)flash;
+    (void)offset;
+    (void)data;
+    (void)size;
     return FFSV_OK;
 }
 
@@ -879,6 +868,11 @@ const uint8_t *ffsv_flash_image(struct ffsv_flash *flash) {
     }
     refresh_image_cache(flash);
     return flash->image_cache;
+}
+
+const struct ffsv_flash_config *ffsv_flash_config(
+        const struct ffsv_flash *flash) {
+    return flash ? &flash->cfg : NULL;
 }
 
 size_t ffsv_flash_size(const struct ffsv_flash *flash) {

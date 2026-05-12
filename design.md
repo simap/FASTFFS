@@ -236,6 +236,55 @@ On startup:
 5. Delete records remove earlier live entries.
 6. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
 
+Mount discovery is bounded to plausible index-sector header locations. When the sector size is not supplied by mount options, the
+implementation probes candidate sector sizes in this order:
+
+1. The default 4 KB sector size.
+2. Smaller sector sizes down to 256 bytes.
+3. Larger sector sizes up to the configured maximum.
+
+For each candidate `sector_shift`, the candidate sector size is:
+
+```text
+sector_size = 256 << sector_shift
+```
+
+Discovery reads only the first two possible index-sector header locations for
+that candidate size:
+
+```text
+offset = 0 * sector_size
+offset = 1 * sector_size
+```
+
+Checking 2 index sectors is enough for normal recovery because the
+format keeps at most one index sector erased. A header
+found at a candidate offset is only usable for that candidate if the header's
+encoded `sector_shift` matches the `sector_shift` currently being probed.
+
+A usable candidate is not accepted immediately. The implementation then reads
+the index-sector headers declared by that candidate's `index_count` and
+`sector_shift`. Valid, non-tombstoned headers must agree on magic, version,
+index count, and sector shift. If this validation fails, discovery continues
+with the next candidate sector size. If validation succeeds, the newest valid
+index sector is selected by serial and replay begins from that index sequence.
+
+Format does not need to erase the entire filesystem area. To avoid stale index
+headers from an older format being discovered after a sector-size change, format
+erases:
+
+```text
+min(max(8192, sector_size * index_count), filesystem_size)
+```
+
+before writing the fresh index header at offset `0`. This clears the discovery
+window for 256-byte through 4 KB sector sizes and clears every index sector in
+the newly formatted geometry. Clearing the full new index area prevents stale
+headers from an older format with a different index count from making candidate
+validation fail. If a new format is interrupted before the fresh header is
+valid, mount may still discover an older larger-format header; that is treated
+as a failed format rather than a normal recovery path.
+
 Cold start cost is bounded by reading the compact index plus any needed file-header probes.
 
 Startup caching is configurable:
@@ -245,6 +294,12 @@ Startup caching is configurable:
 - Larger-MCU mode can cache live root metadata and/or extent lists to make `stat`, `ls`, open, and seek mostly RAM operations.
 
 The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
+
+Mount can also take a caller-provided global scratch buffer. The core must work
+with a small fallback buffer, but larger scratch improves operations that scan
+flash ranges, such as blank-checking an allocation candidate. A scratch buffer
+as large as the FASTFFS sector size lets the core blank-check a full sector with
+one backend read instead of many small reads.
 
 Examples:
 
@@ -432,6 +487,13 @@ already reads from the sector tail. A single 128-byte or 256-byte read from the
 end can fetch the footer plus the newest metadata records for mount, fsck, and
 GC.
 
+The first metadata record written into an erased sector claims that sector. Since
+the tail-most metadata record is adjacent to the footer, that first metadata
+write should program the metadata record and footer together as one contiguous
+write. Later metadata records in the same sector are written farther toward the
+front of the sector as metadata grows backward; they do not rewrite the footer
+and are not contiguous with it.
+
 Example footer shape:
 
 ```c
@@ -460,7 +522,7 @@ A sector with a valid footer but no committed index path to it is
 allocated/orphaned. It may still be used if there are free (erased) metadata and file data space. A sector
 with an erased footer is unclaimed or fully erased. A partially programmed or
 invalid footer should be treated as a failed claim/corrupt orphan unless a full
-blank check proves the sector is erased.
+blank check proves the sector is erased. A footer that has been tombstoned means the entire sector is dead and can be erased.
 
 Metadata records do not need their own magic field. 
 
@@ -605,6 +667,36 @@ Useful stats for this mode:
 - candidate slots skipped by the RAM occupied-slot filter
 
 Duplicate raw hashes are not the baseline because they change delete and replay semantics: the index key is no longer unique without consulting metadata.
+
+## Index-Only Cache Hash Table
+
+The default replayed index cache can be a compact hash table that stores only
+head sectors. It intentionally does not store resolved slots beside each head.
+Slot identity is provided by the on-flash index record during replay and by
+root metadata only when hash-cache collisions require disambiguation.
+
+The compact hash table's worst-case probe work is bounded by the caller-provided
+hash table size. There is no separate probe limit in the baseline; deployments
+should size the table for their expected live-file count, RAM budget, and
+acceptable collision rate.
+
+Mount replay processes one index record at a time in journal order. It does not
+look ahead through the index journal to skip obsolete records, and it does not
+require obsolete metadata to remain valid. A put record can be inserted into
+an empty hash-cache bucket as a head-only entry with no metadata read. Metadata
+reads are only needed when the compact hash cache encounters an occupied
+bucket/probe path and must decide whether the existing cached head or incoming
+head belongs to the resolved slot being updated. If either side's metadata is
+missing, tombstoned, corrupt, or resolves to a different slot, that side is
+stale and may be evicted by the mutating replay/insert/remove path. Normal
+read-side lookup does not repair or evict hash-cache entries; if a candidate
+head cannot be verified, lookup skips that occupied bucket and continues
+probing. A later index record for the same slot naturally overwrites or deletes
+the earlier cached head as replay advances.
+
+This index hash table also limits the maximum number of files, since every file
+must be stored in the hashtable. Performance degrades as the table fills.
+
 
 ## Configuration Options
 

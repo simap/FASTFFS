@@ -10,14 +10,16 @@ tests, and later host benchmarks.
 Create a device with `ffsv_flash_create()` and an explicit
 `struct ffsv_flash_config`, or use `ffsv_flash_create_with_preset()`.
 
-Available presets:
+Available presets are fitted from the timing notes in `design.md`:
 
-- `FFSV_PRESET_GENERIC_NOR`: 4 KiB sectors, 4-byte program granule,
-  conservative SPI NOR timing.
-- `FFSV_PRESET_ESP32S3_QIO`: 4 KiB sectors, 16-byte program granule,
-  timing shaped for ESP32-S3 style QIO flash host tests.
-- `FFSV_PRESET_SMALL_SPI_NOR`: 4 KiB sectors, byte program granule,
-  slower timing for small serial NOR parts.
+- `FFSV_PRESET_TARGET_NOR_NOTES`: 4 KiB sectors, 4-byte program granule,
+  approximate target NOR notes. Read timing is fit from 4-byte and 4 KiB
+  reads; program timing is fit from 26-byte and 4 KiB programs; erase is the
+  usual 42 ms 4 KiB sector time.
+- `FFSV_PRESET_ESP32S3_MEASURED`: 4 KiB sectors, 16-byte program granule,
+  measured ESP32-S3 built-in flash partition snapshot. Read timing is fit from
+  4-byte and 4 KiB reads; program timing is based on the measured 4 KiB
+  erase+program delta; erase is the measured 21.269 ms 4 KiB sector time.
 
 The emulator enforces range and alignment checks, monotonic NOR programming
 (`1 -> 0` only), sector erases to `erased_value`, and erase wear counters.

@@ -47,6 +47,7 @@ This stage defines the exact binary layout for:
 - index sector header with magic/version, index count/serial, sector size, and flags
 - 4-byte index records
 - baseline "does everything" metadata record
+- forward continuation extent links for files larger than one sector
 - local tombstone bit
 - sector-local data/metadata layout
 
@@ -58,16 +59,22 @@ The embedded-facing core API must not allocate heap memory. When the core needs
 persistent caches or scratch storage, the application provides those buffers;
 host tools and tests can use dynamic allocation freely.
 
-The expected output is a small host library and image file that can format, mount, create files, list files, read files, overwrite files, delete files, and remount successfully.
+The expected output is a small host library and image file that can format,
+mount, create files, stream read/write files, list files, overwrite files,
+delete files, and remount successfully. Stage 2 is not limited to one sector
+per file: the baseline metadata record must support forward `next_extent`
+links and the implementation must handle large files, such as a roughly 350 KB
+file, even when extents land in non-contiguous sectors.
 
 Current Stage 2 boundary:
 
 - sector-size discovery and active index sequence selection are part of Stage 2
 - basic index rotation/compaction is part of Stage 2
-- the baseline metadata record must define valid/tombstone state bits
+- the baseline metadata record must define valid/tombstone state bits, total
+  file size, current extent placement, and the next extent head
 - packed sectors, multiple metadata records per sector, reverse metadata
-  scanning, reusable orphan-sector allocation, continuation extents, and
-  programming local tombstones for reclaim are allocator/GC maturity work
+  scanning, reusable orphan-sector allocation, and programming local tombstones
+  for reclaim are allocator/GC maturity work
 
 ## Stage 3: Inspection and Recovery Tools
 

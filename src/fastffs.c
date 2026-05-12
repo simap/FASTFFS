@@ -31,7 +31,9 @@ static uint16_t next_slot(uint16_t slot) {
 }
 
 static int resolve_slot(struct fffs *fs, const char *name,
-        uint16_t *slot, uint16_t *head, bool *found) {
+        uint16_t *slot, uint16_t *head, bool *found,
+        struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
+        uint16_t *next) {
     size_t name_len = strlen(name);
     if (name_len == 0) {
         return FFFS_ERR_INVALID;
@@ -44,30 +46,62 @@ static int resolve_slot(struct fffs *fs, const char *name,
     uint16_t first_free = 0;
     bool have_free = false;
     for (uint16_t d = 0; d <= FFFS_MAX_PROBE_DISTANCE; d++) {
-        uint16_t candidate_head;
-        int find_err = fffs_index_find(fs, candidate, &candidate_head);
-        if (find_err == FFFS_ERR_NOT_FOUND) {
+        bool occupied = false;
+        for (size_t probe = 0; probe < fs->index_hash_table_size;) {
+            uint16_t candidate_head;
+            bool end;
+            int err = fffs_index_candidate(fs, candidate, probe,
+                    &candidate_head, &end);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (end) {
+                break;
+            }
+
+            struct fffs_stat st;
+            uint16_t md_slot;
+            uint16_t md_data_off;
+            uint16_t md_data_len;
+            uint16_t md_next;
+            err = fffs_read_metadata(fs, candidate_head, &st, &md_slot,
+                    &md_data_off, &md_data_len, &md_next);
+            if (err == FFFS_ERR_CORRUPT) {
+                occupied = true;
+                probe++;
+                continue;
+            }
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (md_slot == candidate) {
+                occupied = true;
+                if (strcmp(st.name, name) == 0) {
+                    *slot = candidate;
+                    *head = candidate_head;
+                    *found = true;
+                    if (out_st) {
+                        *out_st = st;
+                    }
+                    if (data_off) {
+                        *data_off = md_data_off;
+                    }
+                    if (data_len) {
+                        *data_len = md_data_len;
+                    }
+                    if (next) {
+                        *next = md_next;
+                    }
+                    return FFFS_OK;
+                }
+            }
+            probe++;
+        }
+        if (!occupied) {
             if (!have_free) {
                 first_free = candidate;
                 have_free = true;
             }
-            continue;
-        }
-        if (find_err != FFFS_OK) {
-            return find_err;
-        }
-
-        struct fffs_stat st;
-        int err = fffs_read_metadata(fs, candidate_head, &st,
-                NULL, NULL, NULL);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        if (strcmp(st.name, name) == 0) {
-            *slot = candidate;
-            *head = candidate_head;
-            *found = true;
-            return FFFS_OK;
         }
         candidate = next_slot(candidate);
     }
@@ -81,6 +115,14 @@ static int resolve_slot(struct fffs *fs, const char *name,
     return FFFS_OK;
 }
 
+static uint32_t claim_sector_serial(struct fffs *fs) {
+    uint32_t serial = fs->next_sector_serial++;
+    if (fs->next_sector_serial == 0) {
+        fs->next_sector_serial = 1;
+    }
+    return serial;
+}
+
 int fffs_format(const struct fffs_backend *backend,
         const struct fffs_format_options *options) {
     if (!fffs_valid_backend(backend)) {
@@ -89,19 +131,28 @@ int fffs_format(const struct fffs_backend *backend,
 
     uint8_t index_sectors = options && options->index_sectors ?
         options->index_sectors : FFFS_DEFAULT_INDEX_SECTORS;
-    uint8_t sector_shift = options && options->sector_shift ?
+    uint8_t sector_shift = options ?
         options->sector_shift : FFFS_DEFAULT_SECTOR_SHIFT;
     size_t sector_size = (size_t)256u << sector_shift;
     if (index_sectors < 2 || index_sectors > 15 ||
             sector_shift < FFFS_MIN_SECTOR_SHIFT ||
             sector_shift > FFFS_MAX_SECTOR_SHIFT ||
             backend->size % sector_size != 0 ||
+            backend->size / sector_size < index_sectors ||
             backend->size / sector_size > UINT16_MAX) {
         return FFFS_ERR_INVALID;
     }
 
+    size_t index_area_size = sector_size * index_sectors;
+    size_t erase_size = sector_size > 8192 ? sector_size : 8192;
+    if (erase_size < index_area_size) {
+        erase_size = index_area_size;
+    }
+    if (erase_size > backend->size) {
+        erase_size = backend->size;
+    }
     int err = fffs_map_backend_status(backend->erase(backend->ctx, 0,
-                backend->size));
+                erase_size));
     if (err != FFFS_OK) {
         return err;
     }
@@ -114,14 +165,18 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
         const struct fffs_mount_options *options) {
     if (!fs || !fffs_valid_backend(backend) || !options ||
             !options->index_heads ||
-            !fffs_index_head_count_valid(options->index_head_count) ||
-            backend->size % FFFS_DEFAULT_SECTOR_SIZE != 0) {
+            !fffs_index_hash_table_size_valid(options->index_hash_table_size)) {
         return FFFS_ERR_INVALID;
     }
     uint16_t *index_heads = options->index_heads;
-    size_t index_head_count = options->index_head_count;
+    size_t index_hash_table_size = options->index_hash_table_size;
+    if ((!options->scratch && options->scratch_size != 0) ||
+            (options->scratch && options->scratch_size <
+             backend->read_granule)) {
+        return FFFS_ERR_INVALID;
+    }
     *fs = (struct fffs){0};
-    memset(index_heads, 0, sizeof(index_heads[0]) * index_head_count);
+    memset(index_heads, 0, sizeof(index_heads[0]) * index_hash_table_size);
 
     uint8_t index_sectors = 0;
     uint8_t sector_shift = 0;
@@ -140,7 +195,9 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
 
     fs->backend = *backend;
     fs->index_heads = index_heads;
-    fs->index_head_count = index_head_count;
+    fs->index_hash_table_size = index_hash_table_size;
+    fs->scratch = options->scratch;
+    fs->scratch_size = options->scratch_size;
     fs->sector_size = sector_size;
     fs->sector_count = backend->size / fs->sector_size;
     fs->sector_shift = sector_shift;
@@ -183,7 +240,12 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
     uint16_t slot;
     uint16_t head;
     bool found;
-    int err = resolve_slot(fs, name, &slot, &head, &found);
+    struct fffs_stat resolved_st;
+    uint16_t resolved_data_off = 0;
+    uint16_t resolved_data_len = 0;
+    uint16_t resolved_next = 0;
+    int err = resolve_slot(fs, name, &slot, &head, &found, &resolved_st,
+            &resolved_data_off, &resolved_data_len, &resolved_next);
     if (err != FFFS_OK) {
         return err;
     }
@@ -207,17 +269,12 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
     file->found = found;
 
     if (read) {
-        struct fffs_stat st;
-        uint16_t md_slot;
-        uint16_t data_len;
-        err = fffs_read_metadata(fs, head, &st, &md_slot, &file->data_offset,
-                &data_len);
-        if (err != FFFS_OK || md_slot != slot ||
-                strcmp(st.name, name) != 0) {
-            return err == FFFS_OK ? FFFS_ERR_CORRUPT : err;
-        }
-        file->size = data_len;
-        memcpy(file->name, st.name, strlen(st.name) + 1);
+        file->data_offset = resolved_data_off;
+        file->size = resolved_st.size;
+        file->current = head;
+        file->current_data_len = resolved_data_len;
+        file->current_next = resolved_next;
+        memcpy(file->name, resolved_st.name, strlen(resolved_st.name) + 1);
     } else {
         uint16_t sector;
         err = fffs_find_free_sector(fs, &sector);
@@ -225,10 +282,9 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
             return err;
         }
         file->head = sector;
-        file->sector_serial = fs->next_sector_serial++;
-        if (fs->next_sector_serial == 0) {
-            fs->next_sector_serial = 1;
-        }
+        file->current = sector;
+        file->current_sector_serial = claim_sector_serial(fs);
+        file->root_sector_serial = file->current_sector_serial;
         memcpy(file->name, name, strlen(name) + 1);
     }
 
@@ -241,21 +297,52 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
             (file->flags & FFFS_O_RDONLY) == 0) {
         return FFFS_ERR_INVALID;
     }
+    size_t total = 0;
+    uint8_t *dst = buffer;
     size_t remaining = file->size - file->pos;
-    size_t n = size < remaining ? size : remaining;
+    size_t want = size < remaining ? size : remaining;
     if (out_read) {
-        *out_read = n;
+        *out_read = 0;
     }
-    if (n == 0) {
+    if (want == 0) {
         return FFFS_OK;
     }
-    int err = fffs_flash_read(file->fs, (size_t)file->head *
-            file->fs->sector_size + file->data_offset + file->pos,
-            buffer, n);
-    if (err == FFFS_OK) {
+
+    while (total < want) {
+        if (file->extent_pos >= file->current_data_len) {
+            if (file->current_next == 0) {
+                return FFFS_ERR_CORRUPT;
+            }
+            uint16_t slot;
+            uint16_t data_len;
+            uint16_t next;
+            int err = fffs_read_metadata(file->fs, file->current_next, NULL,
+                    &slot, &file->data_offset, &data_len, &next);
+            if (err != FFFS_OK || slot != file->slot) {
+                return err == FFFS_OK ? FFFS_ERR_CORRUPT : err;
+            }
+            file->current = file->current_next;
+            file->current_data_len = data_len;
+            file->current_next = next;
+            file->extent_pos = 0;
+        }
+
+        size_t in_extent = file->current_data_len - file->extent_pos;
+        size_t n = want - total < in_extent ? want - total : in_extent;
+        int err = fffs_flash_read(file->fs, (size_t)file->current *
+                file->fs->sector_size + file->data_offset +
+                file->extent_pos, dst + total, n);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        file->extent_pos += (uint32_t)n;
         file->pos += (uint32_t)n;
+        total += n;
     }
-    return err;
+    if (out_read) {
+        *out_read = total;
+    }
+    return FFFS_OK;
 }
 
 static int flush_write_tail(struct fffs_file *file, bool final) {
@@ -274,16 +361,53 @@ static int flush_write_tail(struct fffs_file *file, bool final) {
     if (n == 0) {
         return FFFS_OK;
     }
-    int err = fffs_flash_program(file->fs, (size_t)file->head *
-            file->fs->sector_size + file->pos, file->tail, n);
+    int err = fffs_flash_program(file->fs, (size_t)file->current *
+            file->fs->sector_size + file->current_write_offset,
+            file->tail, n);
     if (err != FFFS_OK) {
         return err;
     }
-    file->pos += (uint32_t)n;
+    file->current_write_offset += (uint16_t)n;
     if (n < file->tail_len) {
         memmove(file->tail, file->tail + n, file->tail_len - n);
     }
     file->tail_len -= n < file->tail_len ? n : file->tail_len;
+    return FFFS_OK;
+}
+
+static int start_next_extent(struct fffs_file *file) {
+    int err = flush_write_tail(file, true);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    uint16_t next_sector;
+    err = fffs_find_free_sector(file->fs, &next_sector);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    uint32_t next_serial = claim_sector_serial(file->fs);
+
+    if (file->current == file->head) {
+        file->root_data_len = file->current_data_len;
+        file->root_next = next_sector;
+        file->root_sector_serial = file->current_sector_serial;
+        file->root_deferred = true;
+    } else {
+        err = fffs_write_extent_metadata(file, file->current,
+                file->current_sector_serial, file->current_data_len, 0,
+                next_sector, false);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+
+    file->current = next_sector;
+    file->current_sector_serial = next_serial;
+    file->current_data_len = 0;
+    file->current_next = 0;
+    file->current_write_offset = 0;
+    file->tail_len = 0;
     return FFFS_OK;
 }
 
@@ -293,23 +417,33 @@ int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
             (file->flags & FFFS_O_WRONLY) == 0) {
         return FFFS_ERR_INVALID;
     }
-    if ((size_t)file->size + size > fffs_max_file_data_size(file->fs)) {
-        return FFFS_ERR_RANGE;
-    }
-
     const uint8_t *src = buffer;
     size_t remaining = size;
     while (remaining > 0) {
-        size_t space = file->fs->backend.program_granule - file->tail_len;
+        if (file->current_data_len >= fffs_max_file_data_size(file->fs)) {
+            int err = start_next_extent(file);
+            if (err != FFFS_OK) {
+                return err;
+            }
+        }
+
+        size_t extent_space = fffs_max_file_data_size(file->fs) -
+            file->current_data_len;
+        size_t buffer_space = sizeof(file->tail) - file->tail_len;
+        size_t space = extent_space < buffer_space ? extent_space :
+            buffer_space;
         size_t n = remaining < space ? remaining : space;
         memcpy(file->tail + file->tail_len, src, n);
         file->tail_len += n;
+        file->current_data_len += (uint16_t)n;
         file->size += (uint32_t)n;
         src += n;
         remaining -= n;
-        int err = flush_write_tail(file, false);
-        if (err != FFFS_OK) {
-            return err;
+        if (file->tail_len == sizeof(file->tail)) {
+            int err = flush_write_tail(file, false);
+            if (err != FFFS_OK) {
+                return err;
+            }
         }
     }
     if (out_written) {
@@ -328,7 +462,8 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st) {
         st->size = file->size;
         return FFFS_OK;
     }
-    return fffs_read_metadata(file->fs, file->head, st, NULL, NULL, NULL);
+    return fffs_read_metadata(file->fs, file->head, st, NULL, NULL, NULL,
+            NULL);
 }
 
 int fffs_close(struct fffs_file *file) {
@@ -339,7 +474,20 @@ int fffs_close(struct fffs_file *file) {
     if ((file->flags & FFFS_O_WRONLY) != 0) {
         err = flush_write_tail(file, true);
         if (err == FFFS_OK) {
-            err = fffs_write_root_metadata(file);
+            if (file->current != file->head) {
+                err = fffs_write_extent_metadata(file, file->current,
+                        file->current_sector_serial, file->current_data_len,
+                        0, 0, false);
+            }
+        }
+        if (err == FFFS_OK) {
+            uint16_t root_len = file->root_deferred ?
+                file->root_data_len : file->current_data_len;
+            uint16_t root_next = file->root_deferred ? file->root_next : 0;
+            uint32_t root_serial = file->root_deferred ?
+                file->root_sector_serial : file->current_sector_serial;
+            err = fffs_write_extent_metadata(file, file->head, root_serial,
+                    root_len, file->size, root_next, true);
         }
     }
     file->closed = true;
@@ -353,19 +501,15 @@ int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st) {
     uint16_t slot;
     uint16_t head;
     bool found;
-    int err = resolve_slot(fs, name, &slot, &head, &found);
+    int err = resolve_slot(fs, name, &slot, &head, &found, st, NULL, NULL,
+            NULL);
     if (err != FFFS_OK) {
         return err;
     }
     if (!found) {
         return FFFS_ERR_NOT_FOUND;
     }
-    uint16_t md_slot;
-    err = fffs_read_metadata(fs, head, st, &md_slot, NULL, NULL);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    return md_slot == slot ? FFFS_OK : FFFS_ERR_CORRUPT;
+    return FFFS_OK;
 }
 
 int fffs_exists(struct fffs *fs, const char *name, bool *exists) {
@@ -392,7 +536,8 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
     uint16_t slot;
     uint16_t head;
     bool found;
-    int err = resolve_slot(fs, name, &slot, &head, &found);
+    int err = resolve_slot(fs, name, &slot, &head, &found, NULL, NULL, NULL,
+            NULL);
     if (err != FFFS_OK) {
         return err;
     }
@@ -429,7 +574,7 @@ bool fffs_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
         }
         return false;
     }
-    while (dir->pos < dir->fs->index_head_count) {
+    while (dir->pos < dir->fs->index_hash_table_size) {
         uint16_t head = dir->fs->index_heads[dir->pos++];
         if (head == 0) {
             continue;
@@ -437,7 +582,7 @@ bool fffs_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
 
         struct fffs_stat candidate;
         int err = fffs_read_metadata(dir->fs, head, &candidate,
-                NULL, NULL, NULL);
+                NULL, NULL, NULL, NULL);
         if (err != FFFS_OK) {
             dir->status = err;
             return false;

@@ -41,10 +41,17 @@ enum fffs_open_flags {
     FFFS_O_EXCL = 0x10,
 };
 
+enum fffs_gc_action {
+    FFFS_GC_IDLE = 0,
+    FFFS_GC_SCANNED = 1,
+    FFFS_GC_TOMBSTONED = 2,
+    FFFS_GC_ERASED = 3,
+};
+
 enum {
     FFFS_DEFAULT_SECTOR_SIZE = 4096,
     FFFS_DEFAULT_SECTOR_SHIFT = 4,
-    FFFS_MIN_SECTOR_SHIFT = 4,
+    FFFS_MIN_SECTOR_SHIFT = 0,
     FFFS_MAX_SECTOR_SHIFT = 15,
     FFFS_DEFAULT_INDEX_SECTORS = 2,
     FFFS_MAX_NAME = 32,
@@ -70,13 +77,17 @@ struct fffs_format_options {
 
 struct fffs_mount_options {
     uint16_t *index_heads;
-    size_t index_head_count;
+    size_t index_hash_table_size;
+    void *scratch;
+    size_t scratch_size;
 };
 
 struct fffs {
     struct fffs_backend backend;
     uint16_t *index_heads;
-    size_t index_head_count;
+    size_t index_hash_table_size;
+    uint8_t *scratch;
+    size_t scratch_size;
     size_t sector_size;
     size_t sector_count;
     uint8_t sector_shift;
@@ -86,6 +97,7 @@ struct fffs {
     uint8_t active_index_serial;
     size_t alloc_cursor;
     size_t gc_cursor;
+    bool gc_live;
     uint32_t next_sector_serial;
 };
 
@@ -101,13 +113,22 @@ struct fffs_file {
     uint32_t flags;
     uint16_t slot;
     uint16_t head;
+    uint16_t current;
     uint16_t data_offset;
+    uint16_t current_data_len;
+    uint16_t current_next;
+    uint16_t current_write_offset;
+    uint16_t root_data_len;
+    uint16_t root_next;
     uint32_t size;
     uint32_t pos;
-    uint32_t sector_serial;
+    uint32_t extent_pos;
+    uint32_t current_sector_serial;
+    uint32_t root_sector_serial;
     size_t tail_len;
     char name[FFFS_MAX_NAME + 1];
     uint8_t tail[FFFS_MAX_PROGRAM_GRANULE];
+    bool root_deferred;
     bool found;
     bool closed;
 };
@@ -139,7 +160,8 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st);
 int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st);
 int fffs_exists(struct fffs *fs, const char *name, bool *exists);
 int fffs_delete_file(struct fffs *fs, const char *name);
-int fffs_gc(struct fffs *fs, size_t max_sectors, size_t *out_erased);
+int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action);
+int fffs_gc(struct fffs *fs, size_t max_steps, size_t *out_erased);
 int fffs_dir_open(struct fffs *fs, struct fffs_dir *dir,
         const char *prefix);
 bool fffs_dir_read(struct fffs_dir *dir, struct fffs_stat *st);
