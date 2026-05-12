@@ -123,7 +123,8 @@ static int cmd_check(const char *path) {
     return err;
 }
 
-static int sector_shift_from_size(size_t sector_size, uint8_t *out) {
+static int sector_enum_from_size(size_t sector_size,
+        enum fffs_sector_size *out) {
     if (sector_size < ((size_t)256u << FFFS_MIN_SECTOR_SHIFT) ||
             sector_size > ((size_t)256u << FFFS_MAX_SECTOR_SHIFT)) {
         return FFFS_ERR_INVALID;
@@ -131,7 +132,7 @@ static int sector_shift_from_size(size_t sector_size, uint8_t *out) {
     for (uint8_t shift = FFFS_MIN_SECTOR_SHIFT;
             shift <= FFFS_MAX_SECTOR_SHIFT; shift++) {
         if (((size_t)256u << shift) == sector_size) {
-            *out = shift;
+            *out = (enum fffs_sector_size)sector_size;
             return FFFS_OK;
         }
     }
@@ -151,8 +152,8 @@ static int cmd_create(const char *sector_size_text,
     if (err != FFFS_OK || sector_count > UINT16_MAX) {
         return FFFS_ERR_INVALID;
     }
-    uint8_t sector_shift;
-    err = sector_shift_from_size(sector_size, &sector_shift);
+    enum fffs_sector_size format_sector_size;
+    err = sector_enum_from_size(sector_size, &format_sector_size);
     if (err != FFFS_OK) {
         return err;
     }
@@ -180,7 +181,7 @@ static int cmd_create(const char *sector_size_text,
     if (err == FFFS_OK) {
         err = fffs_format(&backend, &(struct fffs_format_options){
                     .index_sectors = (uint8_t)index_sectors,
-                    .sector_shift = sector_shift,
+                    .sector_size = format_sector_size,
                 });
     }
     if (err == FFFS_OK) {

@@ -435,7 +435,7 @@ static int test_mount_discovers_sector_size(void) {
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 2,
-                .sector_shift = 5,
+                .sector_size = FFFS_SECTOR_8K,
             }));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_TRUE(fs.sector_shift == 5);
@@ -470,7 +470,7 @@ static int test_mount_discovers_small_sector_size(void) {
     ASSERT_OK(new_backend_with_size(&flash, &backend, 256 * 128));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 2,
-                .sector_shift = 0,
+                .sector_size = FFFS_SECTOR_256,
             }));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_TRUE(fs.sector_shift == 0);
@@ -500,7 +500,7 @@ static int test_format_tiny_sector_wins_over_old_large_remnant(void) {
     ASSERT_OK(new_backend_with_size(&flash, &backend, 8192 * 8));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 2,
-                .sector_shift = 5,
+                .sector_size = FFFS_SECTOR_8K,
             }));
     ASSERT_OK(flash_to_fs(ffsv_flash_program(flash, 8192,
                     (const uint8_t[8]){'F', 'F', 'F', 'S', 1,
@@ -508,7 +508,7 @@ static int test_format_tiny_sector_wins_over_old_large_remnant(void) {
                     8, FFSV_CALLSITE)));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 2,
-                .sector_shift = 0,
+                .sector_size = FFFS_SECTOR_256,
             }));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_TRUE(fs.sector_shift == 0);
@@ -528,7 +528,7 @@ static int test_format_erases_expanded_index_area(void) {
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 16));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 4,
-                .sector_shift = FFFS_DEFAULT_SECTOR_SHIFT,
+                .sector_size = FFFS_SECTOR_DEFAULT,
             }));
     for (size_t sector = 1; sector < 4; sector++) {
         ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
@@ -541,7 +541,7 @@ static int test_format_erases_expanded_index_area(void) {
 
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
                 .index_sectors = 8,
-                .sector_shift = FFFS_DEFAULT_SECTOR_SHIFT,
+                .sector_size = FFFS_SECTOR_DEFAULT,
             }));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_TRUE(fs.index_sectors == 8);

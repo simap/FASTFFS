@@ -553,14 +553,19 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
     return FFFS_OK;
 }
 
-int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
+static void encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t serial) {
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    memset(footer, 0xff, sizeof(footer));
+    memset(footer, 0xff, FFFS_SECTOR_FOOTER_SIZE);
     store32(footer, serial);
     footer[4] = FFFS_SECTOR_TYPE_MIXED;
     footer[5] = FFFS_SECTOR_FLAGS_VALID;
     memcpy(footer + 8, FFFS_SECTOR_MAGIC, 4);
+}
+
+int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
+        uint32_t serial) {
+    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    encode_sector_footer(footer, serial);
     return fffs_flash_program_aligned(fs, fffs_sector_footer_offset(fs, sector),
             footer, sizeof(footer));
 }
@@ -629,8 +634,10 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint32_t serial, uint16_t data_len, uint32_t total_size,
         uint16_t next, bool commit_index) {
     struct fffs *fs = file->fs;
-    uint8_t md[FFFS_MD_SIZE];
-    memset(md, 0xff, sizeof(md));
+    uint8_t tail[FFFS_MD_SIZE + FFFS_SECTOR_FOOTER_SIZE];
+    uint8_t *md = tail;
+    uint8_t *footer = tail + FFFS_MD_SIZE;
+    memset(tail, 0xff, sizeof(tail));
     md[0] = FFFS_MD_FLAGS_VALID;
     md[1] = (uint8_t)strlen(file->name);
     store16(md + 2, file->slot);
@@ -640,13 +647,10 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
     store16(md + 12, next);
     memcpy(md + 14, file->name, md[1]);
     md[63] = FFFS_MD_TYPE_BASELINE;
+    encode_sector_footer(footer, serial);
 
-    int err = fffs_write_sector_footer(fs, sector, serial);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    err = fffs_flash_program_aligned(fs, fffs_sector_metadata_offset(fs, sector),
-            md, sizeof(md));
+    int err = fffs_flash_program_aligned(fs,
+            fffs_sector_metadata_offset(fs, sector), tail, sizeof(tail));
     if (err != FFFS_OK) {
         return err;
     }

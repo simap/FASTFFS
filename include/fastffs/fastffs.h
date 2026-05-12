@@ -48,8 +48,18 @@ enum fffs_gc_action {
     FFFS_GC_ERASED = 3,
 };
 
+enum fffs_sector_size {
+    FFFS_SECTOR_DEFAULT = 0,
+    FFFS_SECTOR_256 = 256,
+    FFFS_SECTOR_512 = 512,
+    FFFS_SECTOR_1K = 1024,
+    FFFS_SECTOR_2K = 2048,
+    FFFS_SECTOR_4K = 4096,
+    FFFS_SECTOR_8K = 8192,
+};
+
 enum {
-    FFFS_DEFAULT_SECTOR_SIZE = 4096,
+    FFFS_DEFAULT_SECTOR_SIZE = FFFS_SECTOR_4K,
     FFFS_DEFAULT_SECTOR_SHIFT = 4,
     FFFS_MIN_SECTOR_SHIFT = 0,
     FFFS_MAX_SECTOR_SHIFT = 15,
@@ -72,7 +82,7 @@ struct fffs_backend {
 
 struct fffs_format_options {
     uint8_t index_sectors;
-    uint8_t sector_shift;
+    enum fffs_sector_size sector_size;
 };
 
 struct fffs_mount_options {

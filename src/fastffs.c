@@ -30,6 +30,20 @@ static uint16_t next_slot(uint16_t slot) {
     return slot;
 }
 
+static int format_sector_shift(enum fffs_sector_size sector_size,
+        uint8_t *sector_shift) {
+    size_t size = sector_size == FFFS_SECTOR_DEFAULT ?
+        FFFS_DEFAULT_SECTOR_SIZE : (size_t)sector_size;
+    for (uint8_t shift = FFFS_MIN_SECTOR_SHIFT;
+            shift <= FFFS_MAX_SECTOR_SHIFT; shift++) {
+        if (((size_t)256u << shift) == size) {
+            *sector_shift = shift;
+            return FFFS_OK;
+        }
+    }
+    return FFFS_ERR_INVALID;
+}
+
 static int resolve_slot(struct fffs *fs, const char *name,
         uint16_t *slot, uint16_t *head, bool *found,
         struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
@@ -131,12 +145,14 @@ int fffs_format(const struct fffs_backend *backend,
 
     uint8_t index_sectors = options && options->index_sectors ?
         options->index_sectors : FFFS_DEFAULT_INDEX_SECTORS;
-    uint8_t sector_shift = options ?
-        options->sector_shift : FFFS_DEFAULT_SECTOR_SHIFT;
+    uint8_t sector_shift = FFFS_DEFAULT_SECTOR_SHIFT;
+    int err = format_sector_shift(options ? options->sector_size :
+            FFFS_SECTOR_DEFAULT, &sector_shift);
+    if (err != FFFS_OK) {
+        return err;
+    }
     size_t sector_size = (size_t)256u << sector_shift;
     if (index_sectors < 2 || index_sectors > 15 ||
-            sector_shift < FFFS_MIN_SECTOR_SHIFT ||
-            sector_shift > FFFS_MAX_SECTOR_SHIFT ||
             backend->size % sector_size != 0 ||
             backend->size / sector_size < index_sectors ||
             backend->size / sector_size > UINT16_MAX) {
@@ -151,7 +167,7 @@ int fffs_format(const struct fffs_backend *backend,
     if (erase_size > backend->size) {
         erase_size = backend->size;
     }
-    int err = fffs_map_backend_status(backend->erase(backend->ctx, 0,
+    err = fffs_map_backend_status(backend->erase(backend->ctx, 0,
                 erase_size));
     if (err != FFFS_OK) {
         return err;
