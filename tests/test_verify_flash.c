@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define ASSERT_OK(expr) do { \
     int rc__ = (expr); \
@@ -218,7 +219,9 @@ static int test_snapshot_reopen_and_image_load(void) {
     struct ffsv_flash_snapshot snapshot = {0};
     const uint8_t data[8] = {0xde, 0xad, 0xbe, 0xef,
         0xaa, 0x55, 0x33, 0xcc};
-    const char *path = "/tmp/fastffs_verify_flash_test.img";
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/fastffs_verify_flash_test_%ld.img",
+            (long)getpid());
     ASSERT_OK(new_flash(&flash));
     ASSERT_OK(ffsv_flash_program(flash, 128, data, sizeof(data),
                 FFSV_CALLSITE));
@@ -246,6 +249,7 @@ static int test_snapshot_reopen_and_image_load(void) {
     ASSERT_OK(ffsv_flash_dump_image(loaded, path));
     ASSERT_OK(ffsv_flash_erase(loaded, 0, 4096, FFSV_CALLSITE));
     ASSERT_OK(ffsv_flash_load_image_file(loaded, path));
+    remove(path);
     ASSERT_TRUE(memcmp(ffsv_flash_image(loaded), ffsv_flash_image(flash),
                 ffsv_flash_size(flash)) == 0);
 
