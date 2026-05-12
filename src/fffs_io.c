@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS core flash IO and on-flash record handling: index headers, index
+ * replay/rotation, sector footers, and baseline metadata encoding.
+ */
+
 #include "fffs_internal.h"
 
 #include <string.h>

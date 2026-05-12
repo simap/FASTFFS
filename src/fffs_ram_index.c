@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS in-RAM namespace index cache: direct slot and compact hash-head
+ * cache implementations used by mount replay and namespace operations.
+ */
+
 #include "fffs_internal.h"
 
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS

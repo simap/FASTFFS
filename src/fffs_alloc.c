@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS core allocation and reclaim policy: erased-space probing, allocation
+ * cursor traversal, live-head checks, and prototype garbage collection.
+ */
+
 #include "fffs_internal.h"
 
 #define FFFS_ERASED_CHECK_CHUNK 64

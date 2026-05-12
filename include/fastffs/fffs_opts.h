@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS compile-time core configuration: index cache modes, cache sizing,
+ * and small recovery-policy constants selected by the application build.
+ */
+
 #ifndef FASTFFS_FFFS_OPTS_H
 #define FASTFFS_FFFS_OPTS_H
 

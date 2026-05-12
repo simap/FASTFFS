@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS public core API: caller-owned filesystem, file, directory, backend,
+ * and status types for the portable embedded filesystem core.
+ */
+
 #ifndef FASTFFS_FASTFFS_H
 #define FASTFFS_FASTFFS_H
 

@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS private core declarations: shared on-flash constants, internal IO,
+ * allocator, replay, and RAM-index interfaces used across core modules.
+ */
+
 #ifndef FASTFFS_FFFS_INTERNAL_H
 #define FASTFFS_FFFS_INTERNAL_H
 

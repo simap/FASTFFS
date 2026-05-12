@@ -1,3 +1,12 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2026 Ben Hencke
+ *
+ * FASTFFS core API implementation: formatting, mounting, namespace lookup,
+ * file streaming, stat/delete operations, and prefix directory iteration.
+ */
+
 #include "fffs_internal.h"
 
 #include <stdbool.h>
