@@ -47,6 +47,16 @@ static int new_backend(struct ffsv_flash **flash,
     return fffs_host_backend_from_verify_flash(backend, *flash);
 }
 
+static int new_backend_with_size(struct ffsv_flash **flash,
+        struct fffs_backend *backend, size_t size) {
+    int err = ffsv_flash_create_with_preset(flash,
+            FFSV_PRESET_GENERIC_NOR, size);
+    if (err != FFSV_OK) {
+        return FFFS_ERR_IO;
+    }
+    return fffs_host_backend_from_verify_flash(backend, *flash);
+}
+
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         uint16_t *index_heads) {
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
@@ -403,6 +413,100 @@ static int test_mount_uses_orphan_lookahead_for_serial_hint(void) {
     return 0;
 }
 
+static int test_mount_discovers_sector_size(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    static uint16_t remount_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    const uint8_t data[] = {0x31, 0x32, 0x33};
+    uint8_t out[8] = {0};
+    size_t out_size = 0;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 2,
+                .sector_shift = 5,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_TRUE(fs.sector_shift == 5);
+    ASSERT_TRUE(fs.sector_size == 8192);
+    ASSERT_OK(write_chunks(&fs, "wide-sector", data, sizeof(data)));
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.sector_shift == 5);
+    ASSERT_TRUE(remounted.sector_size == 8192);
+    ASSERT_OK(read_chunks(&remounted, "wide-sector", out, sizeof(out),
+                &out_size));
+    ASSERT_TRUE(out_size == sizeof(data));
+    ASSERT_TRUE(memcmp(out, data, sizeof(data)) == 0);
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_index_rotates_when_active_sector_fills(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    static uint16_t remount_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    uint8_t out[4] = {0};
+    size_t out_size = 0;
+    const size_t writes = 1030;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 1100));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    for (size_t i = 0; i < writes; i++) {
+        uint8_t data = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, "rotating", &data, sizeof(data)));
+    }
+    ASSERT_TRUE(fs.active_index_sector == 1);
+    ASSERT_TRUE(fs.active_index_serial == 1);
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.active_index_sector == 1);
+    ASSERT_TRUE(remounted.active_index_serial == 1);
+    ASSERT_OK(read_chunks(&remounted, "rotating", out, sizeof(out),
+                &out_size));
+    ASSERT_TRUE(out_size == 1);
+    ASSERT_TRUE(out[0] == (uint8_t)(writes - 1));
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_index_header_discovery_without_sector_zero(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -439,6 +543,8 @@ int main(void) {
     failures += test_gc_reclaims_unindexed_orphan_sector();
     failures += test_gc_preserves_index_referenced_heads();
     failures += test_mount_uses_orphan_lookahead_for_serial_hint();
+    failures += test_mount_discovers_sector_size();
+    failures += test_index_rotates_when_active_sector_fills();
     failures += test_index_header_discovery_without_sector_zero();
     if (failures) {
         fprintf(stderr, "%d fastffs tests failed\n", failures);

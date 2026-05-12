@@ -56,7 +56,7 @@ int fffs_flash_program(struct fffs *fs, size_t offset,
 }
 
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
-        uint8_t *index_sectors, uint8_t *sector_shift) {
+        uint8_t *index_sectors, uint8_t *sector_shift, uint8_t *serial) {
     if (memcmp(hdr, FFFS_INDEX_MAGIC, 4) != 0 ||
             hdr[4] != FFFS_INDEX_VERSION) {
         return false;
@@ -71,40 +71,78 @@ bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
     if (count < 2 || count > 15) {
         return false;
     }
+    uint8_t shift = hdr[6];
+    if (shift < FFFS_MIN_SECTOR_SHIFT || shift > FFFS_MAX_SECTOR_SHIFT) {
+        return false;
+    }
     *index_sectors = count;
-    *sector_shift = hdr[6];
+    *sector_shift = shift;
+    *serial = (uint8_t)(hdr[5] & 0x0f);
     return true;
 }
 
 int fffs_program_index_header(const struct fffs_backend *backend,
-        uint8_t index_sectors, uint8_t sector_shift) {
+        size_t offset, uint8_t index_sectors, uint8_t sector_shift,
+        uint8_t serial) {
     uint8_t hdr[FFFS_HEADER_SIZE] = {
         'F', 'F', 'F', 'S',
         FFFS_INDEX_VERSION,
-        (uint8_t)(index_sectors << 4),
+        (uint8_t)((index_sectors << 4) | (serial & 0x0f)),
         sector_shift,
         FFFS_INDEX_FLAGS_VALID,
     };
-    return fffs_map_backend_status(backend->program(backend->ctx, 0, hdr,
-                sizeof(hdr)));
+    return fffs_map_backend_status(backend->program(backend->ctx, offset,
+                hdr, sizeof(hdr)));
 }
 
 int fffs_find_active_index_header(const struct fffs_backend *backend,
-        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift) {
+        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift,
+        uint8_t *serial) {
     uint8_t hdr[FFFS_HEADER_SIZE];
-    for (size_t off = 0; off < backend->size;
-            off += FFFS_DEFAULT_SECTOR_SIZE) {
+    bool found = false;
+    uint8_t best_serial = 0;
+    uint8_t best_index_sectors = 0;
+    uint8_t best_sector_shift = 0;
+    size_t best_active = 0;
+
+    for (size_t off = 0; off < backend->size; off += FFFS_DEFAULT_SECTOR_SIZE) {
         int err = fffs_map_backend_status(backend->read(backend->ctx, off,
                     hdr, sizeof(hdr)));
         if (err != FFFS_OK) {
             return err;
         }
-        if (fffs_valid_index_header(hdr, index_sectors, sector_shift)) {
-            *active = off / FFFS_DEFAULT_SECTOR_SIZE;
-            return FFFS_OK;
+        uint8_t candidate_index_sectors;
+        uint8_t candidate_sector_shift;
+        uint8_t candidate_serial;
+        if (!fffs_valid_index_header(hdr, &candidate_index_sectors,
+                    &candidate_sector_shift, &candidate_serial)) {
+            continue;
+        }
+        size_t sector_size = (size_t)256u << candidate_sector_shift;
+        if (backend->size % sector_size != 0 || off % sector_size != 0) {
+            continue;
+        }
+        size_t candidate_active = off / sector_size;
+        if (candidate_active >= candidate_index_sectors) {
+            continue;
+        }
+        if (!found || (candidate_serial != best_serial &&
+                    ((candidate_serial - best_serial) & 0x0f) < 8)) {
+            found = true;
+            best_serial = candidate_serial;
+            best_index_sectors = candidate_index_sectors;
+            best_sector_shift = candidate_sector_shift;
+            best_active = candidate_active;
         }
     }
-    return FFFS_ERR_CORRUPT;
+    if (!found) {
+        return FFFS_ERR_CORRUPT;
+    }
+    *active = best_active;
+    *index_sectors = best_index_sectors;
+    *sector_shift = best_sector_shift;
+    *serial = best_serial;
+    return FFFS_OK;
 }
 
 int fffs_read_index_record(struct fffs *fs, size_t offset,
@@ -119,23 +157,121 @@ int fffs_read_index_record(struct fffs *fs, size_t offset,
     return FFFS_OK;
 }
 
+static int program_index_record(struct fffs *fs, size_t offset,
+        uint16_t slot, uint16_t head) {
+    uint8_t rec[4];
+    store16(rec, slot);
+    store16(rec + 2, head);
+    return fffs_flash_program(fs, offset, rec, sizeof(rec));
+}
+
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         uint16_t head) {
     if (fs->next_index_offset + 4 >
             (fs->active_index_sector + 1) * fs->sector_size) {
-        return FFFS_ERR_NO_SPACE;
+        int err = fffs_rotate_index(fs);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (fs->next_index_offset + 4 >
+                (fs->active_index_sector + 1) * fs->sector_size) {
+            return FFFS_ERR_NO_SPACE;
+        }
     }
 
-    uint8_t rec[4];
-    store16(rec, slot);
-    store16(rec + 2, head);
-    int err = fffs_flash_program(fs, fs->next_index_offset,
-            rec, sizeof(rec));
+    int err = program_index_record(fs, fs->next_index_offset, slot, head);
     if (err != FFFS_OK) {
         return err;
     }
     fs->next_index_offset += 4;
     return fffs_index_set(fs, slot, head);
+}
+
+static int compact_index_entry(struct fffs *fs, size_t *offset,
+        uint16_t slot, uint16_t head, size_t sector_end) {
+    if (*offset + 4 > sector_end) {
+        return FFFS_ERR_NO_SPACE;
+    }
+    int err = program_index_record(fs, *offset, slot, head);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    *offset += 4;
+    return FFFS_OK;
+}
+
+int fffs_rotate_index(struct fffs *fs) {
+    size_t old_active = fs->active_index_sector;
+    size_t new_active = old_active + 1;
+    if (new_active >= fs->index_sectors) {
+        new_active = 0;
+    }
+
+    size_t new_base = new_active * fs->sector_size;
+    size_t new_end = new_base + fs->sector_size;
+    int err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
+                new_base, fs->sector_size));
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    size_t off = new_base + FFFS_HEADER_SIZE;
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+    for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
+        uint16_t head = fs->index_heads[slot];
+        if (head == 0) {
+            continue;
+        }
+        err = compact_index_entry(fs, &off, (uint16_t)slot, head, new_end);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS
+    for (size_t i = 0; i < fs->index_head_count; i++) {
+        uint16_t head = fs->index_heads[i];
+        if (head == 0) {
+            continue;
+        }
+        uint16_t slot;
+        err = fffs_read_metadata(fs, head, NULL, &slot, NULL, NULL);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        err = compact_index_entry(fs, &off, slot, head, new_end);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+#else
+#error "Unsupported FFFS_INDEX_CACHE_MODE"
+#endif
+
+    uint8_t serial = (uint8_t)((fs->active_index_serial + 1) & 0x0f);
+    err = fffs_program_index_header(&fs->backend, new_base, fs->index_sectors,
+            fs->sector_shift, serial);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    uint8_t tombstone[4] = {
+        FFFS_INDEX_VERSION,
+        (uint8_t)((fs->index_sectors << 4) |
+            (fs->active_index_serial & 0x0f)),
+        fs->sector_shift,
+        (uint8_t)(FFFS_INDEX_FLAGS_VALID &
+            (uint8_t)~FFFS_INDEX_FLAG_TOMBSTONED),
+    };
+    err = fffs_flash_program(fs, old_active * fs->sector_size + 4,
+            tombstone, sizeof(tombstone));
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    fs->active_index_sector = new_active;
+    fs->active_index_serial = serial;
+    fs->next_index_offset = off;
+    return FFFS_OK;
 }
 
 static void recover_allocator_hint(struct fffs *fs, uint16_t head) {

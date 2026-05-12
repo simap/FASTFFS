@@ -15,7 +15,10 @@
 #define FFFS_INDEX_FLAG_MD_CRC_REQUIRED 0x20
 #define FFFS_INDEX_FLAGS_VALID 0x7f
 #define FFFS_MD_SIZE 64
+#define FFFS_MD_FLAG_VALID 0x80
+#define FFFS_MD_FLAG_TOMBSTONED 0x40
 #define FFFS_MD_FLAGS_VALID 0x7f
+#define FFFS_MD_FLAGS_TOMBSTONED 0x3f
 #define FFFS_MD_TYPE_BASELINE 0x01
 #define FFFS_SECTOR_FOOTER_SIZE 12
 #define FFFS_SECTOR_MAGIC "FFSD"
@@ -32,15 +35,18 @@ int fffs_flash_program(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
 
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
-        uint8_t *index_sectors, uint8_t *sector_shift);
+        uint8_t *index_sectors, uint8_t *sector_shift, uint8_t *serial);
 int fffs_program_index_header(const struct fffs_backend *backend,
-        uint8_t index_sectors, uint8_t sector_shift);
+        size_t offset, uint8_t index_sectors, uint8_t sector_shift,
+        uint8_t serial);
 int fffs_find_active_index_header(const struct fffs_backend *backend,
-        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift);
+        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift,
+        uint8_t *serial);
 int fffs_read_index_record(struct fffs *fs, size_t offset,
         uint16_t *slot, uint16_t *head);
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         uint16_t head);
+int fffs_rotate_index(struct fffs *fs);
 int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
 int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,

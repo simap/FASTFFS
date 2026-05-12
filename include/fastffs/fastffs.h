@@ -35,6 +35,8 @@ enum fffs_open_flags {
 enum {
     FFFS_DEFAULT_SECTOR_SIZE = 4096,
     FFFS_DEFAULT_SECTOR_SHIFT = 4,
+    FFFS_MIN_SECTOR_SHIFT = 4,
+    FFFS_MAX_SECTOR_SHIFT = 15,
     FFFS_DEFAULT_INDEX_SECTORS = 2,
     FFFS_MAX_NAME = 32,
     FFFS_MAX_PROBE_DISTANCE = 50,
@@ -72,6 +74,7 @@ struct fffs {
     uint8_t index_sectors;
     size_t active_index_sector;
     size_t next_index_offset;
+    uint8_t active_index_serial;
     size_t alloc_cursor;
     size_t gc_cursor;
     uint32_t next_sector_serial;

@@ -84,7 +84,8 @@ int fffs_format(const struct fffs_backend *backend,
         options->sector_shift : FFFS_DEFAULT_SECTOR_SHIFT;
     size_t sector_size = (size_t)256u << sector_shift;
     if (index_sectors < 2 || index_sectors > 15 ||
-            sector_size != FFFS_DEFAULT_SECTOR_SIZE ||
+            sector_shift < FFFS_MIN_SECTOR_SHIFT ||
+            sector_shift > FFFS_MAX_SECTOR_SHIFT ||
             backend->size % sector_size != 0 ||
             backend->size / sector_size > UINT16_MAX) {
         return FFFS_ERR_INVALID;
@@ -96,7 +97,8 @@ int fffs_format(const struct fffs_backend *backend,
         return err;
     }
 
-    return fffs_program_index_header(backend, index_sectors, sector_shift);
+    return fffs_program_index_header(backend, 0, index_sectors, sector_shift,
+            0);
 }
 
 int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
@@ -114,24 +116,28 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
 
     uint8_t index_sectors = 0;
     uint8_t sector_shift = 0;
+    uint8_t serial = 0;
     size_t active = 0;
     int err = fffs_find_active_index_header(backend, &active, &index_sectors,
-            &sector_shift);
+            &sector_shift, &serial);
     if (err != FFFS_OK) {
         return err;
     }
-    if (sector_shift != FFFS_DEFAULT_SECTOR_SHIFT) {
+    size_t sector_size = (size_t)256u << sector_shift;
+    if (backend->size % sector_size != 0 ||
+            backend->size / sector_size > UINT16_MAX) {
         return FFFS_ERR_CORRUPT;
     }
 
     fs->backend = *backend;
     fs->index_heads = index_heads;
     fs->index_head_count = index_head_count;
-    fs->sector_size = FFFS_DEFAULT_SECTOR_SIZE;
+    fs->sector_size = sector_size;
     fs->sector_count = backend->size / fs->sector_size;
     fs->sector_shift = sector_shift;
     fs->index_sectors = index_sectors;
     fs->active_index_sector = active;
+    fs->active_index_serial = serial;
     fs->next_index_offset = active * fs->sector_size + FFFS_HEADER_SIZE;
     fs->alloc_cursor = fs->index_sectors;
     fs->gc_cursor = fs->index_sectors;

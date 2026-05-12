@@ -55,6 +55,15 @@ The embedded-facing core API should be shaped around caller-provided static buff
 
 The expected output is a small host library and image file that can format, mount, create files, list files, read files, overwrite files, delete files, and remount successfully.
 
+Current Stage 2 boundary:
+
+- sector-size discovery and active index sequence selection are part of Stage 2
+- basic index rotation/compaction is part of Stage 2
+- the baseline metadata record must define valid/tombstone state bits
+- packed sectors, multiple metadata records per sector, reverse metadata
+  scanning, reusable orphan-sector allocation, continuation extents, and
+  programming local tombstones for reclaim are allocator/GC maturity work
+
 ## Stage 3: Inspection and Recovery Tools
 
 Before adding much complexity, build tools that make the image explain itself.
