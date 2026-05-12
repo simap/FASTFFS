@@ -623,7 +623,7 @@ static int test_large_file_uses_noncontiguous_extents(void) {
     static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
     static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
     const uint8_t tiny[] = {0x42};
-    const size_t large_size = 24 * 1024;
+    const size_t large_size = 350u * 1024u;
     uint8_t *large = malloc(large_size);
     uint8_t *out = malloc(large_size);
     size_t out_size = 0;
@@ -633,7 +633,7 @@ static int test_large_file_uses_noncontiguous_extents(void) {
     ASSERT_TRUE(out != NULL);
     fill_large_pattern(large, large_size);
 
-    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 64));
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 128));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
