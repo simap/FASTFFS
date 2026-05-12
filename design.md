@@ -244,6 +244,8 @@ Startup caching is configurable:
 - Default mode caches the replayed index and enough occupied-slot state to make missing lookups cheap.
 - Larger-MCU mode can cache live root metadata and/or extent lists to make `stat`, `ls`, open, and seek mostly RAM operations.
 
+The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
+
 Examples:
 
 - read one 4 KB index sector: ~405 us raw flash time
@@ -253,6 +255,94 @@ Examples:
 This is still below measured SPIFFS open/list behavior that reached hundreds of ms to nearly 1 second on larger partitions.
 
 An optional background blank check can rebuild/update in-memory free/used state after boot. If writing begins before this completes, allocation still blank-checks candidates before use.
+
+## Optional Directory Objects as Secondary Index
+
+FASTFFS can support prefix/directory-style listing without making hierarchy part
+of the baseline namespace lookup. The baseline global index remains
+authoritative:
+
+```text
+hash("cfg/")     -> directory object head
+hash("cfg/net")  -> file object head
+hash("cfg/ui")   -> file object head
+```
+
+In this model, a directory is a special object stored and committed like a file,
+but its payload is a compact secondary index for children under that prefix.
+The normal full-path index is still used for open, stat, delete, and liveness.
+The directory object only accelerates listing and gives the API a natural place
+to simulate or later expose hierarchy.
+
+A simple directory payload can be an append-oriented array of resolved child
+slots.
+
+Entry values are monotonic NOR states:
+
+- `0xffff`: empty / never written
+- `0x0000`: removed / tombstoned entry
+- `0x0001..0xfffe`: resolved child slot
+
+Slot resolution should avoid `0x0000` and `0xffff`.
+Those sentinels are only in the slot namespace; they are distinct from special
+head-sector values such as `head == 0` for delete and any future `head == 1`
+control record.
+
+Directory listing then becomes:
+
+1. Resolve/open the directory object for the requested prefix, such as `"cfg/"`.
+2. Stream its `child_slot[]` entries.
+3. Skip `0x0000` stop at `0xffff`.
+4. Resolve each live child slot through the main index.
+5. Read child root metadata and return entries whose names still belong to the
+   directory prefix.
+
+The main index remains the source of truth. If a child slot is missing from the
+main index, points at deleted metadata, or resolves to a different name after
+churn, the directory entry is stale. Normal operation can skip stale entries;
+fsck/check should report them and directory compaction can remove them.
+
+Directory entries are append/tombstone oriented. A removed child entry can be
+programmed from its slot value to `0x0000` to remove it. 
+
+Eventually the directory object either grows to another sector/extent or is
+compacted copy-on-write into a new object and republished through the main
+index.
+
+This is deliberately a secondary index, not necessarily true hierarchy:
+
+- Full-path file lookup can remain one hash/probe lookup.
+- Directory objects can be compile-time optional.
+- Filesystems without directory objects can still list by scanning/filtering the
+  replayed global index.
+- A future true-hierarchy mode can build on the same object type by making path
+  lookup walk directory objects component by component.
+
+Directory updates have transaction implications. Creating `"cfg/net"` when
+`"cfg/"` already exists logically needs two namespace effects: publish the file
+in the main index and append the child slot to the directory object. 
+
+For consistency, it should be written to the directory first, then the main index to become real/valid. Otherwise the file would exist, but would be orphaned from directory listings. A file in a directory that isn't in the index is invalid and would be ignored.
+
+Creating a
+missing directory at the same time adds another index record. Without index
+transactions, the directory should be created and populated first. With transactions, a create can atomically publish:
+
+- any newly-created directory object
+- the file's main index record
+- the directory object's updated head, if the directory was created, grew, or
+  was compacted copy-on-write
+
+If an existing directory object can append the child slot in place without
+moving its head, the main index entry for that directory does not need to be
+rewritten. If the directory grows through linked extents under a stable head,
+growth may also avoid a directory index update. If growth or compaction
+publishes a replacement head, that directory index update should participate in
+the same transaction as the related file operation when atomic directory
+contents are required.
+
+This should be an optional feature. It is most useful when a
+workload performs frequent directory listings over a large namespace. Direct full path access wouldn't be impacted.
 
 ## Free/Used Tracking
 
@@ -271,6 +361,23 @@ The allocator also keeps an `alloc_cursor`, the next sector to try for foregroun
 
 GC keeps a separate `gc_cursor`, the next sector to inspect for reclaim. Keeping these cursors separate lets foreground allocation, background reclaim, and wear distribution progress independently.
 
+The `alloc_cursor`, `gc_cursor`, and bitmap are reconstructable allocator hints,
+not namespace state. They do not need to be updated atomically with file
+commits. Losing them after power loss may cost scan time, not correctness.
+
+The index tail provides a cheap allocator recovery hint. Writes try to fill
+sectors, and each committed file update appends an index record pointing at the
+head sector that was just written. During mount, the newest (tail) valid index records
+therefore identify the sector region where allocation was happening at the last
+committed write. Reading sector footers for those tail heads gives the newest
+known sector serial and a good place to resume `alloc_cursor`.
+
+It's possible some writes occured and were not commited, so scan should also look ahead a few sectors from the last commited one.
+
+The sector serial is also a relative age signal for GC and wear distribution.
+Low serial sectors are older allocation candidates. 
+
+
 ## Commit Order
 
 File create/overwrite:
@@ -278,7 +385,7 @@ File create/overwrite:
 1. Allocate candidate sectors.
 2. Blank-check before programming.
 3. Write file data.
-4. Write sector-local metadata.
+4. Write sector-local metadata and the sector footer.
 5. Append the global index record last.
 
 Crash behavior:
@@ -313,6 +420,49 @@ Small files can share a sector. Larger files can spill into continuation sectors
 New files prefer a sector with enough free space for the largest supported metadata record plus at least a configured minimum threshold of file data. A reasonable starting threshold is 128-256 bytes. The exact formula is a tunable definition, but runtime allocation should be a simple range check.
 
 Allocator policy should also reserve some metadata slack for later tombstones and amendment records. The exact reserve is TBD. Might be configurable, with reserve = 0 effectively disables MD ammendment records.
+
+## Sector Footer
+
+Each data/mixed FASTFFS sector carries a small footer at the physical end of the
+sector. The footer identifies the sector as FASTFFS-owned and records when the
+sector was allocated or first written after erase.
+
+The footer lives at the end rather than the beginning because metadata scanning
+already reads from the sector tail. A single 128-byte or 256-byte read from the
+end can fetch the footer plus the newest metadata records for mount, fsck, and
+GC.
+
+Example footer shape:
+
+```c
+struct fffs_sector_footer {
+    uint32_t serial;   // monotonic sector allocation/write serial
+    uint8_t type;      // mixed data/metadata, directory, state, reserved
+    uint8_t flags;     // valid/tombstone/reserved policy bits
+    uint16_t reserved; // future CRC, footer size, or format flags
+    uint32_t magic;    // sector-level FASTFFS magic, read first when parsing sector MD in reverse
+};
+```
+
+The serial is 32-bit. It should advance when a sector is claimed for use after
+erase, or equivalently at the first write that makes the sector FASTFFS-owned.
+At one increment per claimed sector, 32 bits is unlikely to wrap before the
+flash has exhausted its useful erase life for the target devices. If wrap ever
+occurs, serials remain hints only; namespace correctness still comes from the
+global index and metadata validation.
+
+The serial gives two useful hints:
+
+- the filesystem's relative allocation age
+- each sector's relative last-allocation age for allocation and GC choices
+
+A sector with a valid footer but no committed index path to it is
+allocated/orphaned. It may still be used if there are free (erased) metadata and file data space. A sector
+with an erased footer is unclaimed or fully erased. A partially programmed or
+invalid footer should be treated as a failed claim/corrupt orphan unless a full
+blank check proves the sector is erased.
+
+Metadata records do not need their own magic field. 
 
 ## Sector Metadata
 
@@ -465,6 +615,7 @@ Several parts of the design can be optional or compile-time/runtime configuratio
 | cache full file metadata at startup | Faster `stat`, `ls`, and open; uses more RAM |
 | cache only index at startup | Lower RAM; open may read one metadata page |
 | no preload / lazy metadata reads | Lowest startup work; cold operations may probe flash |
+| caller-provided static buffers | Keeps the embedded core usable without `malloc`/`free` |
 | background blank-check scan on boot | Refreshes in-memory free/used state before writes |
 | skip boot scan and blank-check on allocation | Faster boot; bitmap may be stale until writes complete |
 | sector size | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |

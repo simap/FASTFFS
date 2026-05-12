@@ -51,6 +51,8 @@ The host image should be self-describing through index headers and image size. M
 
 The implementation should include a fake NOR flash backend with the same monotonic write and erase behavior as real flash. That lets the format evolve quickly without device flashing overhead.
 
+The embedded-facing core API should be shaped around caller-provided static buffers, even though host tools and tests can use dynamic allocation.
+
 The expected output is a small host library and image file that can format, mount, create files, list files, read files, overwrite files, delete files, and remount successfully.
 
 ## Stage 3: Inspection and Recovery Tools
@@ -191,6 +193,7 @@ The first useful implementation should be deliberately narrow:
 - default 4 KB FASTFFS sectors
 - 8-byte index sector header
 - self-describing host image
+- caller-provided static buffer model for the core API
 - max probe distance 50
 - 32-byte filenames
 - baseline metadata record only
