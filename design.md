@@ -644,6 +644,26 @@ Sector reclaim:
 - erases sectors that contain only deleted/orphaned/tombstoned data
 - advances allocation state so erased sectors can be found by the allocator
 
+GC should be incremental. The smallest useful GC step is one bounded physical
+state transition or classification step:
+
+- inspect/classify one sector-local metadata record and, if it is dead,
+  optionally program that record's local tombstone bit
+- or erase one sector that has already been classified as reclaimable
+
+A GC step should not inspect metadata, tombstone it, and erase the sector in the
+same call. Erase is large enough on target flash that it should be treated as a
+whole step by itself. If metadata checking later becomes too expensive, the
+metadata inspection step can be split further, but sector erase remains the
+natural largest indivisible GC step.
+
+The preferred scheduling knob is elapsed time, not a filesystem-wide "collect
+everything" operation. User code can call a GC step whenever it has idle time,
+measure its own wall-clock budget, and call again while idle time remains. A
+future helper could loop over GC steps until a supplied time budget is exhausted,
+but the core can remain usable with a simple one-step API and caller-managed
+scheduling.
+
 Sector-local compaction is TBD. It can behave like defrag: copy whole live files elsewhere, append normal overwrite records to the index, and allow the old sector to become reclaimable through ordinary GC. Because file size is known during compaction, it can try to choose contiguous sectors and reduce the number of extents. Flash does not materially care about sequential access, but contiguous placement benefits the linked-extent representation slightly by reducing metadata and seek traversal.
 
 Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
