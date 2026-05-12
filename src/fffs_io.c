@@ -138,8 +138,41 @@ int fffs_append_index_record(struct fffs *fs, uint16_t slot,
     return fffs_index_set(fs, slot, head);
 }
 
+static void recover_allocator_hint(struct fffs *fs, uint16_t head) {
+    size_t sector = head;
+
+    fs->alloc_cursor = fffs_next_data_sector(fs, head);
+
+    for (size_t checked = 0; checked <= FFFS_ALLOC_RECOVERY_LOOKAHEAD;
+            checked++) {
+        uint32_t serial;
+        int err;
+
+        if (sector < fs->index_sectors || sector >= fs->sector_count) {
+            return;
+        }
+
+        err = fffs_read_sector_footer(fs, (uint16_t)sector, &serial);
+        if (err == FFFS_OK) {
+            if (serial >= fs->next_sector_serial) {
+                fs->next_sector_serial = serial + 1;
+                if (fs->next_sector_serial == 0) {
+                    fs->next_sector_serial = 1;
+                }
+            }
+        }
+
+        size_t next = fffs_next_data_sector(fs, sector);
+        if (next <= sector) {
+            return;
+        }
+        sector = next;
+    }
+}
+
 int fffs_replay_index(struct fffs *fs) {
     size_t end = (fs->active_index_sector + 1) * fs->sector_size;
+    uint16_t tail_head = 0;
     for (size_t off = fs->next_index_offset; off + 4 <= end; off += 4) {
         uint16_t slot;
         uint16_t head;
@@ -149,6 +182,9 @@ int fffs_replay_index(struct fffs *fs) {
         }
         if (slot == UINT16_MAX && head == UINT16_MAX) {
             fs->next_index_offset = off;
+            if (tail_head != 0) {
+                recover_allocator_hint(fs, tail_head);
+            }
             return FFFS_OK;
         }
         if (slot == 0 && head == 0) {
@@ -164,24 +200,67 @@ int fffs_replay_index(struct fffs *fs) {
         if (head < fs->index_sectors || head >= fs->sector_count) {
             return FFFS_ERR_CORRUPT;
         }
-
-        uint16_t md_slot;
-        err = fffs_read_metadata(fs, head, NULL, &md_slot, NULL, NULL);
-        if (err != FFFS_OK || md_slot != slot) {
-            return FFFS_ERR_CORRUPT;
-        }
         err = fffs_index_insert(fs, slot, head);
         if (err != FFFS_OK) {
             return err;
         }
+        tail_head = head;
     }
 
     fs->next_index_offset = end;
+    if (tail_head != 0) {
+        recover_allocator_hint(fs, tail_head);
+    }
     return FFFS_OK;
 }
 
 size_t fffs_max_file_data_size(const struct fffs *fs) {
-    return fs->sector_size - FFFS_MD_SIZE;
+    return fs->sector_size - FFFS_SECTOR_FOOTER_SIZE - FFFS_MD_SIZE;
+}
+
+static size_t sector_footer_offset(struct fffs *fs, uint16_t sector) {
+    return (size_t)sector * fs->sector_size + fs->sector_size -
+        FFFS_SECTOR_FOOTER_SIZE;
+}
+
+static size_t sector_metadata_offset(struct fffs *fs, uint16_t sector) {
+    return sector_footer_offset(fs, sector) - FFFS_MD_SIZE;
+}
+
+int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
+        uint32_t *serial) {
+    if (sector < fs->index_sectors || sector >= fs->sector_count) {
+        return FFFS_ERR_CORRUPT;
+    }
+
+    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    int err = fffs_flash_read(fs, sector_footer_offset(fs, sector),
+            footer, sizeof(footer));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (footer[4] != FFFS_SECTOR_TYPE_MIXED ||
+            footer[5] != FFFS_SECTOR_FLAGS_VALID ||
+            footer[6] != 0xff || footer[7] != 0xff ||
+            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0) {
+        return FFFS_ERR_CORRUPT;
+    }
+    if (serial) {
+        *serial = load32(footer);
+    }
+    return FFFS_OK;
+}
+
+int fffs_write_sector_footer(struct fffs_file *file) {
+    struct fffs *fs = file->fs;
+    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    memset(footer, 0xff, sizeof(footer));
+    store32(footer, file->sector_serial);
+    footer[4] = FFFS_SECTOR_TYPE_MIXED;
+    footer[5] = FFFS_SECTOR_FLAGS_VALID;
+    memcpy(footer + 8, FFFS_SECTOR_MAGIC, 4);
+    return fffs_flash_program(fs, sector_footer_offset(fs, file->head),
+            footer, sizeof(footer));
 }
 
 int fffs_read_metadata(struct fffs *fs, uint16_t sector,
@@ -191,28 +270,31 @@ int fffs_read_metadata(struct fffs *fs, uint16_t sector,
         return FFFS_ERR_CORRUPT;
     }
 
-    uint8_t md[FFFS_MD_SIZE];
-    size_t offset = (size_t)sector * fs->sector_size +
-        fs->sector_size - FFFS_MD_SIZE;
-    int err = fffs_flash_read(fs, offset, md, sizeof(md));
+    int err = fffs_read_sector_footer(fs, sector, NULL);
     if (err != FFFS_OK) {
         return err;
     }
-    if (memcmp(md, FFFS_MD_MAGIC, 4) != 0 ||
-            md[4] != FFFS_MD_FLAGS_VALID ||
+
+    uint8_t md[FFFS_MD_SIZE];
+    err = fffs_flash_read(fs, sector_metadata_offset(fs, sector),
+            md, sizeof(md));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (md[0] != FFFS_MD_FLAGS_VALID ||
             md[63] != FFFS_MD_TYPE_BASELINE ||
-            md[5] == 0 || md[5] > FFFS_MAX_NAME) {
+            md[1] == 0 || md[1] > FFFS_MAX_NAME) {
         return FFFS_ERR_CORRUPT;
     }
 
-    uint16_t off = load16(md + 8);
-    uint16_t len = load16(md + 10);
-    if ((size_t)off + len > fs->sector_size - FFFS_MD_SIZE) {
+    uint16_t off = load16(md + 4);
+    uint16_t len = load16(md + 6);
+    if ((size_t)off + len > fffs_max_file_data_size(fs)) {
         return FFFS_ERR_CORRUPT;
     }
 
     if (slot) {
-        *slot = load16(md + 6);
+        *slot = load16(md + 2);
     }
     if (data_off) {
         *data_off = off;
@@ -221,10 +303,10 @@ int fffs_read_metadata(struct fffs *fs, uint16_t sector,
         *data_len = len;
     }
     if (st) {
-        size_t name_len = md[5];
-        memcpy(st->name, md + 18, name_len);
+        size_t name_len = md[1];
+        memcpy(st->name, md + 14, name_len);
         st->name[name_len] = '\0';
-        st->size = load32(md + 12);
+        st->size = load32(md + 8);
     }
     return FFFS_OK;
 }
@@ -233,19 +315,22 @@ int fffs_write_root_metadata(struct fffs_file *file) {
     struct fffs *fs = file->fs;
     uint8_t md[FFFS_MD_SIZE];
     memset(md, 0xff, sizeof(md));
-    memcpy(md, FFFS_MD_MAGIC, 4);
-    md[4] = FFFS_MD_FLAGS_VALID;
-    md[5] = (uint8_t)strlen(file->name);
-    store16(md + 6, file->slot);
-    store16(md + 8, file->data_offset);
-    store16(md + 10, (uint16_t)file->size);
-    store32(md + 12, file->size);
-    store16(md + 16, 0);
-    memcpy(md + 18, file->name, md[5]);
+    md[0] = FFFS_MD_FLAGS_VALID;
+    md[1] = (uint8_t)strlen(file->name);
+    store16(md + 2, file->slot);
+    store16(md + 4, file->data_offset);
+    store16(md + 6, (uint16_t)file->size);
+    store32(md + 8, file->size);
+    store16(md + 12, 0);
+    memcpy(md + 14, file->name, md[1]);
     md[63] = FFFS_MD_TYPE_BASELINE;
 
-    int err = fffs_flash_program(fs, (size_t)file->head * fs->sector_size +
-            fs->sector_size - FFFS_MD_SIZE, md, sizeof(md));
+    int err = fffs_write_sector_footer(file);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    err = fffs_flash_program(fs, sector_metadata_offset(fs, file->head),
+            md, sizeof(md));
     if (err != FFFS_OK) {
         return err;
     }

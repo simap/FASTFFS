@@ -142,6 +142,8 @@ static int test_format_mount_write_read_remount(void) {
     ASSERT_OK(write_chunks(&fs, "beta", beta, sizeof(beta)));
     ASSERT_OK(write_chunks(&fs, "cfg/net", alpha, sizeof(alpha)));
     ASSERT_OK(write_chunks(&fs, "cfg/ui", beta, sizeof(beta)));
+    ASSERT_TRUE(fs.alloc_cursor == fs.index_sectors + 4);
+    ASSERT_TRUE(fs.next_sector_serial == 5);
 
     struct fffs_stat entries[4];
     size_t count = 0;
@@ -164,6 +166,8 @@ static int test_format_mount_write_read_remount(void) {
     fffs_unmount(&fs);
 
     ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.alloc_cursor == remounted.index_sectors + 4);
+    ASSERT_TRUE(remounted.next_sector_serial == 5);
     memset(out, 0, sizeof(out));
     ASSERT_OK(read_chunks(&remounted, "beta", out, sizeof(out), &out_size));
     ASSERT_TRUE(out_size == sizeof(beta));
@@ -204,8 +208,12 @@ static int test_overwrite_delete_and_remount(void) {
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)old_value,
                 strlen(old_value)));
+    ASSERT_TRUE(fs.alloc_cursor == fs.index_sectors + 1);
+    ASSERT_TRUE(fs.next_sector_serial == 2);
     ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)new_value,
                 strlen(new_value)));
+    ASSERT_TRUE(fs.alloc_cursor == fs.index_sectors + 2);
+    ASSERT_TRUE(fs.next_sector_serial == 3);
     ASSERT_OK(fffs_stat(&fs, "config", &st));
     ASSERT_TRUE(st.size == strlen(new_value));
     ASSERT_OK(read_chunks(&fs, "config", out, sizeof(out), &out_size));
@@ -216,6 +224,8 @@ static int test_overwrite_delete_and_remount(void) {
     fffs_unmount(&fs);
 
     ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.alloc_cursor == remounted.index_sectors + 2);
+    ASSERT_TRUE(remounted.next_sector_serial == 3);
     ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&remounted, "config", &st));
 
     fffs_unmount(&remounted);
@@ -257,6 +267,142 @@ static int test_reserved_hash_slots_are_skipped(void) {
     return 0;
 }
 
+static int test_gc_reclaims_unindexed_orphan_sector(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    uint8_t footer[12] = {
+        0x7b, 0x00, 0x00, 0x00,
+        0x01, 0x7f, 0xff, 0xff,
+        'F', 'F', 'S', 'D',
+    };
+    uint8_t check[12];
+    size_t erased = 0;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
+                    10 * FFFS_DEFAULT_SECTOR_SIZE +
+                    FFFS_DEFAULT_SECTOR_SIZE - sizeof(footer),
+                    footer, sizeof(footer), FFSV_CALLSITE)));
+    fs.gc_cursor = fs.index_sectors;
+    ASSERT_OK(fffs_gc(&fs, fs.sector_count, &erased));
+    ASSERT_TRUE(erased == 1);
+    ASSERT_OK(flash_to_fs(ffsv_flash_read(flash,
+                    10 * FFFS_DEFAULT_SECTOR_SIZE +
+                    FFFS_DEFAULT_SECTOR_SIZE - sizeof(check),
+                    check, sizeof(check), FFSV_CALLSITE)));
+    for (size_t i = 0; i < sizeof(check); i++) {
+        ASSERT_TRUE(check[i] == 0xff);
+    }
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_preserves_index_referenced_heads(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    static uint16_t remount_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    const char *old_value = "old";
+    const char *new_value = "new";
+    size_t erased = 0;
+    struct fffs_stat st;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)old_value,
+                strlen(old_value)));
+    ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)new_value,
+                strlen(new_value)));
+    ASSERT_OK(fffs_delete_file(&fs, "config"));
+    fs.gc_cursor = fs.index_sectors;
+    ASSERT_OK(fffs_gc(&fs, fs.sector_count, &erased));
+    ASSERT_TRUE(erased == 0);
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&remounted, "config", &st));
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_mount_uses_orphan_lookahead_for_serial_hint(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    static uint16_t remount_index_heads[
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+        FFFS_SLOT_COUNT
+#else
+        FFFS_INDEX_HASH_HEAD_COUNT
+#endif
+    ];
+    const char *value = "committed";
+    uint8_t orphan_footer[12] = {
+        0x2c, 0x01, 0x00, 0x00,
+        0x01, 0x7f, 0xff, 0xff,
+        'F', 'F', 'S', 'D',
+    };
+    uint16_t orphan_sector;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)value,
+                strlen(value)));
+    orphan_sector = (uint16_t)fs.alloc_cursor;
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
+                    (size_t)orphan_sector * FFFS_DEFAULT_SECTOR_SIZE +
+                    FFFS_DEFAULT_SECTOR_SIZE - sizeof(orphan_footer),
+                    orphan_footer, sizeof(orphan_footer), FFSV_CALLSITE)));
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.alloc_cursor == orphan_sector);
+    ASSERT_TRUE(remounted.next_sector_serial == 301);
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_index_header_discovery_without_sector_zero(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -290,6 +436,9 @@ int main(void) {
     failures += test_format_mount_write_read_remount();
     failures += test_overwrite_delete_and_remount();
     failures += test_reserved_hash_slots_are_skipped();
+    failures += test_gc_reclaims_unindexed_orphan_sector();
+    failures += test_gc_preserves_index_referenced_heads();
+    failures += test_mount_uses_orphan_lookahead_for_serial_hint();
     failures += test_index_header_discovery_without_sector_zero();
     if (failures) {
         fprintf(stderr, "%d fastffs tests failed\n", failures);

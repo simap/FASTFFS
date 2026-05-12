@@ -72,6 +72,9 @@ struct fffs {
     uint8_t index_sectors;
     size_t active_index_sector;
     size_t next_index_offset;
+    size_t alloc_cursor;
+    size_t gc_cursor;
+    uint32_t next_sector_serial;
 };
 
 struct fffs_stat {
@@ -89,6 +92,7 @@ struct fffs_file {
     uint16_t data_offset;
     uint32_t size;
     uint32_t pos;
+    uint32_t sector_serial;
     size_t tail_len;
     char name[FFFS_MAX_NAME + 1];
     uint8_t tail[FFFS_MAX_PROGRAM_GRANULE];
@@ -123,6 +127,7 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st);
 int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st);
 int fffs_exists(struct fffs *fs, const char *name, bool *exists);
 int fffs_delete_file(struct fffs *fs, const char *name);
+int fffs_gc(struct fffs *fs, size_t max_sectors, size_t *out_erased);
 int fffs_dir_open(struct fffs *fs, struct fffs_dir *dir,
         const char *prefix);
 bool fffs_dir_read(struct fffs_dir *dir, struct fffs_stat *st);

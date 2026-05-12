@@ -15,9 +15,12 @@
 #define FFFS_INDEX_FLAG_MD_CRC_REQUIRED 0x20
 #define FFFS_INDEX_FLAGS_VALID 0x7f
 #define FFFS_MD_SIZE 64
-#define FFFS_MD_MAGIC "FMD1"
 #define FFFS_MD_FLAGS_VALID 0x7f
 #define FFFS_MD_TYPE_BASELINE 0x01
+#define FFFS_SECTOR_FOOTER_SIZE 12
+#define FFFS_SECTOR_MAGIC "FFSD"
+#define FFFS_SECTOR_FLAGS_VALID 0x7f
+#define FFFS_SECTOR_TYPE_MIXED 0x01
 
 int fffs_map_backend_status(int status);
 bool fffs_valid_backend(const struct fffs_backend *backend);
@@ -40,6 +43,9 @@ int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         uint16_t head);
 int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
+int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
+        uint32_t *serial);
+int fffs_write_sector_footer(struct fffs_file *file);
 int fffs_read_metadata(struct fffs *fs, uint16_t sector,
         struct fffs_stat *st, uint16_t *slot, uint16_t *data_off,
         uint16_t *data_len);
@@ -51,6 +57,7 @@ int fffs_index_remove(struct fffs *fs, uint16_t slot);
 int fffs_index_set(struct fffs *fs, uint16_t slot, uint16_t head);
 bool fffs_index_head_count_valid(size_t count);
 
+size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
 int fffs_find_free_sector(struct fffs *fs, uint16_t *sector);
 
 #endif

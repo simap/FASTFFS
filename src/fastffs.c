@@ -133,6 +133,9 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->index_sectors = index_sectors;
     fs->active_index_sector = active;
     fs->next_index_offset = active * fs->sector_size + FFFS_HEADER_SIZE;
+    fs->alloc_cursor = fs->index_sectors;
+    fs->gc_cursor = fs->index_sectors;
+    fs->next_sector_serial = 1;
 
     err = fffs_replay_index(fs);
     if (err != FFFS_OK) {
@@ -207,6 +210,10 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
             return err;
         }
         file->head = sector;
+        file->sector_serial = fs->next_sector_serial++;
+        if (fs->next_sector_serial == 0) {
+            fs->next_sector_serial = 1;
+        }
         memcpy(file->name, name, strlen(name) + 1);
     }
 
