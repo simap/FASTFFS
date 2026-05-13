@@ -54,6 +54,24 @@ uint16_t fffs_hash16(const char *name) {
     return (uint16_t)((h >> 16) ^ h);
 }
 
+uint16_t fffs_normalize_slot_base(uint16_t slot) {
+    if (slot == 0) {
+        return 1;
+    }
+    if (slot == UINT16_MAX) {
+        return 0x7fff;
+    }
+    return slot;
+}
+
+uint16_t fffs_next_slot(uint16_t slot) {
+    slot++;
+    if (slot == 0 || slot == UINT16_MAX) {
+        return 1;
+    }
+    return slot;
+}
+
 int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size) {
     return fffs_map_backend_status(fs->backend.read(fs->backend.ctx,
@@ -104,6 +122,13 @@ static int backend_program_aligned(const struct fffs_backend *backend,
 int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size) {
     return backend_program_aligned(&fs->backend, offset, buffer, size);
+}
+
+void fffs_scratch_bump(struct fffs *fs) {
+    fs->scratch_serial++;
+    if (fs->scratch_serial == 0) {
+        fs->scratch_serial = 1;
+    }
 }
 
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
@@ -362,7 +387,7 @@ int fffs_append_index_record(struct fffs *fs, uint16_t slot,
     return fffs_index_set(fs, slot, head);
 }
 
-static int compact_index_entry(struct fffs *fs, size_t *offset,
+int fffs_compact_index_entry(struct fffs *fs, size_t *offset,
         uint16_t slot, uint16_t head, size_t sector_end) {
     if (*offset + 4 > sector_end) {
         return FFFS_ERR_NO_SPACE;
@@ -391,36 +416,10 @@ int fffs_rotate_index(struct fffs *fs) {
     }
 
     size_t off = new_base + FFFS_HEADER_SIZE;
-#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
-    for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
-        uint16_t head = fs->index_heads[slot];
-        if (head == 0) {
-            continue;
-        }
-        err = compact_index_entry(fs, &off, (uint16_t)slot, head, new_end);
-        if (err != FFFS_OK) {
-            return err;
-        }
+    err = fffs_index_compact(fs, &off, new_end);
+    if (err != FFFS_OK) {
+        return err;
     }
-#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS
-    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
-        uint16_t head = fs->index_heads[i];
-        if (head == 0) {
-            continue;
-        }
-        uint16_t slot;
-        err = fffs_read_metadata(fs, head, NULL, &slot, NULL, NULL, NULL);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        err = compact_index_entry(fs, &off, slot, head, new_end);
-        if (err != FFFS_OK) {
-            return err;
-        }
-    }
-#else
-#error "Unsupported FFFS_INDEX_CACHE_MODE"
-#endif
 
     uint8_t serial = (uint8_t)((fs->active_index_serial + 1) & 0x0f);
     err = fffs_program_index_header(&fs->backend, new_base, fs->index_sectors,
@@ -519,6 +518,9 @@ int fffs_replay_index(struct fffs *fs) {
             int err = fffs_flash_read(fs, off, chunk, nread);
             if (err != FFFS_OK) {
                 return err;
+            }
+            if (chunk == fs->scratch) {
+                fffs_scratch_bump(fs);
             }
             for (size_t pos = 0; pos < nread; pos += 4) {
                 uint16_t slot = load16(chunk + pos);

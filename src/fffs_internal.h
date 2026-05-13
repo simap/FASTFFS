@@ -40,6 +40,8 @@
 int fffs_map_backend_status(int status);
 bool fffs_valid_backend(const struct fffs_backend *backend);
 uint16_t fffs_hash16(const char *name);
+uint16_t fffs_normalize_slot_base(uint16_t slot);
+uint16_t fffs_next_slot(uint16_t slot);
 
 int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size);
@@ -47,6 +49,7 @@ int fffs_flash_program(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
 int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
+void fffs_scratch_bump(struct fffs *fs);
 
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
         uint8_t *index_sectors, uint8_t *sector_shift, uint8_t *serial);
@@ -67,6 +70,8 @@ int fffs_read_index_record(struct fffs *fs, size_t offset,
         uint16_t *slot, uint16_t *head);
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         uint16_t head);
+int fffs_compact_index_entry(struct fffs *fs, size_t *offset,
+        uint16_t slot, uint16_t head, size_t sector_end);
 int fffs_rotate_index(struct fffs *fs);
 int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
@@ -84,14 +89,31 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint32_t serial, uint16_t data_len, uint32_t total_size,
         uint16_t next, bool commit_index);
 
+void fffs_bitset_clear(uint32_t *words, size_t word_count);
+bool fffs_bitset_get(const uint32_t *words, size_t bit);
+void fffs_bitset_set(uint32_t *words, size_t bit);
+
 int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
         uint16_t *head, bool *end);
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head);
 int fffs_index_remove(struct fffs *fs, uint16_t slot);
 int fffs_index_set(struct fffs *fs, uint16_t slot, uint16_t head);
-bool fffs_index_hash_table_size_valid(size_t count);
+bool fffs_index_cache_config_valid(size_t count);
+int fffs_index_resolve(struct fffs *fs, const char *name,
+        uint16_t *slot, uint16_t *head, bool *found,
+        struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
+        uint16_t *next);
+bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st);
+int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end);
+bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector);
+int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
+        bool *reachable);
 
+bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector);
+bool fffs_name_is_inflight(struct fffs *fs, const char *name);
 size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
+int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size);
+int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
 int fffs_find_free_sector(struct fffs *fs, uint16_t *sector);
 
 #endif

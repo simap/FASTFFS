@@ -2,10 +2,13 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g
 CPPFLAGS ?= -Iinclude
 CPPFLAGS += -Itests/littlefs
-BUILD_DIR ?= build
+BUILD_ROOT ?= build
+BUILD_DIR ?= $(BUILD_ROOT)/default
 SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all test test-timing test-workload test-sanitize test-full-index clean
+.PHONY: all test test-timing test-timing-full-index test-timing-nocache \
+	test-timing-nocache-noscratch test-timing-compare test-workload \
+	test-sanitize test-full-index test-nocache clean
 
 all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe
@@ -31,7 +34,26 @@ $(BUILD_DIR)/src_fffs_ram_index.o: src/fffs_ram_index.c \
 		include/fastffs/fffs_opts.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/src_fffs_hashtable_index.o: src/fffs_hashtable_index.c \
+		src/fffs_internal.h include/fastffs/fastffs.h \
+		include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/src_fffs_nocache_index.o: src/fffs_nocache_index.c \
+		src/fffs_internal.h include/fastffs/fastffs.h \
+		include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/src_fffs_bitset.o: src/fffs_bitset.c \
+		src/fffs_internal.h include/fastffs/fastffs.h \
+		include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c src/fffs_internal.h \
+		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/src_fffs_gc.o: src/fffs_gc.c src/fffs_internal.h \
 		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -80,7 +102,11 @@ $(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
 $(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_io.o \
 		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_hashtable_index.o \
+		$(BUILD_DIR)/src_fffs_nocache_index.o \
+		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
 		$(BUILD_DIR)/src_verify_flash.o \
@@ -92,7 +118,11 @@ $(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
 $(BUILD_DIR)/fffs_tool: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_io.o \
 		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_hashtable_index.o \
+		$(BUILD_DIR)/src_fffs_nocache_index.o \
+		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
 		$(BUILD_DIR)/src_verify_flash.o \
@@ -104,7 +134,11 @@ $(BUILD_DIR)/fffs_tool: $(BUILD_DIR)/src_fastffs.o \
 $(BUILD_DIR)/fffs_time_probe: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_io.o \
 		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_hashtable_index.o \
+		$(BUILD_DIR)/src_fffs_nocache_index.o \
+		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
 		$(BUILD_DIR)/src_verify_flash.o \
@@ -126,19 +160,39 @@ test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 test-timing: $(BUILD_DIR)/fffs_time_probe
 	./$(BUILD_DIR)/fffs_time_probe
 
+test-timing-full-index:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/full-index \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_FULL_SLOT_HEADS" \
+		test-timing
+
+test-timing-nocache:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/nocache \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_NONE" \
+		test-timing
+
+test-timing-nocache-noscratch:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/nocache-noscratch \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_NONE -DFFFS_TIME_PROBE_SCRATCH_SIZE=0" \
+		test-timing
+
+test-timing-compare: test-timing test-timing-full-index test-timing-nocache
+
 test-workload: $(BUILD_DIR)/fffs_tool
 	./$(BUILD_DIR)/fffs_tool workload $(BUILD_DIR)/workload-long.img 4194304 16
 	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/workload-long.img
 
 test-sanitize:
-	$(MAKE) BUILD_DIR=build-sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test
 
 test-full-index:
-	$(MAKE) BUILD_DIR=build-full-index \
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/full-index \
 		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_FULL_SLOT_HEADS" \
 		test
 
+test-nocache:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/nocache \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_NONE" \
+		test
+
 clean:
-	rm -rf build
-	rm -rf build-sanitize
-	rm -rf build-full-index
+	rm -rf $(BUILD_ROOT)

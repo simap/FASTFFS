@@ -13,6 +13,10 @@
 /*
  * Index cache modes:
  *
+ * FFFS_INDEX_CACHE_NONE keeps no persistent RAM namespace cache. Lookup,
+ * directory iteration, GC liveness, and index compaction scan the on-flash
+ * index as needed.
+ *
  * FFFS_INDEX_CACHE_HASH_HEADS stores only head sectors in a caller-provided
  * power-of-two hash table. The resolved slot key is recovered from root
  * metadata when hash collisions occur.
@@ -20,6 +24,7 @@
  * FFFS_INDEX_CACHE_FULL_SLOT_HEADS stores one head sector per possible
  * resolved slot. It uses 128 KiB but provides direct slot lookup.
  */
+#define FFFS_INDEX_CACHE_NONE 0
 #define FFFS_INDEX_CACHE_HASH_HEADS 1
 #define FFFS_INDEX_CACHE_FULL_SLOT_HEADS 2
 
@@ -37,6 +42,10 @@
 
 #ifndef FFFS_ALLOC_RECOVERY_LOOKAHEAD
 #define FFFS_ALLOC_RECOVERY_LOOKAHEAD 4
+#endif
+
+#ifndef FFFS_GC_ON_ALLOC_FAILURE
+#define FFFS_GC_ON_ALLOC_FAILURE 1
 #endif
 
 #ifndef FFFS_INDEX_REPLAY_FALLBACK_SIZE

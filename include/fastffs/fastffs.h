@@ -94,10 +94,12 @@ struct fffs_mount_options {
 
 struct fffs {
     struct fffs_backend backend;
+    struct fffs_file *inflight_writers;
     uint16_t *index_heads;
     size_t index_hash_table_size;
     uint8_t *scratch;
     size_t scratch_size;
+    uint32_t scratch_serial;
     size_t sector_size;
     size_t sector_count;
     uint8_t sector_shift;
@@ -122,6 +124,7 @@ typedef struct fffs_stat fffs_dirent;
 
 struct fffs_file {
     struct fffs *fs;
+    struct fffs_file *inflight_next;
     uint32_t flags;
     uint16_t slot;
     uint16_t head;
@@ -143,11 +146,18 @@ struct fffs_file {
     bool root_deferred;
     bool found;
     bool closed;
+    bool inflight_registered;
 };
 
 struct fffs_dir {
     struct fffs *fs;
     size_t pos;
+    size_t cursor_seq_pos;
+    size_t cursor_offset;
+    uint32_t scratch_serial;
+    size_t cached_seq_pos;
+    size_t cached_offset;
+    size_t cached_len;
     size_t prefix_len;
     int status;
     char prefix[FFFS_MAX_NAME + 1];

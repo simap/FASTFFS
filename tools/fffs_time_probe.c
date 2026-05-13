@@ -14,9 +14,15 @@
 #define INDEX_HASH_TABLE_SIZE FFFS_INDEX_HASH_TABLE_SIZE
 #endif
 
+#ifndef FFFS_TIME_PROBE_SCRATCH_SIZE
+#define FFFS_TIME_PROBE_SCRATCH_SIZE 4096
+#endif
+
 static uint16_t index_heads[INDEX_HASH_TABLE_SIZE];
 static uint16_t remount_heads[INDEX_HASH_TABLE_SIZE];
-static uint8_t scratch[4096];
+#if FFFS_TIME_PROBE_SCRATCH_SIZE > 0
+static uint8_t scratch[FFFS_TIME_PROBE_SCRATCH_SIZE];
+#endif
 
 struct op_summary {
     uint64_t calls;
@@ -105,9 +111,26 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
         .index_heads = heads,
         .index_hash_table_size = INDEX_HASH_TABLE_SIZE,
+#if FFFS_TIME_PROBE_SCRATCH_SIZE > 0
         .scratch = scratch,
         .scratch_size = sizeof(scratch),
+#else
+        .scratch = NULL,
+        .scratch_size = 0,
+#endif
     });
+}
+
+static const char *cache_mode_name(void) {
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
+    return "none";
+#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS
+    return "hash-heads";
+#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+    return "full-slot-heads";
+#else
+    return "unknown";
+#endif
 }
 
 static int write_file(struct fffs *fs, const char *name, const void *data,
@@ -148,11 +171,18 @@ static int run_probe(enum ffsv_flash_preset preset, const char *profile_name) {
     memset(index_heads, 0, sizeof(index_heads));
     memset(remount_heads, 0, sizeof(remount_heads));
 
-    printf("%s\n", profile_name);
+    printf("%s [%s, scratch=%u B]\n", profile_name, cache_mode_name(),
+            (unsigned)FFFS_TIME_PROBE_SCRATCH_SIZE);
     printf("%-20s %10s   %s\n", "operation", "time", "flash ops");
     printf("%-20s %10s   %s\n", "---------", "----", "---------");
 
-    int err = ffsv_flash_create_with_preset(&flash, preset, 4096 * 256);
+    struct ffsv_flash_config cfg;
+    int err = ffsv_flash_config_preset(&cfg, preset, 4096 * 256);
+    if (err != FFSV_OK) {
+        return 1;
+    }
+    cfg.max_log_entries = 65536;
+    err = ffsv_flash_create(&flash, &cfg);
     if (err != FFSV_OK) {
         return 1;
     }

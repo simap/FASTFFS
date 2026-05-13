@@ -47,6 +47,18 @@ static int flash_to_fs(int status) {
     return status == FFSV_OK ? FFFS_OK : FFFS_ERR_IO;
 }
 
+static void inject_next(struct ffsv_flash *flash, enum ffsv_op_type op,
+        enum ffsv_failure_phase phase, size_t partial_bytes) {
+    ffsv_flash_set_failure(flash, &(struct ffsv_failure_injection){
+        .enabled = true,
+        .sequence = ffsv_flash_next_sequence(flash),
+        .op_mask = UINT32_C(1) << op,
+        .phase = phase,
+        .status = FFSV_ERR_INJECTED,
+        .partial_bytes = partial_bytes,
+    });
+}
+
 static int new_backend(struct ffsv_flash **flash,
         struct fffs_backend *backend) {
     int err = ffsv_flash_create_with_preset(flash,
@@ -78,6 +90,11 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
             FFFS_INDEX_HASH_TABLE_SIZE,
 #endif
     });
+}
+
+static size_t test_max_file_data_size(const struct fffs *fs) {
+    size_t raw = fs->sector_size - 12 - 64;
+    return raw - (raw % fs->backend.program_granule);
 }
 
 static int write_chunks(struct fffs *fs, const char *name,
@@ -351,6 +368,301 @@ static int test_gc_reclaims_unindexed_orphan_sector(void) {
     return 0;
 }
 
+static int test_gc_erases_dirty_sector_with_erased_footer(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[16];
+    enum fffs_gc_action action;
+
+    memset(data, 0xa5, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
+                    10 * FFFS_DEFAULT_SECTOR_SIZE, data, sizeof(data),
+                    FFSV_CALLSITE)));
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                10 * FFFS_DEFAULT_SECTOR_SIZE, FFFS_DEFAULT_SECTOR_SIZE));
+    fs.gc_cursor = 10;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_ERASED);
+    ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash,
+                10 * FFFS_DEFAULT_SECTOR_SIZE, FFFS_DEFAULT_SECTOR_SIZE));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_skips_open_writer_dirty_root_sector(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+
+    memset(data, 0x5a, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "stream",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data), &written));
+    ASSERT_TRUE(written == sizeof(data));
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)file.head * fs.sector_size, fs.sector_size));
+
+    fs.gc_cursor = file.head;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)file.head * fs.sector_size, fs.sector_size));
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_skips_multiple_open_writer_dirty_sectors(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+
+    memset(data, 0x33, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&first, data, sizeof(data), &written));
+    ASSERT_TRUE(written == sizeof(data));
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&second, data, sizeof(data), &written));
+    ASSERT_TRUE(written == sizeof(data));
+
+    fs.gc_cursor = first.head;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)first.head * fs.sector_size, fs.sector_size));
+
+    fs.gc_cursor = second.head;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)second.head * fs.sector_size, fs.sector_size));
+
+    ASSERT_OK(fffs_close(&second));
+    ASSERT_OK(fffs_close(&first));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_skips_open_writer_root_and_current_extents(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+
+    memset(data, 0xc3, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "large",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    for (size_t off = 0; off < test_max_file_data_size(&fs) +
+            sizeof(data); off += sizeof(data)) {
+        size_t remaining = test_max_file_data_size(&fs) + sizeof(data) - off;
+        size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
+        ASSERT_OK(fffs_write(&file, data, n, &written));
+        ASSERT_TRUE(written == n);
+    }
+    ASSERT_TRUE(file.current != file.head);
+
+    fs.gc_cursor = file.head;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)file.head * fs.sector_size, fs.sector_size));
+
+    fs.gc_cursor = file.current;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)file.current * fs.sector_size, fs.sector_size));
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_skips_open_writer_middle_extent(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+    uint16_t middle;
+
+    memset(data, 0x9c, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "huge",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    for (size_t off = 0; off < test_max_file_data_size(&fs) * 2 +
+            sizeof(data); off += sizeof(data)) {
+        size_t remaining = test_max_file_data_size(&fs) * 2 +
+            sizeof(data) - off;
+        size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
+        ASSERT_OK(fffs_write(&file, data, n, &written));
+        ASSERT_TRUE(written == n);
+    }
+    ASSERT_TRUE(file.root_deferred);
+    ASSERT_TRUE(file.root_next != 0);
+    ASSERT_TRUE(file.current != file.head);
+    ASSERT_TRUE(file.current != file.root_next);
+    middle = file.root_next;
+
+    fs.gc_cursor = middle;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)middle * fs.sector_size, fs.sector_size));
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_skips_open_writer_deep_middle_extent(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+    uint16_t second_middle;
+    uint8_t md[64];
+
+    memset(data, 0x72, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "deeper",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    for (size_t off = 0; off < test_max_file_data_size(&fs) * 3 +
+            sizeof(data); off += sizeof(data)) {
+        size_t remaining = test_max_file_data_size(&fs) * 3 +
+            sizeof(data) - off;
+        size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
+        ASSERT_OK(fffs_write(&file, data, n, &written));
+        ASSERT_TRUE(written == n);
+    }
+    ASSERT_TRUE(file.root_deferred);
+    ASSERT_TRUE(file.root_next != 0);
+    ASSERT_TRUE(file.current != file.head);
+    ASSERT_TRUE(file.current != file.root_next);
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_read(flash,
+                    (size_t)file.root_next * fs.sector_size +
+                    fs.sector_size - 12 - sizeof(md),
+                    md, sizeof(md), FFSV_CALLSITE)));
+    second_middle = (uint16_t)(md[12] | ((uint16_t)md[13] << 8));
+    ASSERT_TRUE(second_middle != 0);
+    ASSERT_TRUE(second_middle != file.current);
+    ASSERT_TRUE(second_middle != file.root_next);
+
+    fs.gc_cursor = second_middle;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)second_middle * fs.sector_size, fs.sector_size));
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_reclaims_failed_open_writer_after_remount(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    enum fffs_gc_action action;
+    size_t written = 0;
+    uint16_t head;
+
+    memset(data, 0xe1, sizeof(data));
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "partial",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    head = file.head;
+    inject_next(flash, FFSV_OP_PROGRAM, FFSV_FAIL_MIDDLE, 16);
+    ASSERT_EQ_INT(FFFS_ERR_IO, fffs_write(&file, data, sizeof(data),
+                &written));
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)head * fs.sector_size, fs.sector_size));
+
+    fs.gc_cursor = head;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(action == FFFS_GC_SCANNED);
+    ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
+                (size_t)head * fs.sector_size, fs.sector_size));
+
+    fffs_unmount(&fs);
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    remounted.gc_cursor = head;
+    ASSERT_OK(fffs_gc_step(&remounted, &action));
+    ASSERT_TRUE(action == FFFS_GC_ERASED);
+    ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash,
+                (size_t)head * remounted.sector_size,
+                remounted.sector_size));
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_gc_reclaims_obsolete_index_history(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -386,7 +698,172 @@ static int test_gc_reclaims_obsolete_index_history(void) {
     return 0;
 }
 
+static int test_alloc_failure_runs_gc_to_free_sector(void) {
+#if !FFFS_GC_ON_ALLOC_FAILURE
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    const uint8_t value[] = {1, 2, 3, 4};
+    const uint8_t replacement[] = {5, 6, 7, 8};
+    struct fffs_stat st;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 6));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(write_chunks(&fs, "f000", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f001", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f002", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f003", value, sizeof(value)));
+    ASSERT_OK(fffs_delete_file(&fs, "f001"));
+
+    ASSERT_OK(write_chunks(&fs, "f004", replacement, sizeof(replacement)));
+    ASSERT_OK(fffs_stat(&fs, "f004", &st));
+    ASSERT_TRUE(st.size == sizeof(replacement));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_streaming_write_forces_gc_without_reclaiming_self(void) {
+#if !FFFS_GC_ON_ALLOC_FAILURE
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    const uint8_t value[] = {1, 2, 3, 4};
+    static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE * 4];
+    static uint8_t readback[FFFS_DEFAULT_SECTOR_SIZE * 4];
+    size_t payload_size;
+    size_t out_size = 0;
+    struct fffs_file file;
+    size_t written = 0;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 10));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(write_chunks(&fs, "f000", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f001", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f002", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f003", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f004", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f005", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f006", value, sizeof(value)));
+    ASSERT_OK(fffs_delete_file(&fs, "f001"));
+    ASSERT_OK(fffs_delete_file(&fs, "f003"));
+    ASSERT_OK(fffs_delete_file(&fs, "f005"));
+    ASSERT_OK(fffs_delete_file(&fs, "f006"));
+
+    payload_size = test_max_file_data_size(&fs) * 3 +
+        FFFS_MAX_PROGRAM_GRANULE;
+    ASSERT_TRUE(payload_size <= sizeof(payload));
+    for (size_t i = 0; i < payload_size; i++) {
+        payload[i] = (uint8_t)(i * 31u + 7u);
+    }
+
+    const struct ffsv_op_counts *before = ffsv_flash_counts(flash);
+    uint64_t erase_calls_before = before[FFSV_OP_ERASE].calls;
+    ASSERT_OK(fffs_open(&fs, &file, "stream-big",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    fs.gc_cursor = file.head;
+    for (size_t off = 0; off < payload_size; off += 137) {
+        size_t n = payload_size - off < 137 ? payload_size - off : 137;
+        ASSERT_OK(fffs_write(&file, payload + off, n, &written));
+        ASSERT_TRUE(written == n);
+    }
+    ASSERT_OK(fffs_close(&file));
+
+    const struct ffsv_op_counts *after = ffsv_flash_counts(flash);
+    ASSERT_TRUE(after[FFSV_OP_ERASE].calls > erase_calls_before);
+    ASSERT_OK(read_chunks(&fs, "stream-big", readback, sizeof(readback),
+                &out_size));
+    ASSERT_TRUE(out_size == payload_size);
+    ASSERT_TRUE(memcmp(readback, payload, payload_size) == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_streaming_write_fails_after_gc_exhausts_reclaimable_space(void) {
+#if !FFFS_GC_ON_ALLOC_FAILURE
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    const uint8_t value[] = {1, 2, 3, 4};
+    static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE * 6];
+    static uint8_t readback[FFFS_DEFAULT_SECTOR_SIZE * 6];
+    size_t payload_size;
+    size_t out_size = 0;
+    struct fffs_file file;
+    size_t written = 0;
+    uint8_t extra = 0xaa;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 10));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(write_chunks(&fs, "f000", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f001", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f002", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f003", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f004", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f005", value, sizeof(value)));
+    ASSERT_OK(write_chunks(&fs, "f006", value, sizeof(value)));
+    ASSERT_OK(fffs_delete_file(&fs, "f001"));
+    ASSERT_OK(fffs_delete_file(&fs, "f003"));
+    ASSERT_OK(fffs_delete_file(&fs, "f005"));
+    ASSERT_OK(fffs_delete_file(&fs, "f006"));
+
+    payload_size = test_max_file_data_size(&fs) * 5;
+    ASSERT_TRUE(payload_size <= sizeof(payload));
+    for (size_t i = 0; i < payload_size; i++) {
+        payload[i] = (uint8_t)(i * 17u + 19u);
+    }
+
+    const struct ffsv_op_counts *before = ffsv_flash_counts(flash);
+    uint64_t erase_calls_before = before[FFSV_OP_ERASE].calls;
+    ASSERT_OK(fffs_open(&fs, &file, "stream-full",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    fs.gc_cursor = file.head;
+    for (size_t off = 0; off < payload_size; off += 251) {
+        size_t n = payload_size - off < 251 ? payload_size - off : 251;
+        ASSERT_OK(fffs_write(&file, payload + off, n, &written));
+        ASSERT_TRUE(written == n);
+    }
+    ASSERT_EQ_INT(FFFS_ERR_NO_SPACE, fffs_write(&file, &extra,
+                sizeof(extra), &written));
+    const struct ffsv_op_counts *after_fail = ffsv_flash_counts(flash);
+    ASSERT_TRUE(after_fail[FFSV_OP_ERASE].calls > erase_calls_before);
+
+    ASSERT_OK(fffs_close(&file));
+    ASSERT_OK(read_chunks(&fs, "stream-full", readback, sizeof(readback),
+                &out_size));
+    ASSERT_TRUE(out_size == payload_size);
+    ASSERT_TRUE(memcmp(readback, payload, payload_size) == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
 static int test_replay_evicts_stale_hash_collision_head(void) {
+#if FFFS_INDEX_CACHE_MODE != FFFS_INDEX_CACHE_HASH_HEADS
+    return 0;
+#else
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
@@ -404,11 +881,9 @@ static int test_replay_evicts_stale_hash_collision_head(void) {
     size_t out_size = 0;
     uint16_t stale_head;
 
-#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS
     uint16_t live_slot = fffs_hash16(live_name);
     ASSERT_TRUE((stale_slot & (TEST_INDEX_HASH_TABLE_SIZE - 1)) ==
             (live_slot & (TEST_INDEX_HASH_TABLE_SIZE - 1)));
-#endif
 
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -433,6 +908,7 @@ static int test_replay_evicts_stale_hash_collision_head(void) {
     fffs_unmount(&remounted);
     ffsv_flash_destroy(flash);
     return 0;
+#endif
 }
 
 static int test_mount_uses_orphan_lookahead_for_serial_hint(void) {
@@ -812,7 +1288,17 @@ int main(void) {
     failures += test_reserved_hash_slots_are_skipped();
     failures += test_replay_skips_reused_stale_index_heads();
     failures += test_gc_reclaims_unindexed_orphan_sector();
+    failures += test_gc_erases_dirty_sector_with_erased_footer();
+    failures += test_gc_skips_open_writer_dirty_root_sector();
+    failures += test_gc_skips_multiple_open_writer_dirty_sectors();
+    failures += test_gc_skips_open_writer_root_and_current_extents();
+    failures += test_gc_skips_open_writer_middle_extent();
+    failures += test_gc_skips_open_writer_deep_middle_extent();
+    failures += test_gc_reclaims_failed_open_writer_after_remount();
     failures += test_gc_reclaims_obsolete_index_history();
+    failures += test_alloc_failure_runs_gc_to_free_sector();
+    failures += test_streaming_write_forces_gc_without_reclaiming_self();
+    failures += test_streaming_write_fails_after_gc_exhausts_reclaimable_space();
     failures += test_replay_evicts_stale_hash_collision_head();
     failures += test_mount_uses_orphan_lookahead_for_serial_hint();
     failures += test_mount_discovers_sector_size();
