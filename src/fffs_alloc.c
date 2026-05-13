@@ -73,17 +73,6 @@ static int sector_footer_state(struct fffs *fs, size_t sector,
     return FFFS_OK;
 }
 
-static int program_sector_tombstone(struct fffs *fs, size_t sector) {
-    uint8_t state[4] = {
-        FFFS_SECTOR_TYPE_MIXED,
-        FFFS_SECTOR_FLAGS_TOMBSTONED,
-        0xff,
-        0xff,
-    };
-    return fffs_flash_program_aligned(fs, fffs_sector_footer_offset(fs,
-                (uint16_t)sector) + 4, state, sizeof(state));
-}
-
 static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
         size_t sector, bool *reachable) {
     uint16_t current = head;
@@ -221,7 +210,7 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
         return FFFS_OK;
     }
 
-    err = program_sector_tombstone(fs, s);
+    err = fffs_tombstone_sector(fs, (uint16_t)s);
     if (err != FFFS_OK) {
         return err;
     }

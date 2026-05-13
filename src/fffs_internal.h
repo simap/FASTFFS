@@ -67,6 +67,7 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t *serial);
 int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t serial);
+int fffs_tombstone_sector(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_footer_offset(struct fffs *fs, uint16_t sector);
 int fffs_read_metadata(struct fffs *fs, uint16_t sector,

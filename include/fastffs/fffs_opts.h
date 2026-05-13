@@ -47,4 +47,8 @@
 #define FFFS_INDEX_REPLAY_CHUNK_SIZE 256
 #endif
 
+#ifndef FFFS_LAZY_DELETE_TOMBSTONES
+#define FFFS_LAZY_DELETE_TOMBSTONES 0
+#endif
+
 #endif

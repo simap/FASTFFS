@@ -129,6 +129,32 @@ static int resolve_slot(struct fffs *fs, const char *name,
     return FFFS_OK;
 }
 
+#if !FFFS_LAZY_DELETE_TOMBSTONES
+static void tombstone_deleted_chain(struct fffs *fs, uint16_t slot,
+        uint16_t head, uint16_t next) {
+    uint16_t current = head;
+    uint16_t current_next = next;
+    bool have_next = true;
+
+    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
+        if (!have_next) {
+            uint16_t md_slot;
+            int err = fffs_read_metadata(fs, current, NULL, &md_slot, NULL,
+                    NULL, &current_next);
+            if (err != FFFS_OK || md_slot != slot) {
+                return;
+            }
+        }
+        int err = fffs_tombstone_sector(fs, current);
+        if (err != FFFS_OK) {
+            return;
+        }
+        current = current_next;
+        have_next = false;
+    }
+}
+#endif
+
 static uint32_t claim_sector_serial(struct fffs *fs) {
     uint32_t serial = fs->next_sector_serial++;
     if (fs->next_sector_serial == 0) {
@@ -551,16 +577,24 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
     }
     uint16_t slot;
     uint16_t head;
+    uint16_t next = 0;
     bool found;
     int err = resolve_slot(fs, name, &slot, &head, &found, NULL, NULL, NULL,
-            NULL);
+            &next);
     if (err != FFFS_OK) {
         return err;
     }
     if (!found) {
         return FFFS_ERR_NOT_FOUND;
     }
-    return fffs_append_index_record(fs, slot, 0);
+    err = fffs_append_index_record(fs, slot, 0);
+    if (err != FFFS_OK) {
+        return err;
+    }
+#if !FFFS_LAZY_DELETE_TOMBSTONES
+    tombstone_deleted_chain(fs, slot, head, next);
+#endif
+    return FFFS_OK;
 }
 
 int fffs_dir_open(struct fffs *fs, struct fffs_dir *dir,

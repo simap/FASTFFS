@@ -35,6 +35,7 @@ struct fffs_inspect_summary {
 
     size_t data_sectors_erased;
     size_t data_sectors_owned;
+    size_t data_sectors_tombstoned;
     size_t data_sectors_corrupt;
     size_t md_live;
     size_t md_obsolete_orphaned;

@@ -63,7 +63,8 @@ static bool span_erased(const uint8_t *p, size_t size) {
 static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t *serial) {
     if (footer[4] != FFFS_SECTOR_TYPE_MIXED ||
-            footer[5] != FFFS_SECTOR_FLAGS_VALID ||
+            (footer[5] != FFFS_SECTOR_FLAGS_VALID &&
+             footer[5] != FFFS_SECTOR_FLAGS_TOMBSTONED) ||
             footer[6] != 0xff || footer[7] != 0xff ||
             memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0) {
         return false;
@@ -314,6 +315,11 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             summary->data_sectors_corrupt += 1;
             continue;
         }
+        if (footer[5] == FFFS_SECTOR_FLAGS_TOMBSTONED) {
+            summary->data_sectors_tombstoned += 1;
+            summary->md_tombstoned += 1;
+            continue;
+        }
         summary->data_sectors_owned += 1;
 
         uint8_t md[FFFS_MD_SIZE];
@@ -531,12 +537,12 @@ int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out) {
             (unsigned)summary.index_sectors, summary.active_index_sector,
             (unsigned)summary.active_index_serial);
     fprintf(out, "summary: index_records=%zu live_entries=%zu "
-            "live_corrupt=%zu md_live=%zu md_obsolete_orphaned=%zu "
-            "md_tombstoned=%zu md_corrupt=%zu\n",
+            "live_corrupt=%zu data_tombstoned=%zu md_live=%zu "
+            "md_obsolete_orphaned=%zu md_tombstoned=%zu md_corrupt=%zu\n",
             summary.index_records, summary.live_entries,
-            summary.live_entries_corrupt, summary.md_live,
-            summary.md_obsolete_orphaned, summary.md_tombstoned,
-            summary.md_corrupt);
+            summary.live_entries_corrupt, summary.data_sectors_tombstoned,
+            summary.md_live, summary.md_obsolete_orphaned,
+            summary.md_tombstoned, summary.md_corrupt);
 
     err = dump_index_headers(backend, out, &summary);
     if (err == FFFS_OK) {

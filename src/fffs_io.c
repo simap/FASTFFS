@@ -542,7 +542,8 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
         return err;
     }
     if (footer[4] != FFFS_SECTOR_TYPE_MIXED ||
-            footer[5] != FFFS_SECTOR_FLAGS_VALID ||
+            (footer[5] != FFFS_SECTOR_FLAGS_VALID &&
+             footer[5] != FFFS_SECTOR_FLAGS_TOMBSTONED) ||
             footer[6] != 0xff || footer[7] != 0xff ||
             memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0) {
         return FFFS_ERR_CORRUPT;
@@ -568,6 +569,17 @@ int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
     encode_sector_footer(footer, serial);
     return fffs_flash_program_aligned(fs, fffs_sector_footer_offset(fs, sector),
             footer, sizeof(footer));
+}
+
+int fffs_tombstone_sector(struct fffs *fs, uint16_t sector) {
+    uint8_t state[4] = {
+        FFFS_SECTOR_TYPE_MIXED,
+        FFFS_SECTOR_FLAGS_TOMBSTONED,
+        0xff,
+        0xff,
+    };
+    return fffs_flash_program_aligned(fs,
+            fffs_sector_footer_offset(fs, sector) + 4, state, sizeof(state));
 }
 
 int fffs_read_metadata(struct fffs *fs, uint16_t sector,

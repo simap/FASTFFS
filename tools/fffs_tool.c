@@ -85,12 +85,13 @@ static void print_summary(const struct fffs_inspect_summary *s) {
             "live_entries=%zu live_corrupt=%zu\n",
             s->index_records, s->index_deletes, s->index_corrupt_records,
             s->live_entries, s->live_entries_corrupt);
-    printf("data_erased=%zu data_owned=%zu data_corrupt=%zu "
-            "md_live=%zu md_obsolete_orphaned=%zu md_tombstoned=%zu "
-            "md_corrupt=%zu\n",
+    printf("data_erased=%zu data_owned=%zu data_tombstoned=%zu "
+            "data_corrupt=%zu md_live=%zu md_obsolete_orphaned=%zu "
+            "md_tombstoned=%zu md_corrupt=%zu\n",
             s->data_sectors_erased, s->data_sectors_owned,
-            s->data_sectors_corrupt, s->md_live, s->md_obsolete_orphaned,
-            s->md_tombstoned, s->md_corrupt);
+            s->data_sectors_tombstoned, s->data_sectors_corrupt,
+            s->md_live, s->md_obsolete_orphaned, s->md_tombstoned,
+            s->md_corrupt);
 }
 
 static int cmd_dump(const char *path) {

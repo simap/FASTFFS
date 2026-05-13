@@ -198,6 +198,7 @@ static int test_overwrite_delete_and_remount(void) {
     uint8_t out[32] = {0};
     size_t out_size = 0;
     struct fffs_stat st;
+    struct fffs_inspect_summary summary;
 
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -217,6 +218,12 @@ static int test_overwrite_delete_and_remount(void) {
     ASSERT_TRUE(memcmp(out, new_value, out_size) == 0);
     ASSERT_OK(fffs_delete_file(&fs, "config"));
     ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&fs, "config", &st));
+    ASSERT_OK(fffs_inspect_check(&backend, &summary));
+#if FFFS_LAZY_DELETE_TOMBSTONES
+    ASSERT_TRUE(summary.md_tombstoned == 0);
+#else
+    ASSERT_TRUE(summary.md_tombstoned == 1);
+#endif
     fffs_unmount(&fs);
 
     ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
