@@ -53,9 +53,16 @@ bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
 int fffs_program_index_header(const struct fffs_backend *backend,
         size_t offset, uint8_t index_sectors, uint8_t sector_shift,
         uint8_t serial);
-int fffs_find_active_index_header(const struct fffs_backend *backend,
-        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift,
-        uint8_t *serial);
+struct fffs_index_sequence {
+    uint8_t index_sectors;
+    uint8_t sector_shift;
+    uint8_t active_serial;
+    size_t active_sector;
+    size_t oldest_sector;
+    size_t count;
+};
+int fffs_find_index_sequence(const struct fffs_backend *backend,
+        struct fffs_index_sequence *sequence);
 int fffs_read_index_record(struct fffs *fs, size_t offset,
         uint16_t *slot, uint16_t *head);
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,

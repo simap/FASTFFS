@@ -694,6 +694,30 @@ head cannot be verified, lookup skips that occupied bucket and continues
 probing. A later index record for the same slot naturally overwrites or deletes
 the earlier cached head as replay advances.
 
+The index replay log can be older than the sectors they point to. It's possible for an index entry to point to an invalid head if it was subsequently deleted, and the sector erased and reused.
+
+Instead of trying to read metadata on insert, we can check on delete. We'll need to check anyway to verify the delete is for the correct item.
+
+During replay of a delete record, the remove code path must keep probing for the
+deleted resolved slot until it finds a verified matching head or reaches the
+hash-table probe bound. If a probed bucket's head reads as valid metadata for a
+different resolved slot, the implementation must decide whether that different
+slot can legally occupy that bucket under the current linear-probe cluster. If
+not, the bucket is stale. The delete probe may discover multiple stale buckets.
+
+Stale buckets can be marked with `head = 1` during the scan to remember that
+they are invalid without creating empty-bucket gaps; `head = 1` is not a legal
+data head because index sectors are reserved. After the scan finishes, clear the
+stale markers and repair the affected linear-probe cluster once. This does not
+prove that a stale bucket originally belonged to the deleted slot; it only
+proves that the current bucket contents are not valid cache entries and must not
+remain in the head-only table.
+
+This keeps mount replay mostly index-only: put records can still be inserted
+speculatively into empty buckets without reading metadata. Metadata reads are
+paid by delete/remove, collision, and stale-cluster repair paths, not by every
+index record.
+
 This index hash table also limits the maximum number of files, since every file
 must be stored in the hashtable. Performance degrades as the table fills.
 

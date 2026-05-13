@@ -169,6 +169,32 @@ static int consider_index_header(size_t off,
     return FFFS_OK;
 }
 
+static size_t prev_index_sector(size_t sector, size_t index_sectors) {
+    return sector == 0 ? index_sectors - 1 : sector - 1;
+}
+
+static void find_oldest_index_sector(const bool *valid, const uint8_t *serials,
+        size_t index_sectors, size_t active, uint8_t active_serial,
+        size_t *oldest, size_t *count) {
+    size_t current = active;
+    uint8_t current_serial = active_serial;
+    size_t n = 1;
+
+    while (n < index_sectors) {
+        size_t prev = prev_index_sector(current, index_sectors);
+        uint8_t expected = (uint8_t)((current_serial - 1u) & 0x0f);
+        if (!valid[prev] || serials[prev] != expected) {
+            break;
+        }
+        current = prev;
+        current_serial = serials[prev];
+        n++;
+    }
+
+    *oldest = current;
+    *count = n;
+}
+
 static bool discovery_probe_shift(size_t probe, uint8_t *shift) {
     if (probe == 0) {
         *shift = FFFS_DEFAULT_SECTOR_SHIFT;
@@ -187,9 +213,11 @@ static bool discovery_probe_shift(size_t probe, uint8_t *shift) {
     return true;
 }
 
-int fffs_find_active_index_header(const struct fffs_backend *backend,
-        size_t *active, uint8_t *index_sectors, uint8_t *sector_shift,
-        uint8_t *serial) {
+int fffs_find_index_sequence(const struct fffs_backend *backend,
+        struct fffs_index_sequence *sequence) {
+    if (!sequence) {
+        return FFFS_ERR_INVALID;
+    }
     uint8_t hdr[FFFS_HEADER_SIZE];
     for (size_t probe = 0;; probe++) {
         uint8_t probe_shift;
@@ -233,6 +261,8 @@ int fffs_find_active_index_header(const struct fffs_backend *backend,
             bool conflict = false;
             uint8_t best_serial = 0;
             size_t best_active = 0;
+            bool valid[15] = {0};
+            uint8_t serials[15] = {0};
             for (size_t i = 0; i < locked_index_sectors; i++) {
                 size_t off = i * sector_size;
                 if (off == discovered_off) {
@@ -257,6 +287,8 @@ int fffs_find_active_index_header(const struct fffs_backend *backend,
                     conflict = true;
                     break;
                 }
+                valid[i] = true;
+                serials[i] = candidate_serial;
                 err = consider_index_header(off, candidate_index_sectors,
                         candidate_sector_shift, candidate_serial, &found,
                         &best_active, &best_serial);
@@ -269,10 +301,19 @@ int fffs_find_active_index_header(const struct fffs_backend *backend,
                 continue;
             }
 
-            *active = best_active;
-            *index_sectors = locked_index_sectors;
-            *sector_shift = locked_sector_shift;
-            *serial = best_serial;
+            size_t oldest;
+            size_t count;
+            find_oldest_index_sector(valid, serials, locked_index_sectors,
+                    best_active, best_serial, &oldest, &count);
+
+            *sequence = (struct fffs_index_sequence){
+                .index_sectors = locked_index_sectors,
+                .sector_shift = locked_sector_shift,
+                .active_serial = best_serial,
+                .active_sector = best_active,
+                .oldest_sector = oldest,
+                .count = count,
+            };
             return FFFS_OK;
         }
     }
@@ -404,6 +445,8 @@ int fffs_rotate_index(struct fffs *fs) {
 
     fs->active_index_sector = new_active;
     fs->active_index_serial = serial;
+    fs->oldest_index_sector = new_active;
+    fs->index_sequence_count = 1;
     fs->next_index_offset = off;
     return FFFS_OK;
 }
@@ -441,7 +484,6 @@ static void recover_allocator_hint(struct fffs *fs, uint16_t head) {
 }
 
 int fffs_replay_index(struct fffs *fs) {
-    size_t end = (fs->active_index_sector + 1) * fs->sector_size;
     uint16_t tail_head = 0;
     enum {
         replay_fallback_size =
@@ -463,49 +505,62 @@ int fffs_replay_index(struct fffs *fs) {
         chunk_size = sizeof(fallback);
     }
 
-    for (size_t off = fs->next_index_offset; off + 4 <= end;) {
-        size_t remaining = end - off;
-        size_t nread = remaining < chunk_size ? remaining : chunk_size;
-        nread -= nread % 4;
-        int err = fffs_flash_read(fs, off, chunk, nread);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        for (size_t pos = 0; pos < nread; pos += 4) {
-            uint16_t slot = load16(chunk + pos);
-            uint16_t head = load16(chunk + pos + 2);
-            size_t rec_off = off + pos;
-
-            if (slot == UINT16_MAX && head == UINT16_MAX) {
-                fs->next_index_offset = rec_off;
-                if (tail_head != 0) {
-                    recover_allocator_hint(fs, tail_head);
-                }
-                return FFFS_OK;
-            }
-            if (slot == 0 && head == 0) {
-                return FFFS_ERR_CORRUPT;
-            }
-            if (head == 0) {
-                err = fffs_index_remove(fs, slot);
-                if (err != FFFS_OK) {
-                    return err;
-                }
-                continue;
-            }
-            if (head < fs->index_sectors || head >= fs->sector_count) {
-                return FFFS_ERR_CORRUPT;
-            }
-            tail_head = head;
-            err = fffs_index_insert(fs, slot, head);
+    fs->next_index_offset = fs->active_index_sector * fs->sector_size +
+        FFFS_HEADER_SIZE;
+    size_t sector = fs->oldest_index_sector;
+    for (size_t order = 0; order < fs->index_sequence_count; order++) {
+        size_t end = (sector + 1) * fs->sector_size;
+        bool active = sector == fs->active_index_sector;
+        for (size_t off = sector * fs->sector_size + FFFS_HEADER_SIZE;
+                off + 4 <= end;) {
+            size_t remaining = end - off;
+            size_t nread = remaining < chunk_size ? remaining : chunk_size;
+            nread -= nread % 4;
+            int err = fffs_flash_read(fs, off, chunk, nread);
             if (err != FFFS_OK) {
                 return err;
             }
-        }
-        off += nread;
-    }
+            for (size_t pos = 0; pos < nread; pos += 4) {
+                uint16_t slot = load16(chunk + pos);
+                uint16_t head = load16(chunk + pos + 2);
+                size_t rec_off = off + pos;
 
-    fs->next_index_offset = end;
+                if (slot == UINT16_MAX && head == UINT16_MAX) {
+                    if (active) {
+                        fs->next_index_offset = rec_off;
+                    }
+                    goto next_sector;
+                }
+                if (slot == 0 && head == 0) {
+                    return FFFS_ERR_CORRUPT;
+                }
+                if (head == 0) {
+                    err = fffs_index_remove(fs, slot);
+                    if (err != FFFS_OK) {
+                        return err;
+                    }
+                    continue;
+                }
+                if (head < fs->index_sectors || head >= fs->sector_count) {
+                    return FFFS_ERR_CORRUPT;
+                }
+                tail_head = head;
+                err = fffs_index_insert(fs, slot, head);
+                if (err != FFFS_OK) {
+                    return err;
+                }
+            }
+            off += nread;
+            if (active) {
+                fs->next_index_offset = off;
+            }
+        }
+next_sector:
+        sector++;
+        if (sector >= fs->index_sectors) {
+            sector = 0;
+        }
+    }
     if (tail_head != 0) {
         recover_allocator_hint(fs, tail_head);
     }

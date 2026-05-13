@@ -264,6 +264,49 @@ static int test_reserved_hash_slots_are_skipped(void) {
     return 0;
 }
 
+static int test_replay_skips_reused_stale_index_heads(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    const char *old_name = "stale-a";
+    const char *new_name = "fresh-b";
+    const uint8_t old_data[] = "old";
+    const uint8_t new_data[] = "new";
+    struct fffs_stat entries[4];
+    struct fffs_stat st;
+    size_t count = 0;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(write_chunks(&fs, old_name, old_data, sizeof(old_data) - 1));
+    uint16_t reused = fs.index_sectors;
+    ASSERT_OK(fffs_delete_file(&fs, old_name));
+
+    ASSERT_OK(flash_to_fs(backend.erase(backend.ctx,
+                    (size_t)reused * fs.sector_size, fs.sector_size)));
+    fs.alloc_cursor = reused;
+    ASSERT_OK(write_chunks(&fs, new_name, new_data, sizeof(new_data) - 1));
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&remounted, old_name, &st));
+    ASSERT_OK(fffs_stat(&remounted, new_name, &st));
+    ASSERT_TRUE(st.size == sizeof(new_data) - 1);
+    ASSERT_OK(fffs_list(&remounted, entries,
+                sizeof(entries) / sizeof(entries[0]), &count));
+    ASSERT_TRUE(count == 1);
+    ASSERT_TRUE(strcmp(entries[0].name, new_name) == 0);
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_gc_reclaims_unindexed_orphan_sector(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -767,6 +810,7 @@ int main(void) {
     failures += test_format_mount_write_read_remount();
     failures += test_overwrite_delete_and_remount();
     failures += test_reserved_hash_slots_are_skipped();
+    failures += test_replay_skips_reused_stale_index_heads();
     failures += test_gc_reclaims_unindexed_orphan_sector();
     failures += test_gc_reclaims_obsolete_index_history();
     failures += test_replay_evicts_stale_hash_collision_head();

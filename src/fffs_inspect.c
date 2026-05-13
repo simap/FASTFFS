@@ -117,17 +117,13 @@ static int discover(const struct fffs_backend *backend,
         return FFFS_ERR_INVALID;
     }
 
-    uint8_t index_sectors;
-    uint8_t sector_shift;
-    uint8_t serial;
-    size_t active;
-    int err = fffs_find_active_index_header(backend, &active,
-            &index_sectors, &sector_shift, &serial);
+    struct fffs_index_sequence sequence;
+    int err = fffs_find_index_sequence(backend, &sequence);
     if (err != FFFS_OK) {
         return err;
     }
 
-    size_t sector_size = (size_t)256u << sector_shift;
+    size_t sector_size = (size_t)256u << sequence.sector_shift;
     if (backend->size % sector_size != 0 ||
             backend->size / sector_size > UINT16_MAX) {
         return FFFS_ERR_CORRUPT;
@@ -136,9 +132,9 @@ static int discover(const struct fffs_backend *backend,
     memset(summary, 0, sizeof(*summary));
     summary->sector_size = sector_size;
     summary->sector_count = backend->size / sector_size;
-    summary->index_sectors = index_sectors;
-    summary->active_index_sector = active;
-    summary->active_index_serial = serial;
+    summary->index_sectors = sequence.index_sectors;
+    summary->active_index_sector = sequence.active_sector;
+    summary->active_index_serial = sequence.active_serial;
     return FFFS_OK;
 }
 

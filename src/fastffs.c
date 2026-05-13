@@ -220,16 +220,12 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     *fs = (struct fffs){0};
     memset(index_heads, 0, sizeof(index_heads[0]) * index_hash_table_size);
 
-    uint8_t index_sectors = 0;
-    uint8_t sector_shift = 0;
-    uint8_t serial = 0;
-    size_t active = 0;
-    int err = fffs_find_active_index_header(backend, &active, &index_sectors,
-            &sector_shift, &serial);
+    struct fffs_index_sequence sequence;
+    int err = fffs_find_index_sequence(backend, &sequence);
     if (err != FFFS_OK) {
         return err;
     }
-    size_t sector_size = (size_t)256u << sector_shift;
+    size_t sector_size = (size_t)256u << sequence.sector_shift;
     if (backend->size % sector_size != 0 ||
             backend->size / sector_size > UINT16_MAX) {
         return FFFS_ERR_CORRUPT;
@@ -242,11 +238,14 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->scratch_size = options->scratch_size;
     fs->sector_size = sector_size;
     fs->sector_count = backend->size / fs->sector_size;
-    fs->sector_shift = sector_shift;
-    fs->index_sectors = index_sectors;
-    fs->active_index_sector = active;
-    fs->active_index_serial = serial;
-    fs->next_index_offset = active * fs->sector_size + FFFS_HEADER_SIZE;
+    fs->sector_shift = sequence.sector_shift;
+    fs->index_sectors = sequence.index_sectors;
+    fs->oldest_index_sector = sequence.oldest_sector;
+    fs->index_sequence_count = sequence.count;
+    fs->active_index_sector = sequence.active_sector;
+    fs->active_index_serial = sequence.active_serial;
+    fs->next_index_offset = sequence.active_sector * fs->sector_size +
+        FFFS_HEADER_SIZE;
     fs->alloc_cursor = fs->index_sectors;
     fs->gc_cursor = fs->index_sectors;
     fs->next_sector_serial = 1;

@@ -102,6 +102,8 @@ struct fffs {
     size_t sector_count;
     uint8_t sector_shift;
     uint8_t index_sectors;
+    size_t oldest_index_sector;
+    size_t index_sequence_count;
     size_t active_index_sector;
     size_t next_index_offset;
     uint8_t active_index_serial;

@@ -28,12 +28,15 @@
 
 static uint16_t index_heads[TOOL_INDEX_HASH_TABLE_SIZE];
 
+static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend);
+
 static void usage(FILE *out, const char *argv0) {
     fprintf(out, "usage:\n");
     fprintf(out, "  %s create <sector_size> <sector_count> <image> [index_sectors]\n",
             argv0);
     fprintf(out, "  %s dump <image>\n", argv0);
     fprintf(out, "  %s check <image>\n", argv0);
+    fprintf(out, "  %s list <image>\n", argv0);
     fprintf(out, "  %s load <root> <image>\n", argv0);
     fprintf(out, "  %s workload <image> <bytes> [rounds]\n", argv0);
 }
@@ -119,6 +122,43 @@ static int cmd_check(const char *path) {
                 summary.data_sectors_corrupt || summary.md_corrupt) {
             err = FFFS_ERR_CORRUPT;
         }
+    }
+    ffsv_flash_destroy(flash);
+    return err;
+}
+
+static int cmd_list(const char *path) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    bool mounted = false;
+    int err = open_image(path, &flash, &backend);
+    if (err == FFFS_OK) {
+        err = mount_tool_fs(&fs, &backend);
+        mounted = err == FFFS_OK;
+    }
+
+    size_t count = 0;
+    size_t bytes = 0;
+    if (err == FFFS_OK) {
+        struct fffs_dir dir;
+        struct fffs_stat stat;
+        err = fffs_dir_open(&fs, &dir, NULL);
+        while (err == FFFS_OK && fffs_dir_read(&dir, &stat)) {
+            printf("%s\t%lu\n", stat.name, (unsigned long)stat.size);
+            count++;
+            bytes += stat.size;
+        }
+        if (err == FFFS_OK) {
+            err = fffs_dir_status(&dir);
+        }
+        fffs_dir_close(&dir);
+    }
+    if (mounted) {
+        fffs_unmount(&fs);
+    }
+    if (err == FFFS_OK) {
+        fprintf(stderr, "listed %zu files %zu bytes\n", count, bytes);
     }
     ffsv_flash_destroy(flash);
     return err;
@@ -480,6 +520,8 @@ int main(int argc, char **argv) {
         err = cmd_dump(argv[2]);
     } else if (strcmp(argv[1], "check") == 0 && argc == 3) {
         err = cmd_check(argv[2]);
+    } else if (strcmp(argv[1], "list") == 0 && argc == 3) {
+        err = cmd_list(argv[2]);
     } else if (strcmp(argv[1], "load") == 0 && argc == 4) {
         err = cmd_load(argv[3], argv[2]);
     } else if (strcmp(argv[1], "workload") == 0 &&
