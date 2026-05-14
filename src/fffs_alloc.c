@@ -9,21 +9,16 @@
 
 #include "fffs_internal.h"
 
-#define FFFS_ERASED_CHECK_CHUNK 64
-
 int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size) {
-    uint8_t fallback[FFFS_ERASED_CHECK_CHUNK];
-    uint8_t *chunk = fs->scratch ? fs->scratch : fallback;
-    size_t chunk_size = fs->scratch ? fs->scratch_size : sizeof(fallback);
+    uint8_t *chunk = fs->scratch;
+    size_t chunk_size = fs->scratch_size;
     while (size > 0) {
         size_t n = size < chunk_size ? size : chunk_size;
         int err = fffs_flash_read(fs, offset, chunk, n);
         if (err != FFFS_OK) {
             return err;
         }
-        if (chunk == fs->scratch) {
-            fffs_scratch_bump(fs);
-        }
+        fffs_scratch_bump(fs);
         for (size_t i = 0; i < n; i++) {
             if (chunk[i] != 0xff) {
                 return FFFS_ERR_NO_SPACE;

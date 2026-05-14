@@ -19,7 +19,9 @@ enum {
     FFFS_PROBE_BITSET_WORDS =
         (FFFS_PROBE_BITS + FFFS_BITSET_WORD_BITS - 1u) /
         FFFS_BITSET_WORD_BITS,
-    FFFS_INDEX_SCAN_FALLBACK_SIZE = 64u,
+    FFFS_NOCACHE_COMPACT_OUTER_SCAN_SIZE =
+        FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE < 4u ?
+        4u : FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE,
 };
 
 struct logical_pos {
@@ -34,7 +36,7 @@ struct index_scan {
     size_t window_size;
     size_t window_start;
     size_t window_len;
-    uint8_t fallback[FFFS_INDEX_SCAN_FALLBACK_SIZE];
+    bool uses_fs_scratch;
 };
 
 static uint16_t load16(const uint8_t *p) {
@@ -78,22 +80,16 @@ static uint16_t candidate_slot(uint16_t base, size_t offset) {
 }
 
 static void index_scan_init(struct index_scan *scan, struct fffs *fs,
-        struct fffs_dir *dir) {
+        struct fffs_dir *dir, uint8_t *window, size_t window_size,
+        bool uses_fs_scratch) {
     *scan = (struct index_scan){0};
     scan->fs = fs;
     scan->dir = dir;
-    scan->window = scan->fallback;
-    scan->window_size = sizeof(scan->fallback);
-    if (fs->scratch && fs->scratch_size >= sizeof(scan->fallback)) {
-        scan->window = fs->scratch;
-        scan->window_size = fs->scratch_size - (fs->scratch_size % 4);
-    }
-    if (scan->window_size == 0) {
-        scan->window = scan->fallback;
-        scan->window_size = sizeof(scan->fallback);
-    }
+    scan->window = window;
+    scan->window_size = window_size - (window_size % 4);
+    scan->uses_fs_scratch = uses_fs_scratch;
 
-    if (dir && scan->window == fs->scratch &&
+    if (dir && scan->uses_fs_scratch &&
             dir->scratch_serial == fs->scratch_serial &&
             dir->cached_len != 0) {
         scan->window_start = dir->cached_offset;
@@ -128,7 +124,7 @@ static int index_scan_load(struct index_scan *scan, size_t offset) {
     }
     scan->window_start = base;
     scan->window_len = nread;
-    if (scan->window == fs->scratch) {
+    if (scan->uses_fs_scratch) {
         fffs_scratch_bump(fs);
         if (scan->dir) {
             scan->dir->scratch_serial = fs->scratch_serial;
@@ -260,7 +256,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
     fffs_bitset_clear(occupied, FFFS_PROBE_BITSET_WORDS);
     fffs_bitset_clear(deleted, FFFS_PROBE_BITSET_WORDS);
     struct index_scan scan;
-    index_scan_init(&scan, fs, NULL);
+    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
 
     for (size_t seq_count = fs->index_sequence_count; seq_count > 0;
             seq_count--) {
@@ -344,7 +340,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
 bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     struct fffs *fs = dir->fs;
     struct index_scan scan;
-    index_scan_init(&scan, fs, dir);
+    index_scan_init(&scan, fs, dir, fs->scratch, fs->scratch_size, true);
     struct logical_pos cur = {
         .seq_pos = dir->cursor_seq_pos,
         .offset = dir->cursor_offset,
@@ -417,8 +413,13 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
 }
 
 int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
-    struct index_scan scan;
-    index_scan_init(&scan, fs, NULL);
+    uint8_t outer_window[FFFS_NOCACHE_COMPACT_OUTER_SCAN_SIZE];
+    struct index_scan outer_scan;
+    struct index_scan inner_scan;
+    index_scan_init(&outer_scan, fs, NULL, outer_window,
+            sizeof(outer_window), false);
+    index_scan_init(&inner_scan, fs, NULL, fs->scratch, fs->scratch_size,
+            true);
     for (size_t seq_pos = 0; seq_pos < fs->index_sequence_count; seq_pos++) {
         size_t end = logical_sector_end(fs, seq_pos);
         for (size_t off = logical_sector_begin(fs, seq_pos);
@@ -426,7 +427,7 @@ int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
             uint16_t slot;
             uint16_t head;
             bool erased;
-            int err = read_index_at(&scan, off, &slot, &head, &erased);
+            int err = read_index_at(&outer_scan, off, &slot, &head, &erased);
             if (err != FFFS_OK) {
                 return err;
             }
@@ -442,7 +443,7 @@ int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
                 .offset = off,
             };
             bool newer;
-            err = newer_record_for_slot(&scan, &pos, slot, &newer);
+            err = newer_record_for_slot(&inner_scan, &pos, slot, &newer);
             if (err != FFFS_OK) {
                 return err;
             }
@@ -500,7 +501,7 @@ static int current_head_is_live(struct index_scan *scan, uint16_t head,
 
 bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
     struct index_scan scan;
-    index_scan_init(&scan, fs, NULL);
+    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
     bool live = false;
     int err = current_head_is_live(&scan, (uint16_t)sector, &live);
     return err == FFFS_OK && live;
@@ -535,7 +536,7 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
 int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
         bool *reachable) {
     struct index_scan scan;
-    index_scan_init(&scan, fs, NULL);
+    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
     *reachable = false;
     for (size_t seq_count = fs->index_sequence_count; seq_count > 0;
             seq_count--) {

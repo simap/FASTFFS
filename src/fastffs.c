@@ -169,9 +169,8 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
 #endif
     uint16_t *index_heads = options->index_heads;
     size_t index_hash_table_size = options->index_hash_table_size;
-    if ((!options->scratch && options->scratch_size != 0) ||
-            (options->scratch && options->scratch_size <
-             backend->read_granule)) {
+    if (!options->scratch || options->scratch_size < FFFS_MIN_SCRATCH_SIZE ||
+            options->scratch_size < backend->read_granule) {
         return FFFS_ERR_INVALID;
     }
     *fs = (struct fffs){0};

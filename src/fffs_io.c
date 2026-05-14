@@ -484,25 +484,8 @@ static void recover_allocator_hint(struct fffs *fs, uint16_t head) {
 
 int fffs_replay_index(struct fffs *fs) {
     uint16_t tail_head = 0;
-    enum {
-        replay_fallback_size =
-            FFFS_INDEX_REPLAY_FALLBACK_SIZE < 64 ?
-            64 : FFFS_INDEX_REPLAY_FALLBACK_SIZE,
-        replay_chunk_size =
-            FFFS_INDEX_REPLAY_CHUNK_SIZE < 64 ?
-            64 : FFFS_INDEX_REPLAY_CHUNK_SIZE
-    };
-    uint8_t fallback[replay_fallback_size];
-    uint8_t *chunk = fs->scratch ? fs->scratch : fallback;
-    size_t chunk_size = fs->scratch ? fs->scratch_size : sizeof(fallback);
-    if (chunk_size > replay_chunk_size) {
-        chunk_size = replay_chunk_size;
-    }
-    chunk_size -= chunk_size % 4;
-    if (chunk_size == 0) {
-        chunk = fallback;
-        chunk_size = sizeof(fallback);
-    }
+    uint8_t *chunk = fs->scratch;
+    size_t chunk_size = fs->scratch_size;
 
     fs->next_index_offset = fs->active_index_sector * fs->sector_size +
         FFFS_HEADER_SIZE;
@@ -519,9 +502,7 @@ int fffs_replay_index(struct fffs *fs) {
             if (err != FFFS_OK) {
                 return err;
             }
-            if (chunk == fs->scratch) {
-                fffs_scratch_bump(fs);
-            }
+            fffs_scratch_bump(fs);
             for (size_t pos = 0; pos < nread; pos += 4) {
                 uint16_t slot = load16(chunk + pos);
                 uint16_t head = load16(chunk + pos + 2);

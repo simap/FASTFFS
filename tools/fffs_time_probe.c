@@ -18,11 +18,13 @@
 #define FFFS_TIME_PROBE_SCRATCH_SIZE 4096
 #endif
 
+#if FFFS_TIME_PROBE_SCRATCH_SIZE < FFFS_MIN_SCRATCH_SIZE
+#error "FFFS_TIME_PROBE_SCRATCH_SIZE must be at least FFFS_MIN_SCRATCH_SIZE"
+#endif
+
 static uint16_t index_heads[INDEX_HASH_TABLE_SIZE];
 static uint16_t remount_heads[INDEX_HASH_TABLE_SIZE];
-#if FFFS_TIME_PROBE_SCRATCH_SIZE > 0
 static uint8_t scratch[FFFS_TIME_PROBE_SCRATCH_SIZE];
-#endif
 
 struct op_summary {
     uint64_t calls;
@@ -114,13 +116,8 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
         .index_heads = heads,
         .index_hash_table_size = INDEX_HASH_TABLE_SIZE,
-#if FFFS_TIME_PROBE_SCRATCH_SIZE > 0
         .scratch = scratch,
         .scratch_size = sizeof(scratch),
-#else
-        .scratch = NULL,
-        .scratch_size = 0,
-#endif
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
         .alloc_map = alloc_map,
         .alloc_map_words = sizeof(alloc_map) / sizeof(alloc_map[0]),

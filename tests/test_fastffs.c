@@ -42,8 +42,55 @@
 #endif
 
 #define TEST_ALLOC_MAP_WORDS 256
+#define TEST_SCRATCH_SIZE 4096
+#define TEST_INDEX_HEADER_SIZE 8
 
 uint16_t fffs_hash16(const char *name);
+int fffs_rotate_index(struct fffs *fs);
+
+struct measured_ops {
+    uint64_t calls[FFSV_OP_COUNT];
+    uint64_t bytes[FFSV_OP_COUNT];
+    uint64_t ns_by_op[FFSV_OP_COUNT];
+    uint64_t ns;
+};
+
+static void format_duration(char *out, size_t out_size, uint64_t ns) {
+    if (ns >= 1000000) {
+        snprintf(out, out_size, "%.3f ms", (double)ns / 1000000.0);
+    } else {
+        snprintf(out, out_size, "%.0f us", (double)ns / 1000.0);
+    }
+}
+
+static void format_bytes(char *out, size_t out_size, uint64_t bytes) {
+    if (bytes != 0 && bytes % (1024 * 1024) == 0) {
+        snprintf(out, out_size, "%lluMiB",
+                (unsigned long long)(bytes / (1024 * 1024)));
+    } else if (bytes != 0 && bytes % 1024 == 0 && bytes >= 1024 * 1024) {
+        snprintf(out, out_size, "%lluKiB",
+                (unsigned long long)(bytes / 1024));
+    } else {
+        snprintf(out, out_size, "%lluB", (unsigned long long)bytes);
+    }
+}
+
+static void append_measured_op(char *out, size_t out_size, bool *first,
+        const char *label, const struct measured_ops *ops,
+        enum ffsv_op_type type) {
+    if (ops->calls[type] == 0) {
+        return;
+    }
+    char duration[32];
+    char bytes[32];
+    format_duration(duration, sizeof(duration), ops->ns_by_op[type]);
+    format_bytes(bytes, sizeof(bytes), ops->bytes[type]);
+    size_t len = strlen(out);
+    snprintf(out + len, out_size - len, "%s%s=%llu/%s/%s",
+            *first ? "" : ", ", label,
+            (unsigned long long)ops->calls[type], bytes, duration);
+    *first = false;
+}
 
 static int flash_to_fs(int status) {
     return status == FFSV_OK ? FFFS_OK : FFFS_ERR_IO;
@@ -59,6 +106,48 @@ static void inject_next(struct ffsv_flash *flash, enum ffsv_op_type op,
         .status = FFSV_ERR_INJECTED,
         .partial_bytes = partial_bytes,
     });
+}
+
+static void capture_ops(struct ffsv_flash *flash, struct measured_ops *out) {
+    const struct ffsv_op_counts *counts = ffsv_flash_counts(flash);
+    memset(out, 0, sizeof(*out));
+    out->ns = ffsv_flash_time_ns(flash);
+    for (size_t i = 0; i < FFSV_OP_COUNT; i++) {
+        out->calls[i] = counts[i].calls;
+        out->bytes[i] = counts[i].bytes;
+    }
+}
+
+static void diff_ops(const struct measured_ops *before,
+        const struct measured_ops *after, const struct ffsv_timing *timing,
+        struct measured_ops *out) {
+    memset(out, 0, sizeof(*out));
+    out->ns = after->ns - before->ns;
+    for (size_t i = 0; i < FFSV_OP_COUNT; i++) {
+        out->calls[i] = after->calls[i] - before->calls[i];
+        out->bytes[i] = after->bytes[i] - before->bytes[i];
+    }
+    out->ns_by_op[FFSV_OP_READ] =
+        out->calls[FFSV_OP_READ] * timing->read_fixed_ns +
+        out->bytes[FFSV_OP_READ] * timing->read_per_byte_ns;
+    out->ns_by_op[FFSV_OP_PROGRAM] =
+        out->calls[FFSV_OP_PROGRAM] * timing->program_fixed_ns +
+        out->bytes[FFSV_OP_PROGRAM] * timing->program_per_byte_ns;
+    out->ns_by_op[FFSV_OP_ERASE] =
+        out->calls[FFSV_OP_ERASE] * timing->erase_fixed_ns +
+        out->bytes[FFSV_OP_ERASE] * timing->erase_per_byte_ns;
+    out->ns_by_op[FFSV_OP_BLANK_CHECK] =
+        out->calls[FFSV_OP_BLANK_CHECK] * timing->blank_check_fixed_ns +
+        out->bytes[FFSV_OP_BLANK_CHECK] * timing->blank_check_per_byte_ns;
+    out->ns_by_op[FFSV_OP_STAGE_PROGRAM] =
+        out->calls[FFSV_OP_STAGE_PROGRAM] * timing->program_fixed_ns +
+        out->bytes[FFSV_OP_STAGE_PROGRAM] * timing->program_per_byte_ns;
+    out->ns_by_op[FFSV_OP_COMMIT_STAGED] =
+        out->calls[FFSV_OP_COMMIT_STAGED] * timing->program_fixed_ns +
+        out->bytes[FFSV_OP_COMMIT_STAGED] * timing->program_per_byte_ns;
+    out->ns_by_op[FFSV_OP_DROP_STAGED] =
+        out->calls[FFSV_OP_DROP_STAGED] * timing->program_fixed_ns +
+        out->bytes[FFSV_OP_DROP_STAGED] * timing->program_per_byte_ns;
 }
 
 static int new_backend(struct ffsv_flash **flash,
@@ -83,6 +172,7 @@ static int new_backend_with_size(struct ffsv_flash **flash,
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         uint16_t *index_heads) {
+    static uint8_t scratch[TEST_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     static uint32_t alloc_map[TEST_ALLOC_MAP_WORDS];
 #endif
@@ -94,6 +184,8 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
 #else
             FFFS_INDEX_HASH_TABLE_SIZE,
 #endif
+        .scratch = scratch,
+        .scratch_size = sizeof(scratch),
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
         .alloc_map = alloc_map,
         .alloc_map_words = TEST_ALLOC_MAP_WORDS,
@@ -104,6 +196,33 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
 static size_t test_max_file_data_size(const struct fffs *fs) {
     size_t raw = fs->sector_size - 12 - 64;
     return raw - (raw % fs->backend.program_granule);
+}
+
+static int test_mount_requires_scratch(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t tiny_scratch[FFFS_MIN_SCRATCH_SIZE - 1u];
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+
+    ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
+                &(struct fffs_mount_options){
+                    .index_heads = fs_index_heads,
+                    .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                }));
+    ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
+                &(struct fffs_mount_options){
+                    .index_heads = fs_index_heads,
+                    .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .scratch = tiny_scratch,
+                    .scratch_size = sizeof(tiny_scratch),
+                }));
+
+    ffsv_flash_destroy(flash);
+    return 0;
 }
 
 static int write_chunks(struct fffs *fs, const char *name,
@@ -749,6 +868,7 @@ static int test_full_alloc_map_mount_requires_storage(void) {
     struct fffs_backend backend;
     struct fffs fs;
     static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint8_t scratch[TEST_SCRATCH_SIZE];
     uint32_t tiny_map[1];
     uint32_t ok_map[TEST_ALLOC_MAP_WORDS];
 
@@ -759,11 +879,15 @@ static int test_full_alloc_map_mount_requires_storage(void) {
                 &(struct fffs_mount_options){
                     .index_heads = fs_index_heads,
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .scratch = scratch,
+                    .scratch_size = sizeof(scratch),
                 }));
     ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
                 &(struct fffs_mount_options){
                     .index_heads = fs_index_heads,
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .scratch = scratch,
+                    .scratch_size = sizeof(scratch),
                     .alloc_map = tiny_map,
                     .alloc_map_words = sizeof(tiny_map) /
                         sizeof(tiny_map[0]),
@@ -771,6 +895,8 @@ static int test_full_alloc_map_mount_requires_storage(void) {
     ASSERT_OK(fffs_mount(&fs, &backend, &(struct fffs_mount_options){
                     .index_heads = fs_index_heads,
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .scratch = scratch,
+                    .scratch_size = sizeof(scratch),
                     .alloc_map = ok_map,
                     .alloc_map_words = sizeof(ok_map) / sizeof(ok_map[0]),
                 }));
@@ -1164,6 +1290,92 @@ static int test_index_rotates_when_active_sector_fills(void) {
     return 0;
 }
 
+static int test_index_compaction_mixed_history_metrics(void) {
+    enum {
+        file_count = 256,
+        event_count = 1000,
+    };
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    bool live[file_count] = {0};
+    size_t live_count = 0;
+    uint32_t rng = 0x51f0ca7eu;
+    uint8_t value[4];
+    char name[16];
+    struct measured_ops before_ops;
+    struct measured_ops after_ops;
+    struct measured_ops ops;
+    struct fffs_inspect_summary summary;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 1400));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    for (size_t event = 0; event < event_count; event++) {
+        rng = rng * 1664525u + 1013904223u;
+        size_t id = (size_t)(rng % file_count);
+        snprintf(name, sizeof(name), "mix%03zu", id);
+        if (live[id] && (rng & 7u) == 0u) {
+            ASSERT_OK(fffs_delete_file(&fs, name));
+            live[id] = false;
+            live_count--;
+            continue;
+        }
+        value[0] = (uint8_t)rng;
+        value[1] = (uint8_t)(rng >> 8);
+        value[2] = (uint8_t)event;
+        value[3] = (uint8_t)(event >> 8);
+        ASSERT_OK(write_chunks(&fs, name, value, sizeof(value)));
+        if (!live[id]) {
+            live[id] = true;
+            live_count++;
+        }
+    }
+    ASSERT_TRUE(live_count > 0);
+    ASSERT_TRUE(live_count < event_count);
+
+    ASSERT_TRUE(fs.index_sequence_count == 1);
+    ASSERT_TRUE(fs.next_index_offset == fs.active_index_sector *
+            fs.sector_size + TEST_INDEX_HEADER_SIZE + event_count * 4u);
+    capture_ops(flash, &before_ops);
+    ASSERT_OK(fffs_rotate_index(&fs));
+    capture_ops(flash, &after_ops);
+    diff_ops(&before_ops, &after_ops, &ffsv_flash_config(flash)->timing,
+            &ops);
+
+    ASSERT_TRUE(fs.index_sequence_count == 1);
+    ASSERT_OK(fffs_inspect_check(&backend, &summary));
+    ASSERT_TRUE(summary.live_entries == live_count);
+    ASSERT_TRUE(summary.index_records == live_count);
+    ASSERT_TRUE(summary.index_deletes == 0);
+    ASSERT_TRUE(summary.live_entries_corrupt == 0);
+    ASSERT_TRUE(summary.md_corrupt == 0);
+
+    char duration[32];
+    char op_summary[192] = "";
+    bool first = true;
+    format_duration(duration, sizeof(duration), ops.ns);
+    append_measured_op(op_summary, sizeof(op_summary), &first, "r", &ops,
+            FFSV_OP_READ);
+    append_measured_op(op_summary, sizeof(op_summary), &first, "p", &ops,
+            FFSV_OP_PROGRAM);
+    append_measured_op(op_summary, sizeof(op_summary), &first, "e", &ops,
+            FFSV_OP_ERASE);
+    append_measured_op(op_summary, sizeof(op_summary), &first, "bc", &ops,
+            FFSV_OP_BLANK_CHECK);
+
+    fprintf(stderr,
+            "index compaction mixed history live=%u  %10s   %s\n",
+            (unsigned)summary.live_entries, duration,
+            first ? "no flash ops" : op_summary);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_index_header_discovery_without_sector_zero(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -1340,6 +1552,7 @@ static int test_workload_generator_runs_deterministically(void) {
 int main(void) {
     int failures = 0;
     failures += test_format_mount_write_read_remount();
+    failures += test_mount_requires_scratch();
     failures += test_overwrite_delete_and_remount();
     failures += test_reserved_hash_slots_are_skipped();
     failures += test_replay_skips_reused_stale_index_heads();
@@ -1363,6 +1576,7 @@ int main(void) {
     failures += test_format_tiny_sector_wins_over_old_large_remnant();
     failures += test_format_erases_expanded_index_area();
     failures += test_index_rotates_when_active_sector_fills();
+    failures += test_index_compaction_mixed_history_metrics();
     failures += test_index_header_discovery_without_sector_zero();
     failures += test_large_file_uses_noncontiguous_extents();
     failures += test_inspect_classifies_live_and_orphaned_metadata();

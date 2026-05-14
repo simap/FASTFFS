@@ -27,6 +27,7 @@
 #endif
 
 static uint16_t index_heads[TOOL_INDEX_HASH_TABLE_SIZE];
+static uint8_t scratch[4096];
 
 static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend);
 
@@ -245,6 +246,8 @@ static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend) {
 #else
             FFFS_INDEX_HASH_TABLE_SIZE,
 #endif
+        .scratch = scratch,
+        .scratch_size = sizeof(scratch),
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
         .alloc_map = alloc_map,
         .alloc_map_words = sizeof(alloc_map) / sizeof(alloc_map[0]),

@@ -22,6 +22,8 @@ static bool is_power_of_two(size_t n) {
 
 static int hash_remove_at(struct fffs *fs, size_t remove_idx);
 static int hash_repair_from(struct fffs *fs, size_t hole);
+static bool bucket_can_hold_slot(struct fffs *fs, size_t idx,
+        uint16_t slot);
 
 bool fffs_index_cache_config_valid(size_t count) {
     return is_power_of_two(count) &&
@@ -66,6 +68,14 @@ restart:
             if (err != FFFS_ERR_CORRUPT) {
                 return err;
             }
+            err = hash_remove_at(fs, idx);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            idx = slot & mask;
+            goto restart;
+        }
+        if (!bucket_can_hold_slot(fs, idx, md_slot)) {
             err = hash_remove_at(fs, idx);
             if (err != FFFS_OK) {
                 return err;
@@ -140,35 +150,97 @@ static int hash_remove_at(struct fffs *fs, size_t remove_idx) {
     return hash_repair_from(fs, remove_idx);
 }
 
+static bool first_stale_in_probe_path(struct fffs *fs, size_t home,
+        size_t idx, size_t *stale) {
+    size_t mask = fs->index_hash_table_size - 1;
+    size_t pos = home;
+    for (size_t scanned = 0; scanned < fs->index_hash_table_size &&
+            pos != idx; scanned++) {
+        uint16_t h = fs->index_heads[pos];
+        if (h == FFFS_INDEX_STALE_HEAD) {
+            *stale = pos;
+            return true;
+        }
+        if (h == 0) {
+            return false;
+        }
+        pos = (pos + 1) & mask;
+    }
+    return false;
+}
+
 static int hash_repair_from(struct fffs *fs, size_t hole) {
     size_t mask = fs->index_hash_table_size - 1;
-    fs->index_heads[hole] = 0;
-    size_t idx = (hole + 1) & mask;
-    for (size_t scanned = 0; scanned < fs->index_hash_table_size &&
-            fs->index_heads[idx] != 0; scanned++) {
-        uint16_t h = fs->index_heads[idx];
-        if (h == FFFS_INDEX_STALE_HEAD) {
-            fs->index_heads[idx] = 0;
-            idx = (idx + 1) & mask;
-            continue;
-        }
-        uint16_t slot;
-        int err = fffs_read_metadata(fs, h, NULL, &slot, NULL, NULL, NULL);
-        if (err != FFFS_OK) {
-            if (err != FFFS_ERR_CORRUPT) {
-                return err;
-            }
-            fs->index_heads[idx] = 0;
-            idx = (idx + 1) & mask;
-            continue;
-        }
 
-        size_t home = slot & mask;
-        if (probe_distance(mask, home, hole) <
-                probe_distance(mask, home, idx)) {
-            fs->index_heads[hole] = h;
+    size_t start = hole;
+    for (size_t scanned = 0; scanned + 1 < fs->index_hash_table_size;
+            scanned++) {
+        size_t prev = (start - 1) & mask;
+        if (fs->index_heads[prev] == 0) {
+            break;
+        }
+        start = prev;
+    }
+
+    size_t repair_len = 0;
+    size_t idx = start;
+    while (repair_len < fs->index_hash_table_size &&
+            fs->index_heads[idx] != 0) {
+        repair_len++;
+        idx = (idx + 1) & mask;
+    }
+
+    for (size_t pass = 0; pass < repair_len; pass++) {
+        bool moved = false;
+        idx = start;
+        for (size_t scanned = 0; scanned < repair_len; scanned++) {
+            uint16_t h = fs->index_heads[idx];
+            if (h == 0) {
+                break;
+            }
+            if (h == FFFS_INDEX_STALE_HEAD) {
+                idx = (idx + 1) & mask;
+                continue;
+            }
+
+            uint16_t slot;
+            int err = fffs_read_metadata(fs, h, NULL, &slot, NULL, NULL,
+                    NULL);
+            if (err != FFFS_OK) {
+                if (err != FFFS_ERR_CORRUPT) {
+                    return err;
+                }
+                fs->index_heads[idx] = FFFS_INDEX_STALE_HEAD;
+                moved = true;
+                idx = (idx + 1) & mask;
+                continue;
+            }
+
+            if (!bucket_can_hold_slot(fs, idx, slot)) {
+                fs->index_heads[idx] = FFFS_INDEX_STALE_HEAD;
+                moved = true;
+                idx = (idx + 1) & mask;
+                continue;
+            }
+
+            size_t stale;
+            size_t home = slot & mask;
+            if (first_stale_in_probe_path(fs, home, idx, &stale)) {
+                fs->index_heads[stale] = h;
+                fs->index_heads[idx] = FFFS_INDEX_STALE_HEAD;
+                moved = true;
+            }
+            idx = (idx + 1) & mask;
+        }
+        if (!moved) {
+            break;
+        }
+    }
+
+    idx = start;
+    for (size_t scanned = 0; scanned < repair_len; scanned++) {
+        if (fs->index_heads[idx] == FFFS_INDEX_STALE_HEAD) {
             fs->index_heads[idx] = 0;
-            hole = idx;
         }
         idx = (idx + 1) & mask;
     }
