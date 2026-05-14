@@ -90,6 +90,10 @@ struct fffs_mount_options {
     size_t index_hash_table_size;
     void *scratch;
     size_t scratch_size;
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    uint32_t *alloc_map;
+    size_t alloc_map_words;
+#endif
 };
 
 struct fffs {
@@ -100,6 +104,10 @@ struct fffs {
     uint8_t *scratch;
     size_t scratch_size;
     uint32_t scratch_serial;
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    uint32_t *alloc_map;
+    size_t alloc_map_words;
+#endif
     size_t sector_size;
     size_t sector_count;
     uint8_t sector_shift;
@@ -135,6 +143,8 @@ struct fffs_file {
     uint16_t current_write_offset;
     uint16_t root_data_len;
     uint16_t root_next;
+    uint16_t old_head;
+    uint16_t old_next;
     uint32_t size;
     uint32_t pos;
     uint32_t extent_pos;

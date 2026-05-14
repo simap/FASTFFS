@@ -41,6 +41,8 @@
 #define TEST_INDEX_HASH_TABLE_SIZE FFFS_INDEX_HASH_TABLE_SIZE
 #endif
 
+#define TEST_ALLOC_MAP_WORDS 256
+
 uint16_t fffs_hash16(const char *name);
 
 static int flash_to_fs(int status) {
@@ -81,6 +83,9 @@ static int new_backend_with_size(struct ffsv_flash **flash,
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         uint16_t *index_heads) {
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    static uint32_t alloc_map[TEST_ALLOC_MAP_WORDS];
+#endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
         .index_heads = index_heads,
         .index_hash_table_size =
@@ -88,6 +93,10 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
             TEST_INDEX_HASH_TABLE_SIZE,
 #else
             FFFS_INDEX_HASH_TABLE_SIZE,
+#endif
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+        .alloc_map = alloc_map,
+        .alloc_map_words = TEST_ALLOC_MAP_WORDS,
 #endif
     });
 }
@@ -239,7 +248,7 @@ static int test_overwrite_delete_and_remount(void) {
 #if FFFS_LAZY_DELETE_TOMBSTONES
     ASSERT_TRUE(summary.md_tombstoned == 0);
 #else
-    ASSERT_TRUE(summary.md_tombstoned == 1);
+    ASSERT_TRUE(summary.md_tombstoned == 2);
 #endif
     fffs_unmount(&fs);
 
@@ -683,8 +692,10 @@ static int test_gc_reclaims_obsolete_index_history(void) {
     ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)new_value,
                 strlen(new_value)));
     fs.gc_cursor = fs.index_sectors;
+#if FFFS_LAZY_DELETE_TOMBSTONES
     ASSERT_OK(fffs_gc_step(&fs, &action));
     ASSERT_TRUE(action == FFFS_GC_TOMBSTONED);
+#endif
     ASSERT_OK(fffs_gc_step(&fs, &action));
     ASSERT_TRUE(action == FFFS_GC_ERASED);
     fffs_unmount(&fs);
@@ -723,6 +734,46 @@ static int test_alloc_failure_runs_gc_to_free_sector(void) {
     ASSERT_OK(write_chunks(&fs, "f004", replacement, sizeof(replacement)));
     ASSERT_OK(fffs_stat(&fs, "f004", &st));
     ASSERT_TRUE(st.size == sizeof(replacement));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_full_alloc_map_mount_requires_storage(void) {
+#if FFFS_ALLOC_MAP_MODE != FFFS_ALLOC_MAP_FULL_BITMAP
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint32_t tiny_map[1];
+    uint32_t ok_map[TEST_ALLOC_MAP_WORDS];
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 64));
+    ASSERT_OK(fffs_format(&backend, NULL));
+
+    ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
+                &(struct fffs_mount_options){
+                    .index_heads = fs_index_heads,
+                    .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                }));
+    ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
+                &(struct fffs_mount_options){
+                    .index_heads = fs_index_heads,
+                    .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .alloc_map = tiny_map,
+                    .alloc_map_words = sizeof(tiny_map) /
+                        sizeof(tiny_map[0]),
+                }));
+    ASSERT_OK(fffs_mount(&fs, &backend, &(struct fffs_mount_options){
+                    .index_heads = fs_index_heads,
+                    .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
+                    .alloc_map = ok_map,
+                    .alloc_map_words = sizeof(ok_map) / sizeof(ok_map[0]),
+                }));
 
     fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
@@ -1212,7 +1263,12 @@ static int test_inspect_classifies_live_and_orphaned_metadata(void) {
     ASSERT_TRUE(summary.live_entries == 1);
     ASSERT_TRUE(summary.live_entries_corrupt == 0);
     ASSERT_TRUE(summary.md_live == 1);
+#if FFFS_LAZY_DELETE_TOMBSTONES
     ASSERT_TRUE(summary.md_obsolete_orphaned == 1);
+#else
+    ASSERT_TRUE(summary.md_tombstoned == 1);
+    ASSERT_TRUE(summary.md_obsolete_orphaned == 0);
+#endif
     ASSERT_TRUE(summary.md_corrupt == 0);
     dump = tmpfile();
     ASSERT_TRUE(dump != NULL);
@@ -1297,6 +1353,7 @@ int main(void) {
     failures += test_gc_reclaims_failed_open_writer_after_remount();
     failures += test_gc_reclaims_obsolete_index_history();
     failures += test_alloc_failure_runs_gc_to_free_sector();
+    failures += test_full_alloc_map_mount_requires_storage();
     failures += test_streaming_write_forces_gc_without_reclaiming_self();
     failures += test_streaming_write_fails_after_gc_exhausts_reclaimable_space();
     failures += test_replay_evicts_stale_hash_collision_head();

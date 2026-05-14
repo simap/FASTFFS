@@ -350,6 +350,15 @@ int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
     return FFFS_OK;
 }
 
+void fffs_index_mark_live_heads_used(struct fffs *fs) {
+    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
+        uint16_t head = fs->index_heads[i];
+        if (head != 0 && head != FFFS_INDEX_STALE_HEAD) {
+            fffs_alloc_map_mark_used(fs, head);
+        }
+    }
+}
+
 bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
     for (size_t i = 0; i < fs->index_hash_table_size; i++) {
         if (fs->index_heads[i] == sector) {

@@ -93,6 +93,16 @@ void fffs_bitset_clear(uint32_t *words, size_t word_count);
 bool fffs_bitset_get(const uint32_t *words, size_t bit);
 void fffs_bitset_set(uint32_t *words, size_t bit);
 
+bool fffs_alloc_map_config_valid(size_t sector_count,
+        const struct fffs_mount_options *opts);
+int fffs_alloc_map_mount_init(struct fffs *fs,
+        const struct fffs_mount_options *opts);
+bool fffs_alloc_map_maybe_used(struct fffs *fs, uint16_t sector);
+void fffs_alloc_map_mark_used(struct fffs *fs, uint16_t sector);
+void fffs_alloc_map_mark_unknown(struct fffs *fs, uint16_t sector);
+void fffs_alloc_map_mark_range_unknown(struct fffs *fs,
+        uint16_t first, uint16_t count);
+
 int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
         uint16_t *head, bool *end);
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head);
@@ -105,6 +115,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         uint16_t *next);
 bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st);
 int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end);
+void fffs_index_mark_live_heads_used(struct fffs *fs);
 bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector);
 int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
         bool *reachable);

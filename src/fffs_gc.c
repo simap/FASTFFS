@@ -70,7 +70,8 @@ static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
     return sector;
 }
 
-int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
+static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
+        bool use_map) {
     if (!fs) {
         return FFFS_ERR_INVALID;
     }
@@ -85,7 +86,16 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
     if (s != fs->gc_cursor) {
         fs->gc_live = false;
     }
+    if (use_map && fffs_alloc_map_maybe_used(fs, (uint16_t)s)) {
+        fs->gc_cursor = fffs_next_data_sector(fs, s);
+        fs->gc_live = false;
+        if (out_action) {
+            *out_action = FFFS_GC_SCANNED;
+        }
+        return FFFS_OK;
+    }
     if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
+        fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_live = false;
         if (out_action) {
@@ -100,6 +110,7 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
         return err;
     }
     if (state == GC_SECTOR_BLANK) {
+        fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_live = false;
         if (out_action) {
@@ -114,6 +125,7 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
         if (err != FFFS_OK) {
             return err;
         }
+        fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_live = false;
         if (out_action) {
@@ -133,6 +145,7 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
         return err;
     }
     if (err == FFFS_OK && fffs_name_is_inflight(fs, st.name)) {
+        fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_live = true;
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         if (out_action) {
@@ -151,6 +164,7 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
         return err;
     }
     if (live_extent) {
+        fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_live = true;
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         if (out_action) {
@@ -163,10 +177,15 @@ int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
     if (err != FFFS_OK) {
         return err;
     }
+    fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
     if (out_action) {
         *out_action = FFFS_GC_TOMBSTONED;
     }
     return FFFS_OK;
+}
+
+int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
+    return gc_step(fs, out_action, true);
 }
 
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector) {
@@ -178,24 +197,32 @@ int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector) {
     }
 
     size_t data_sectors = fs->sector_count - fs->index_sectors;
-    size_t advanced = 0;
-    while (advanced < data_sectors) {
-        size_t before = normalized_data_cursor(fs, fs->gc_cursor);
-        enum fffs_gc_action action;
-        int err = fffs_gc_step(fs, &action);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        if (action == FFFS_GC_ERASED) {
-            *erased_sector = (uint16_t)before;
-            return FFFS_OK;
-        }
-
-        size_t after = normalized_data_cursor(fs, fs->gc_cursor);
-        if (after != before) {
-            advanced += 1;
-        } else if (action == FFFS_GC_IDLE) {
+    for (size_t pass = 0; pass < 2; pass++) {
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_NONE
+        if (pass != 0) {
             break;
+        }
+#endif
+        bool use_map = pass == 0;
+        size_t advanced = 0;
+        while (advanced < data_sectors) {
+            size_t before = normalized_data_cursor(fs, fs->gc_cursor);
+            enum fffs_gc_action action;
+            int err = gc_step(fs, &action, use_map);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (action == FFFS_GC_ERASED) {
+                *erased_sector = (uint16_t)before;
+                return FFFS_OK;
+            }
+
+            size_t after = normalized_data_cursor(fs, fs->gc_cursor);
+            if (after != before) {
+                advanced += 1;
+            } else if (action == FFFS_GC_IDLE) {
+                break;
+            }
         }
     }
     return FFFS_ERR_NO_SPACE;

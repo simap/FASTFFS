@@ -108,6 +108,9 @@ static void print_delta(struct ffsv_flash *flash, const char *name,
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         uint16_t *heads) {
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    static uint32_t alloc_map[2048];
+#endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
         .index_heads = heads,
         .index_hash_table_size = INDEX_HASH_TABLE_SIZE,
@@ -117,6 +120,10 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
 #else
         .scratch = NULL,
         .scratch_size = 0,
+#endif
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+        .alloc_map = alloc_map,
+        .alloc_map_words = sizeof(alloc_map) / sizeof(alloc_map[0]),
 #endif
     });
 }

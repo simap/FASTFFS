@@ -43,7 +43,8 @@ size_t fffs_next_data_sector(struct fffs *fs, size_t sector) {
     return sector;
 }
 
-static int find_free_sector_once(struct fffs *fs, uint16_t *sector) {
+static int find_free_sector_once(struct fffs *fs, uint16_t *sector,
+        bool use_map) {
     if (fs->sector_count <= fs->index_sectors) {
         return FFFS_ERR_NO_SPACE;
     }
@@ -55,8 +56,13 @@ static int find_free_sector_once(struct fffs *fs, uint16_t *sector) {
 
     size_t data_sectors = fs->sector_count - fs->index_sectors;
     for (size_t checked = 0; checked < data_sectors; checked++) {
+        if (use_map && fffs_alloc_map_maybe_used(fs, (uint16_t)s)) {
+            s = fffs_next_data_sector(fs, s);
+            continue;
+        }
         if (fffs_index_sector_is_live_head(fs, s) ||
                 fffs_sector_is_inflight(fs, (uint16_t)s)) {
+            fffs_alloc_map_mark_used(fs, (uint16_t)s);
             s = fffs_next_data_sector(fs, s);
             continue;
         }
@@ -65,6 +71,7 @@ static int find_free_sector_once(struct fffs *fs, uint16_t *sector) {
         if (err == FFFS_OK) {
             *sector = (uint16_t)s;
             fs->alloc_cursor = fffs_next_data_sector(fs, s);
+            fffs_alloc_map_mark_used(fs, *sector);
             return FFFS_OK;
         }
         if (err != FFFS_ERR_NO_SPACE) {
@@ -93,12 +100,13 @@ static int allocate_erased_gc_sector(struct fffs *fs, uint16_t *sector) {
     }
     *sector = erased_sector;
     fs->alloc_cursor = fffs_next_data_sector(fs, erased_sector);
+    fffs_alloc_map_mark_used(fs, erased_sector);
     return FFFS_OK;
 }
 #endif
 
 int fffs_find_free_sector(struct fffs *fs, uint16_t *sector) {
-    int err = find_free_sector_once(fs, sector);
+    int err = find_free_sector_once(fs, sector, true);
 #if FFFS_GC_ON_ALLOC_FAILURE
     if (err == FFFS_ERR_NO_SPACE && fs->sector_count > fs->index_sectors) {
         return allocate_erased_gc_sector(fs, sector);

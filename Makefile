@@ -8,7 +8,7 @@ SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 
 .PHONY: all test test-timing test-timing-full-index test-timing-nocache \
 	test-timing-nocache-noscratch test-timing-compare test-workload \
-	test-sanitize test-full-index test-nocache clean
+	test-sanitize test-full-index test-nocache test-full-alloc-map clean
 
 all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe
@@ -50,6 +50,10 @@ $(BUILD_DIR)/src_fffs_bitset.o: src/fffs_bitset.c \
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c src/fffs_internal.h \
+		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/src_fffs_alloc_map.o: src/fffs_alloc_map.c src/fffs_internal.h \
 		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -106,6 +110,7 @@ $(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_nocache_index.o \
 		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_alloc_map.o \
 		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
@@ -122,6 +127,7 @@ $(BUILD_DIR)/fffs_tool: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_nocache_index.o \
 		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_alloc_map.o \
 		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
@@ -138,6 +144,7 @@ $(BUILD_DIR)/fffs_time_probe: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/src_fffs_nocache_index.o \
 		$(BUILD_DIR)/src_fffs_bitset.o \
 		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_alloc_map.o \
 		$(BUILD_DIR)/src_fffs_gc.o \
 		$(BUILD_DIR)/src_fffs_inspect.o \
 		$(BUILD_DIR)/src_fastffs_host.o \
@@ -192,6 +199,11 @@ test-full-index:
 test-nocache:
 	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/nocache \
 		CPPFLAGS="$(CPPFLAGS) -DFFFS_INDEX_CACHE_MODE=FFFS_INDEX_CACHE_NONE" \
+		test
+
+test-full-alloc-map:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/full-alloc-map \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_ALLOC_MAP_MODE=FFFS_ALLOC_MAP_FULL_BITMAP" \
 		test
 
 clean:

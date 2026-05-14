@@ -234,6 +234,9 @@ static int cmd_create(const char *sector_size_text,
 }
 
 static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend) {
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    static uint32_t alloc_map[2048];
+#endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
         .index_heads = index_heads,
         .index_hash_table_size =
@@ -241,6 +244,10 @@ static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend) {
             FFFS_SLOT_COUNT,
 #else
             FFFS_INDEX_HASH_TABLE_SIZE,
+#endif
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+        .alloc_map = alloc_map,
+        .alloc_map_words = sizeof(alloc_map) / sizeof(alloc_map[0]),
 #endif
     });
 }

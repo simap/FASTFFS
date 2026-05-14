@@ -161,6 +161,15 @@ int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
     return FFFS_OK;
 }
 
+void fffs_index_mark_live_heads_used(struct fffs *fs) {
+    for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
+        uint16_t head = fs->index_heads[slot];
+        if (head != 0) {
+            fffs_alloc_map_mark_used(fs, head);
+        }
+    }
+}
+
 bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
     for (size_t i = 0; i < FFFS_SLOT_COUNT; i++) {
         if (fs->index_heads[i] == sector) {

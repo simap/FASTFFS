@@ -401,7 +401,12 @@ workload performs frequent directory listings over a large namespace. Direct ful
 
 ## Free/Used Tracking
 
-Free/used state is tracked at FASTFFS sector level with a bitmap.
+Free/used state can be tracked at FASTFFS sector level with a bitmap. The
+baseline can also be built with no allocation map, in which case allocation and
+GC use linear scans plus blank checks and metadata classification. A full bitmap
+uses caller-provided memory because it scales with sector count; an 8 MB
+filesystem with 4 KB sectors needs 256 bytes. Smaller coarse maps can be
+compile-time variants with inline storage.
 
 The bitmap is an optimization, not the source of truth:
 
@@ -411,6 +416,20 @@ The bitmap is an optimization, not the source of truth:
 - Successful writes can update the bitmap lazily.
 - Full truth can be reconstructed from the index and sector metadata.
 - A failed data-sector erase/program can be skipped without committing an index record pointing at it. Persistent bad-sector tracking can remain a later backend feature.
+
+The full bitmap uses strict known-used semantics: `1` means known used,
+live, or reserved; `0` means unknown or worth inspecting. A `0` bit is not
+proof of free space, and a stale `1` must not be allowed to starve pressure
+paths forever. Deletes clear the old file's known sector chain back to unknown
+even in lazy tombstone mode, so GC can later reclassify those sectors without
+delete-time sector-local flash programs.
+
+A full bitmap does require a decent chunk of memory. With 4K sectors, you'd need 256 bytes to cover an 8MB filesystem.
+
+A coarse bitmap could compress this down significiantly, while still having some benefit and avoiding scanning some areas that are full for alloc or GC. For example, a 64 bit wide map could cover an 8MB filesystem using 32 sector wide buckets per bit.
+
+Coarse map variants should use conservative "proven full bucket" semantics,
+not "some live sector was full" semantics. Since allocation attempts to fill sequentially, there should be many contiguous, completely full blocks of sectors that can be skipped over. There would still be some partially full buckets, but it would still be less scanning that scanning every sector.
 
 The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector densely until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space. The allocator does not try to hunt for sparse holes before filling the current usable sector.
 
@@ -431,6 +450,8 @@ It's possible some writes occured and were not commited, so scan should also loo
 
 The sector serial is also a relative age signal for GC and wear distribution.
 Low serial sectors are older allocation candidates. 
+
+A static wear leveling system could move very old and stable files off of sectors with low serials. It would have to copy off every file, update the index, then reclaim the sector, so this add some work to the system. That might be desirable for flash systems with low program/erase cycle ratings that have a mix of stable and volatile file workloads. This is not implemented, but could be added later using existing FS structures.
 
 
 ## Commit Order

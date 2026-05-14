@@ -506,6 +506,10 @@ bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
     return err == FFFS_OK && live;
 }
 
+void fffs_index_mark_live_heads_used(struct fffs *fs) {
+    (void)fs;
+}
+
 static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
         size_t sector, bool *reachable) {
     uint16_t current = head;

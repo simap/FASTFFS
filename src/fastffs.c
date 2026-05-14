@@ -26,9 +26,8 @@ static int format_sector_shift(enum fffs_sector_size sector_size,
     return FFFS_ERR_INVALID;
 }
 
-#if !FFFS_LAZY_DELETE_TOMBSTONES
-static void tombstone_deleted_chain(struct fffs *fs, uint16_t slot,
-        uint16_t head, uint16_t next) {
+static void invalidate_old_chain(struct fffs *fs, uint16_t slot,
+        uint16_t head, uint16_t next, bool tombstone) {
     uint16_t current = head;
     uint16_t current_next = next;
     bool have_next = true;
@@ -42,15 +41,21 @@ static void tombstone_deleted_chain(struct fffs *fs, uint16_t slot,
                 return;
             }
         }
-        int err = fffs_tombstone_sector(fs, current);
-        if (err != FFFS_OK) {
-            return;
+        fffs_alloc_map_mark_unknown(fs, current);
+#if !FFFS_LAZY_DELETE_TOMBSTONES
+        if (tombstone) {
+            int err = fffs_tombstone_sector(fs, current);
+            if (err != FFFS_OK) {
+                return;
+            }
         }
+#else
+        (void)tombstone;
+#endif
         current = current_next;
         have_next = false;
     }
 }
-#endif
 
 static uint32_t claim_sector_serial(struct fffs *fs) {
     uint32_t serial = fs->next_sector_serial++;
@@ -205,11 +210,19 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->gc_cursor = fs->index_sectors;
     fs->next_sector_serial = 1;
 
+    err = fffs_alloc_map_mount_init(fs, options);
+    if (err != FFFS_OK) {
+        fffs_unmount(fs);
+        return err;
+    }
+
     err = fffs_replay_index(fs);
     if (err != FFFS_OK) {
         fffs_unmount(fs);
+        return err;
     }
-    return err;
+    fffs_index_mark_live_heads_used(fs);
+    return FFFS_OK;
 }
 
 void fffs_unmount(struct fffs *fs) {
@@ -273,6 +286,10 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
         memcpy(file->name, resolved_st.name, strlen(resolved_st.name) + 1);
     } else {
         uint16_t sector;
+        if (found) {
+            file->old_head = head;
+            file->old_next = resolved_next;
+        }
         err = fffs_find_free_sector(fs, &sector);
         if (err != FFFS_OK) {
             return err;
@@ -485,6 +502,10 @@ int fffs_close(struct fffs_file *file) {
                 file->root_sector_serial : file->current_sector_serial;
             err = fffs_write_extent_metadata(file, file->head, root_serial,
                     root_len, file->size, root_next, true);
+            if (err == FFFS_OK && file->old_head != 0) {
+                invalidate_old_chain(file->fs, file->slot, file->old_head,
+                        file->old_next, true);
+            }
         }
         unregister_inflight_writer(file);
     }
@@ -547,9 +568,7 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
     if (err != FFFS_OK) {
         return err;
     }
-#if !FFFS_LAZY_DELETE_TOMBSTONES
-    tombstone_deleted_chain(fs, slot, head, next);
-#endif
+    invalidate_old_chain(fs, slot, head, next, true);
     return FFFS_OK;
 }
 

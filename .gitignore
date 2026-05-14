@@ -1,6 +1,7 @@
 build/
 
 # ESP-IDF benchmark project outputs
+benchmarks/*/build-*/
 benchmarks/*/sdkconfig
 benchmarks/*/sdkconfig.old
 benchmarks/*/dependencies.lock
