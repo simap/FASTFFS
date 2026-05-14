@@ -195,14 +195,17 @@ valid: 1, 2
 free:  3
 ```
 
-When sectors `1` and `2` are full:
+Rotation attempts to move the index head to the next sector while maintaining at least 1 free sector. This can trigger a compaction when no sector would be free. It's possible to rotate before completely filling a sector. For example we may want to reserve space for a maximum tx size and/or to reserve some usable index space during a background compaction.
 
-1. Compact the oldest valid sector, `1`, into the erased/free sector, `3`.
-2. Omit entries from `1` that are no longer current after replaying the full valid index sequence.
-3. Write the surviving entries into `3`.
-4. Program the new sector header/magic last, with a serial newer than sector `2`.
-5. Tombstone sector `1`.
-6. Let background erase reclaim sector `1` when idle.
+Compaction can also be done independently. This is mostly a future concern. For example, we may notice that an index contains many obsolete records during index replay. Perhaps some simple heuristics like a minimum number of obsolete records or a percentage would trigger a compaction. Compaction would then likely reduce the total number of records that need to be replayed in the future. For memory backed indexes this may not be worth it, but for a non-caching lookup, the total cache size increases lookup time.
+
+When compacting a sector, compact the oldest valid sector, `1`, into the current sector `2` (if there is room) and any overflow to the erased/free sector, `3`: 
+   1. Start reading entries from the oldest sector `1`.
+   2. Omit entries from `1` that are no longer current. Existing slot + head pairs that match current data from index replay are copied forward. Deletes do not get carried forward, since they can only impact the validity of past events.
+   3. Write the surviving entries into `2` and overlowing into `3` when `2` is full.
+   4. Program the new sector header/magic in `3` last, with a serial newer than sector `2`.
+   5. Tombstone sector `1`.
+   6. Let background erase reclaim sector `1` when idle.
 
 The valid sequence is now:
 
@@ -295,8 +298,8 @@ Startup caching is configurable:
 
 The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
 
-Mount can also take a caller-provided global scratch buffer. The core must work
-with a small fallback buffer, but larger scratch improves operations that scan
+Mount also takes a caller-provided global scratch buffer. The core must work
+with a small buffer, but larger scratch improves operations that scan
 flash ranges, such as blank-checking an allocation candidate. A scratch buffer
 as large as the FASTFFS sector size lets the core blank-check a full sector with
 one backend read instead of many small reads.
