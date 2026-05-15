@@ -809,3 +809,14 @@ Sector-local compaction is TBD. It can behave like defrag: copy whole live files
 Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
 
 Local tombstones are hints for reclaim and compaction; the global index remains the authoritative namespace state.
+
+## Corruption and Errors
+
+Corruption is defined as invalid state that can cause a loss of previously successfully committed filesystem data/metadata. Partial writes due to power loss or crash must not cause corruption. Partial write crash recovery is normal/expected, and not considered corruption as long as only the partially written or uncommitted data/metadata is lost. Once an operation that commits data/metadata returns a non-error value, that data/metadata must not be lost/corrupted.
+
+If corruption is detected at any point, a sticky corruption flag must be set.
+
+If corruption is detected that impacts the operation, the operation should fail with an error and not complete normally.
+
+In strict mode, any corruption detected must cause an operational failure, even if it does not directly impact the operation. In non-strict mode, corruption unrelated to the current operation only sets a sticky flag indicating some corruption has been detected, but may continue. A fsck/check could then be run later to find and possibly repair the corruption.
+
