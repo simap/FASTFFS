@@ -646,6 +646,21 @@ The streaming write path does not need to know the final file length up front:
 
 Metadata may be physically valid before the file is committed. Namespace visibility still comes only from the global index append. A crash before the index append leaves orphaned data/metadata for GC.
 
+### Allocation Strategy
+
+Allocation should consider the following:
+* Allocate sectors with enough free space for metadata plus a minimum amount of data. In other words, it should try to use leftover free space in a sector.
+* Multiple open writable files should not end up being allocated the same sectors. This ensures that open files can write contiguously to the data area without conflict.
+* It should not allocate sectors being used for any open files.
+* Ideally contiguous sectors are allocated when available. 
+* Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or used/free bitmaps.
+
+The allocator may temporarily reserve some sectors in a contiguous extent for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
+
+Reservations don't need to be blank checked or verified until allocated.
+
+The allocator can avoid allocating sectors potentially used by other files by using the open/in flight file data to see what sectors are not fully written, and by skipping over sectors that appear to belong to any of the open/in flight files, identified by slot and/or name.
+
 ## Expected Performance
 
 These estimates assume candidate sectors are already erased or can be blank-checked before use.
