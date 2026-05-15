@@ -402,21 +402,36 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
-int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
-    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
-        uint16_t head = fs->index_heads[i];
-        if (head == 0 || head == FFFS_INDEX_STALE_HEAD) {
+int fffs_index_record_is_current(struct fffs *fs,
+        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
+        bool *current) {
+    (void)seq_pos;
+    (void)offset;
+    *current = false;
+    for (size_t probe = 0; probe < fs->index_hash_table_size; probe++) {
+        uint16_t candidate_head;
+        bool end;
+        int err = fffs_index_candidate(fs, slot, probe, &candidate_head,
+                &end);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (end) {
+            return FFFS_OK;
+        }
+
+        uint16_t md_slot;
+        err = fffs_read_metadata(fs, candidate_head, NULL, &md_slot,
+                NULL, NULL, NULL);
+        if (err == FFFS_ERR_CORRUPT) {
             continue;
         }
-        uint16_t slot;
-        int err = fffs_read_metadata(fs, head, NULL, &slot, NULL, NULL,
-                NULL);
         if (err != FFFS_OK) {
             return err;
         }
-        err = fffs_compact_index_entry(fs, offset, slot, head, sector_end);
-        if (err != FFFS_OK) {
-            return err;
+        if (md_slot == slot) {
+            *current = candidate_head == head;
+            return FFFS_OK;
         }
     }
     return FFFS_OK;

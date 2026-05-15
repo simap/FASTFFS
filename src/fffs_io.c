@@ -357,12 +357,271 @@ int fffs_read_index_record(struct fffs *fs, size_t offset,
     return FFFS_OK;
 }
 
-static int program_index_record(struct fffs *fs, size_t offset,
+static size_t logical_index_sector(const struct fffs *fs, size_t seq_pos) {
+    return (fs->oldest_index_sector + seq_pos) % fs->index_sectors;
+}
+
+static size_t index_sector_begin(const struct fffs *fs, size_t sector) {
+    return sector * fs->sector_size + FFFS_HEADER_SIZE;
+}
+
+static size_t index_sector_end(const struct fffs *fs, size_t sector) {
+    if (sector == fs->active_index_sector) {
+        return fs->next_index_offset;
+    }
+    return (sector + 1) * fs->sector_size;
+}
+
+static int program_index_record_at(struct fffs *fs, size_t offset,
         uint16_t slot, uint16_t head) {
     uint8_t rec[4];
     store16(rec, slot);
     store16(rec + 2, head);
     return fffs_flash_program_aligned(fs, offset, rec, sizeof(rec));
+}
+
+static int tombstone_index_sector(struct fffs *fs, size_t sector) {
+    uint8_t flags = (uint8_t)(FFFS_INDEX_FLAGS_VALID &
+        (uint8_t)~FFFS_INDEX_FLAG_TOMBSTONED);
+    return fffs_flash_program_aligned(fs, sector * fs->sector_size + 7,
+            &flags, sizeof(flags));
+}
+
+#if FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE < 4u || \
+    FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE % 4u != 0
+#error "FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE must be a multiple of 4 and at least 4"
+#endif
+
+#if FFFS_INDEX_COMPACT_WRITE_BUFFER_SIZE < 4u || \
+    FFFS_INDEX_COMPACT_WRITE_BUFFER_SIZE % 4u != 0
+#error "FFFS_INDEX_COMPACT_WRITE_BUFFER_SIZE must be a multiple of 4 and at least 4"
+#endif
+
+struct index_record_reader {
+    uint8_t window[FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE];
+    size_t window_start;
+    size_t window_len;
+};
+
+static int index_record_reader_load(struct fffs *fs,
+        struct index_record_reader *reader, size_t offset) {
+    if (offset >= reader->window_start &&
+            offset + 4 <= reader->window_start + reader->window_len) {
+        return FFFS_OK;
+    }
+
+    size_t sector = offset / fs->sector_size;
+    size_t begin = sector * fs->sector_size + FFFS_HEADER_SIZE;
+    size_t end = index_sector_end(fs, sector);
+    size_t rel = offset - begin;
+    size_t base = begin + rel - (rel % sizeof(reader->window));
+    size_t nread = end - base;
+    if (nread > sizeof(reader->window)) {
+        nread = sizeof(reader->window);
+    }
+    nread -= nread % 4;
+    if (nread < 4) {
+        return FFFS_ERR_CORRUPT;
+    }
+
+    int err = fffs_flash_read(fs, base, reader->window, nread);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    reader->window_start = base;
+    reader->window_len = nread;
+    return FFFS_OK;
+}
+
+static int read_compact_source_record(struct fffs *fs,
+        struct index_record_reader *reader, size_t offset,
+        uint16_t *slot, uint16_t *head, bool *erased) {
+    int err = index_record_reader_load(fs, reader, offset);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    const uint8_t *rec = reader->window + (offset - reader->window_start);
+    *slot = load16(rec);
+    *head = load16(rec + 2);
+    *erased = *slot == UINT16_MAX && *head == UINT16_MAX;
+    if (*erased) {
+        return FFFS_OK;
+    }
+    if (*slot == 0 && *head == 0) {
+        return FFFS_OK;
+    }
+    return FFFS_OK;
+}
+
+struct index_record_writer {
+    uint8_t buf[FFFS_INDEX_COMPACT_WRITE_BUFFER_SIZE];
+    size_t len;
+    bool pending_rotation;
+};
+
+static int rotate_index_begin(struct fffs *fs);
+static int rotate_index_commit(struct fffs *fs);
+
+static int index_record_writer_prepare_spill(struct fffs *fs,
+        struct index_record_writer *writer) {
+    if (writer->pending_rotation || fs->index_sequence_count >=
+            fs->index_sectors) {
+        return FFFS_ERR_NO_SPACE;
+    }
+
+    int err = rotate_index_begin(fs);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    writer->pending_rotation = true;
+    return FFFS_OK;
+}
+
+static int index_record_writer_commit_spill(struct fffs *fs,
+        struct index_record_writer *writer) {
+    if (!writer->pending_rotation) {
+        return FFFS_OK;
+    }
+    int err = rotate_index_commit(fs);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    writer->pending_rotation = false;
+    return FFFS_OK;
+}
+
+static int index_record_writer_flush(struct fffs *fs,
+        struct index_record_writer *writer) {
+    if (writer->len == 0) {
+        return FFFS_OK;
+    }
+    int err = fffs_flash_program_aligned(fs, fs->next_index_offset,
+            writer->buf, writer->len);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    fs->next_index_offset += writer->len;
+    writer->len = 0;
+    return FFFS_OK;
+}
+
+static int index_record_writer_append(struct fffs *fs,
+        struct index_record_writer *writer, uint16_t slot, uint16_t head) {
+    if (fs->next_index_offset + writer->len + 4 >
+            (fs->active_index_sector + 1) * fs->sector_size) {
+        int err = index_record_writer_flush(fs, writer);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        err = index_record_writer_prepare_spill(fs, writer);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+
+    if (writer->len + 4 > sizeof(writer->buf)) {
+        int err = index_record_writer_flush(fs, writer);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+
+    store16(writer->buf + writer->len, slot);
+    store16(writer->buf + writer->len + 2, head);
+    writer->len += 4;
+    if (writer->len == sizeof(writer->buf)) {
+        return index_record_writer_flush(fs, writer);
+    }
+    return FFFS_OK;
+}
+
+static int index_compact_oldest_copy(struct fffs *fs, size_t *source_out) {
+    if (fs->index_sequence_count <= 1) {
+        return FFFS_OK;
+    }
+
+    size_t source_seq_pos = 0;
+    size_t source_sector = fs->oldest_index_sector;
+    if (source_out) {
+        *source_out = source_sector;
+    }
+    size_t source_begin = index_sector_begin(fs, source_sector);
+    size_t source_end = index_sector_end(fs, source_sector);
+    struct index_record_reader reader = {0};
+    struct index_record_writer writer = {0};
+
+    for (size_t off = source_begin; off + 4 <= source_end; off += 4) {
+        uint16_t slot;
+        uint16_t head;
+        bool erased;
+        int err = read_compact_source_record(fs, &reader, off, &slot,
+                &head, &erased);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (erased) {
+            break; //basically EOF for the index sector
+        }
+        if ((slot == 0 && head == 0) || head == 0) {
+            continue; //clobbered / tombstoned
+        }
+
+        bool current;
+        err = fffs_index_record_is_current(fs, source_seq_pos, off, slot,
+                head, &current);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (!current) {
+            continue;
+        }
+
+        err = index_record_writer_append(fs, &writer, slot, head);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+
+    int err = index_record_writer_flush(fs, &writer);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    err = index_record_writer_commit_spill(fs, &writer);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    return FFFS_OK;
+}
+
+static int index_compact_oldest_finish(struct fffs *fs,
+        size_t source_sector) {
+    int err = tombstone_index_sector(fs, source_sector);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    fs->oldest_index_sector = logical_index_sector(fs, 1);
+    fs->index_sequence_count--;
+    return FFFS_OK;
+}
+
+int fffs_index_compact_oldest(struct fffs *fs) {
+    size_t source_sector = 0;
+    int err = index_compact_oldest_copy(fs, &source_sector);
+    if (err != FFFS_OK || fs->index_sequence_count <= 1) {
+        return err;
+    }
+    return index_compact_oldest_finish(fs, source_sector);
+}
+
+int fffs_index_finish_interrupted_compaction(struct fffs *fs) {
+    if (fs->index_sequence_count < fs->index_sectors) {
+        return FFFS_OK;
+    }
+    return index_compact_oldest_finish(fs, fs->oldest_index_sector);
 }
 
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,
@@ -379,7 +638,7 @@ int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         }
     }
 
-    int err = program_index_record(fs, fs->next_index_offset, slot, head);
+    int err = program_index_record_at(fs, fs->next_index_offset, slot, head);
     if (err != FFFS_OK) {
         return err;
     }
@@ -387,67 +646,55 @@ int fffs_append_index_record(struct fffs *fs, uint16_t slot,
     return fffs_index_set(fs, slot, head);
 }
 
-int fffs_compact_index_entry(struct fffs *fs, size_t *offset,
-        uint16_t slot, uint16_t head, size_t sector_end) {
-    if (*offset + 4 > sector_end) {
-        return FFFS_ERR_NO_SPACE;
-    }
-    int err = program_index_record(fs, *offset, slot, head);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    *offset += 4;
-    return FFFS_OK;
-}
-
-int fffs_rotate_index(struct fffs *fs) {
-    size_t old_active = fs->active_index_sector;
-    size_t new_active = old_active + 1;
+static int rotate_index_begin(struct fffs *fs) {
+    size_t new_active = fs->active_index_sector + 1;
     if (new_active >= fs->index_sectors) {
         new_active = 0;
     }
 
     size_t new_base = new_active * fs->sector_size;
-    size_t new_end = new_base + fs->sector_size;
     int err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
                 new_base, fs->sector_size));
     if (err != FFFS_OK) {
         return err;
     }
 
-    size_t off = new_base + FFFS_HEADER_SIZE;
-    err = fffs_index_compact(fs, &off, new_end);
-    if (err != FFFS_OK) {
-        return err;
-    }
-
     uint8_t serial = (uint8_t)((fs->active_index_serial + 1) & 0x0f);
-    err = fffs_program_index_header(&fs->backend, new_base, fs->index_sectors,
-            fs->sector_shift, serial);
-    if (err != FFFS_OK) {
-        return err;
-    }
-
-    uint8_t tombstone[4] = {
-        FFFS_INDEX_VERSION,
-        (uint8_t)((fs->index_sectors << 4) |
-            (fs->active_index_serial & 0x0f)),
-        fs->sector_shift,
-        (uint8_t)(FFFS_INDEX_FLAGS_VALID &
-            (uint8_t)~FFFS_INDEX_FLAG_TOMBSTONED),
-    };
-    err = fffs_flash_program_aligned(fs, old_active * fs->sector_size + 4,
-            tombstone, sizeof(tombstone));
-    if (err != FFFS_OK) {
-        return err;
-    }
-
     fs->active_index_sector = new_active;
     fs->active_index_serial = serial;
-    fs->oldest_index_sector = new_active;
-    fs->index_sequence_count = 1;
-    fs->next_index_offset = off;
+    fs->next_index_offset = new_base + FFFS_HEADER_SIZE;
+    if (fs->index_sequence_count < fs->index_sectors) {
+        fs->index_sequence_count++;
+    }
     return FFFS_OK;
+}
+
+static int rotate_index_commit(struct fffs *fs) {
+    size_t base = fs->active_index_sector * fs->sector_size;
+    return fffs_program_index_header(&fs->backend, base, fs->index_sectors,
+            fs->sector_shift, fs->active_index_serial);
+}
+
+int fffs_rotate_index(struct fffs *fs) {
+    int err = rotate_index_begin(fs);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    if (fs->index_sequence_count == fs->index_sectors) {
+        size_t source_sector;
+        err = index_compact_oldest_copy(fs, &source_sector);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        err = rotate_index_commit(fs);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        return index_compact_oldest_finish(fs, source_sector);
+    }
+
+    return rotate_index_commit(fs);
 }
 
 static void recover_allocator_hint(struct fffs *fs, uint16_t head) {

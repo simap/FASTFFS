@@ -146,18 +146,12 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
-int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
-    for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
-        uint16_t head = fs->index_heads[slot];
-        if (head == 0) {
-            continue;
-        }
-        int err = fffs_compact_index_entry(fs, offset, (uint16_t)slot,
-                head, sector_end);
-        if (err != FFFS_OK) {
-            return err;
-        }
-    }
+int fffs_index_record_is_current(struct fffs *fs,
+        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
+        bool *current) {
+    (void)seq_pos;
+    (void)offset;
+    *current = fs->index_heads[slot] == head;
     return FFFS_OK;
 }
 

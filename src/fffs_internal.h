@@ -70,8 +70,8 @@ int fffs_read_index_record(struct fffs *fs, size_t offset,
         uint16_t *slot, uint16_t *head);
 int fffs_append_index_record(struct fffs *fs, uint16_t slot,
         uint16_t head);
-int fffs_compact_index_entry(struct fffs *fs, size_t *offset,
-        uint16_t slot, uint16_t head, size_t sector_end);
+int fffs_index_compact_oldest(struct fffs *fs);
+int fffs_index_finish_interrupted_compaction(struct fffs *fs);
 int fffs_rotate_index(struct fffs *fs);
 int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
@@ -114,7 +114,9 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
         uint16_t *next);
 bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st);
-int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end);
+int fffs_index_record_is_current(struct fffs *fs,
+        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
+        bool *current);
 void fffs_index_mark_live_heads_used(struct fffs *fs);
 bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector);
 int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,

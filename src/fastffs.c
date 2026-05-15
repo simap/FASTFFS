@@ -209,6 +209,12 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->gc_cursor = fs->index_sectors;
     fs->next_sector_serial = 1;
 
+    err = fffs_index_finish_interrupted_compaction(fs);
+    if (err != FFFS_OK) {
+        fffs_unmount(fs);
+        return err;
+    }
+
     err = fffs_alloc_map_mount_init(fs, options);
     if (err != FFFS_OK) {
         fffs_unmount(fs);

@@ -19,9 +19,6 @@ enum {
     FFFS_PROBE_BITSET_WORDS =
         (FFFS_PROBE_BITS + FFFS_BITSET_WORD_BITS - 1u) /
         FFFS_BITSET_WORD_BITS,
-    FFFS_NOCACHE_COMPACT_OUTER_SCAN_SIZE =
-        FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE < 4u ?
-        4u : FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE,
 };
 
 struct logical_pos {
@@ -412,51 +409,22 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
-int fffs_index_compact(struct fffs *fs, size_t *offset, size_t sector_end) {
-    uint8_t outer_window[FFFS_NOCACHE_COMPACT_OUTER_SCAN_SIZE];
-    struct index_scan outer_scan;
-    struct index_scan inner_scan;
-    index_scan_init(&outer_scan, fs, NULL, outer_window,
-            sizeof(outer_window), false);
-    index_scan_init(&inner_scan, fs, NULL, fs->scratch, fs->scratch_size,
-            true);
-    for (size_t seq_pos = 0; seq_pos < fs->index_sequence_count; seq_pos++) {
-        size_t end = logical_sector_end(fs, seq_pos);
-        for (size_t off = logical_sector_begin(fs, seq_pos);
-                off + 4 <= end; off += 4) {
-            uint16_t slot;
-            uint16_t head;
-            bool erased;
-            int err = read_index_at(&outer_scan, off, &slot, &head, &erased);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            if (erased) {
-                break;
-            }
-            if (head == 0) {
-                continue;
-            }
-
-            struct logical_pos pos = {
-                .seq_pos = seq_pos,
-                .offset = off,
-            };
-            bool newer;
-            err = newer_record_for_slot(&inner_scan, &pos, slot, &newer);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            if (newer) {
-                continue;
-            }
-            err = fffs_compact_index_entry(fs, offset, slot, head,
-                    sector_end);
-            if (err != FFFS_OK) {
-                return err;
-            }
-        }
+int fffs_index_record_is_current(struct fffs *fs,
+        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
+        bool *current) {
+    (void)head;
+    struct index_scan scan;
+    struct logical_pos logical = {
+        .seq_pos = seq_pos,
+        .offset = offset,
+    };
+    bool newer;
+    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
+    int err = newer_record_for_slot(&scan, &logical, slot, &newer);
+    if (err != FFFS_OK) {
+        return err;
     }
+    *current = !newer;
     return FFFS_OK;
 }
 

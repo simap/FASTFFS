@@ -46,6 +46,7 @@
 #define TEST_INDEX_HEADER_SIZE 8
 
 uint16_t fffs_hash16(const char *name);
+int fffs_index_compact_oldest(struct fffs *fs);
 int fffs_rotate_index(struct fffs *fs);
 
 struct measured_ops {
@@ -164,6 +165,24 @@ static int new_backend_with_size(struct ffsv_flash **flash,
         struct fffs_backend *backend, size_t size) {
     int err = ffsv_flash_create_with_preset(flash,
             FFSV_PRESET_TARGET_NOR_NOTES, size);
+    if (err != FFSV_OK) {
+        return FFFS_ERR_IO;
+    }
+    return fffs_host_backend_from_verify_flash(backend, *flash);
+}
+
+static int new_backend_with_sector_size(struct ffsv_flash **flash,
+        struct fffs_backend *backend, size_t sector_size,
+        size_t sector_count) {
+    struct ffsv_flash_config cfg;
+    int err = ffsv_flash_config_preset(&cfg, FFSV_PRESET_TARGET_NOR_NOTES,
+            sector_size * sector_count);
+    if (err != FFSV_OK) {
+        return FFFS_ERR_IO;
+    }
+    cfg.sector_size = sector_size;
+    cfg.max_log_entries = 50000;
+    err = ffsv_flash_create(flash, &cfg);
     if (err != FFSV_OK) {
         return FFFS_ERR_IO;
     }
@@ -1290,6 +1309,495 @@ static int test_index_rotates_when_active_sector_fills(void) {
     return 0;
 }
 
+static int test_index_rotation_commits_header_before_tombstone(void) {
+    enum {
+        sector_size = 256,
+        sector_count = 256,
+        source_records = (sector_size - TEST_INDEX_HEADER_SIZE) / 4,
+    };
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    struct ffsv_flash_snapshot snapshot;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    char name[16];
+    uint8_t data[1];
+
+    ASSERT_OK(new_backend_with_sector_size(&flash, &backend, sector_size,
+                sector_count));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 2,
+                .sector_size = FFFS_SECTOR_256,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    for (size_t i = 0; i + 1 < source_records; i++) {
+        snprintf(name, sizeof(name), "rot%02zu", i);
+        data[0] = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, name, data, sizeof(data)));
+    }
+    ASSERT_OK(fffs_delete_file(&fs, "rot00"));
+    ASSERT_TRUE(fs.active_index_sector == 0);
+    ASSERT_TRUE(fs.next_index_offset == sector_size);
+
+    size_t log_before;
+    const struct ffsv_op_record *log = ffsv_flash_log(flash, &log_before);
+    (void)log;
+    data[0] = 0xaa;
+    ASSERT_OK(write_chunks(&fs, "trigger", data, sizeof(data)));
+
+    size_t log_count;
+    log = ffsv_flash_log(flash, &log_count);
+    uint64_t copy_body_seq = 0;
+    uint64_t header_seq = 0;
+    uint64_t tombstone_seq = 0;
+    for (size_t i = log_before; i < log_count; i++) {
+        if (log[i].type != FFSV_OP_PROGRAM || log[i].result != FFSV_OK) {
+            continue;
+        }
+        if (log[i].offset == sector_size) {
+            header_seq = log[i].sequence;
+        } else if (log[i].offset > sector_size &&
+                log[i].offset < 2u * sector_size) {
+            if (copy_body_seq == 0) {
+                copy_body_seq = log[i].sequence;
+            }
+        } else if (log[i].offset <= 7u &&
+                log[i].offset + log[i].size > 7u) {
+            tombstone_seq = log[i].sequence;
+        }
+    }
+    ASSERT_TRUE(copy_body_seq != 0);
+    ASSERT_TRUE(header_seq != 0);
+    ASSERT_TRUE(tombstone_seq != 0);
+    ASSERT_TRUE(header_seq > copy_body_seq);
+    ASSERT_TRUE(tombstone_seq > header_seq);
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_snapshot_create(flash, &snapshot)));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    flash = NULL;
+    ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(&flash,
+                    &snapshot)));
+    ffsv_flash_snapshot_destroy(&snapshot);
+    ASSERT_OK(fffs_host_backend_from_verify_flash(&backend, flash));
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.active_index_sector == 1);
+    size_t out_size = 0;
+    ASSERT_OK(read_chunks(&remounted, "trigger", data, sizeof(data),
+                &out_size));
+    ASSERT_TRUE(out_size == 1);
+    ASSERT_TRUE(data[0] == 0xaa);
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_mount_finishes_interrupted_index_compaction(void) {
+    enum {
+        sector_size = 256,
+        sector_count = 256,
+        source_records = (sector_size - TEST_INDEX_HEADER_SIZE) / 4,
+    };
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct ffsv_flash_snapshot before_rotate;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    char name[16];
+    uint8_t data[1];
+
+    ASSERT_OK(new_backend_with_sector_size(&flash, &backend, sector_size,
+                sector_count));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 2,
+                .sector_size = FFFS_SECTOR_256,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    for (size_t i = 0; i + 1 < source_records; i++) {
+        snprintf(name, sizeof(name), "rec%02zu", i);
+        data[0] = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, name, data, sizeof(data)));
+    }
+    ASSERT_OK(fffs_delete_file(&fs, "rec00"));
+    ASSERT_TRUE(fs.active_index_sector == 0);
+    ASSERT_TRUE(fs.next_index_offset == sector_size);
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_snapshot_create(flash,
+                    &before_rotate)));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    flash = NULL;
+
+    bool found_window = false;
+    for (uint64_t delta = 0; delta < 512 && !found_window; delta++) {
+        struct fffs attempt;
+        struct ffsv_flash *attempt_flash = NULL;
+        struct fffs_backend attempt_backend;
+        static uint16_t attempt_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+        ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(
+                        &attempt_flash, &before_rotate)));
+        ASSERT_OK(fffs_host_backend_from_verify_flash(&attempt_backend,
+                    attempt_flash));
+        ASSERT_OK(mount_fs(&attempt, &attempt_backend, attempt_heads));
+        ffsv_flash_set_failure(attempt_flash,
+                &(struct ffsv_failure_injection){
+                    .enabled = true,
+                    .sequence = ffsv_flash_next_sequence(attempt_flash) +
+                        delta,
+                    .op_mask = UINT32_C(1) << FFSV_OP_PROGRAM,
+                    .phase = FFSV_FAIL_BEFORE,
+                    .status = FFSV_ERR_INJECTED,
+                });
+        int err = fffs_rotate_index(&attempt);
+        ffsv_flash_clear_failure(attempt_flash);
+
+        bool new_valid = ffsv_flash_image_byte(attempt_flash,
+                sector_size + 7u) == 0x7f;
+        bool old_not_tombstoned = ffsv_flash_image_byte(attempt_flash, 7u) ==
+            0x7f;
+        if (err != FFFS_OK && new_valid && old_not_tombstoned) {
+            struct fffs recovered;
+            static uint16_t recovered_heads[TEST_INDEX_HASH_TABLE_SIZE];
+            found_window = true;
+
+            fffs_unmount(&attempt);
+            ASSERT_OK(mount_fs(&recovered, &attempt_backend,
+                        recovered_heads));
+            ASSERT_TRUE(recovered.oldest_index_sector == 1);
+            ASSERT_TRUE(recovered.index_sequence_count == 1);
+            ASSERT_TRUE(recovered.active_index_sector == 1);
+            ASSERT_TRUE(ffsv_flash_image_byte(attempt_flash, 7u) == 0x3f);
+
+            data[0] = 0xa5;
+            ASSERT_OK(write_chunks(&recovered, "after", data, sizeof(data)));
+            size_t out_size = 0;
+            ASSERT_OK(read_chunks(&recovered, "rec01", data, sizeof(data),
+                        &out_size));
+            ASSERT_TRUE(out_size == 1);
+
+            fffs_unmount(&recovered);
+            ffsv_flash_destroy(attempt_flash);
+            break;
+        }
+
+        fffs_unmount(&attempt);
+        ffsv_flash_destroy(attempt_flash);
+    }
+
+    ffsv_flash_snapshot_destroy(&before_rotate);
+    ASSERT_TRUE(found_window);
+    return 0;
+}
+
+static int verify_index_crash_recovery_namespace(struct fffs *fs,
+        size_t source_records) {
+    char name[16];
+    uint8_t out[4] = {0};
+    size_t out_size = 0;
+    size_t count = 0;
+    bool trigger_exists = false;
+    struct fffs_stat st;
+    const uint8_t after[] = {0x5c};
+
+    ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(fs, "rec00", &st));
+    for (size_t i = 1; i + 1 < source_records; i++) {
+        snprintf(name, sizeof(name), "rec%02zu", i);
+        memset(out, 0, sizeof(out));
+        ASSERT_OK(read_chunks(fs, name, out, sizeof(out), &out_size));
+        ASSERT_TRUE(out_size == 1);
+        ASSERT_TRUE(out[0] == (uint8_t)i);
+    }
+
+    ASSERT_OK(fffs_exists(fs, "trigger", &trigger_exists));
+    if (trigger_exists) {
+        ASSERT_OK(read_chunks(fs, "trigger", out, sizeof(out), &out_size));
+        ASSERT_TRUE(out_size == 1);
+        ASSERT_TRUE(out[0] == 0xaa);
+    }
+
+    ASSERT_OK(count_dir(fs, NULL, &count));
+    ASSERT_TRUE(count == source_records - 2u + (trigger_exists ? 1u : 0u));
+
+    ASSERT_OK(write_chunks(fs, "after", after, sizeof(after)));
+    ASSERT_OK(read_chunks(fs, "after", out, sizeof(out), &out_size));
+    ASSERT_TRUE(out_size == sizeof(after));
+    ASSERT_TRUE(out[0] == after[0]);
+    return 0;
+}
+
+static int test_index_compaction_poweroff_after_each_flash_op(void) {
+    enum {
+        sector_size = 256,
+        sector_count = 256,
+        source_records = (sector_size - TEST_INDEX_HEADER_SIZE) / 4,
+        max_mutations = 128,
+    };
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct ffsv_flash_snapshot before_trigger;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint64_t mutation_sequences[max_mutations];
+    size_t mutation_count = 0;
+    char name[16];
+    uint8_t data[1];
+
+    ASSERT_OK(new_backend_with_sector_size(&flash, &backend, sector_size,
+                sector_count));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 2,
+                .sector_size = FFFS_SECTOR_256,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    for (size_t i = 0; i + 1 < source_records; i++) {
+        snprintf(name, sizeof(name), "rec%02zu", i);
+        data[0] = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, name, data, sizeof(data)));
+    }
+    ASSERT_OK(fffs_delete_file(&fs, "rec00"));
+    ASSERT_TRUE(fs.active_index_sector == 0);
+    ASSERT_TRUE(fs.next_index_offset == sector_size);
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_snapshot_create(flash,
+                    &before_trigger)));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    flash = NULL;
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(&flash,
+                    &before_trigger)));
+    ASSERT_OK(fffs_host_backend_from_verify_flash(&backend, flash));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    size_t log_before = 0;
+    (void)ffsv_flash_log(flash, &log_before);
+    data[0] = 0xaa;
+    ASSERT_OK(write_chunks(&fs, "trigger", data, sizeof(data)));
+    size_t log_count = 0;
+    const struct ffsv_op_record *log = ffsv_flash_log(flash, &log_count);
+    for (size_t i = log_before; i < log_count; i++) {
+        if (log[i].type != FFSV_OP_PROGRAM &&
+                log[i].type != FFSV_OP_ERASE) {
+            continue;
+        }
+        ASSERT_TRUE(mutation_count < max_mutations);
+        mutation_sequences[mutation_count++] = log[i].sequence;
+    }
+    ASSERT_TRUE(mutation_count > 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    flash = NULL;
+
+    for (size_t i = 0; i < mutation_count; i++) {
+        for (size_t phase_i = 0; phase_i < 2; phase_i++) {
+            enum ffsv_failure_phase phase = phase_i == 0 ?
+                FFSV_FAIL_BEFORE : FFSV_FAIL_AFTER;
+            struct ffsv_flash *attempt_flash = NULL;
+            struct fffs_backend attempt_backend;
+            struct fffs attempt;
+            struct fffs recovered;
+            static uint16_t attempt_heads[TEST_INDEX_HASH_TABLE_SIZE];
+            static uint16_t recovered_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+            ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(
+                            &attempt_flash, &before_trigger)));
+            ASSERT_OK(fffs_host_backend_from_verify_flash(&attempt_backend,
+                        attempt_flash));
+            ASSERT_OK(mount_fs(&attempt, &attempt_backend, attempt_heads));
+
+            ffsv_flash_set_failure(attempt_flash,
+                    &(struct ffsv_failure_injection){
+                        .enabled = true,
+                        .sequence = mutation_sequences[i],
+                        .op_mask = (UINT32_C(1) << FFSV_OP_PROGRAM) |
+                            (UINT32_C(1) << FFSV_OP_ERASE),
+                        .phase = phase,
+                        .status = FFSV_ERR_INJECTED,
+                    });
+            data[0] = 0xaa;
+            int write_err = write_chunks(&attempt, "trigger", data,
+                    sizeof(data));
+            ASSERT_EQ_INT(FFFS_ERR_IO, write_err);
+            ffsv_flash_clear_failure(attempt_flash);
+
+            fffs_unmount(&attempt);
+            ASSERT_OK(mount_fs(&recovered, &attempt_backend,
+                        recovered_heads));
+            ASSERT_OK(verify_index_crash_recovery_namespace(&recovered,
+                        source_records));
+
+            fffs_unmount(&recovered);
+            ffsv_flash_destroy(attempt_flash);
+        }
+    }
+
+    ffsv_flash_snapshot_destroy(&before_trigger);
+    return 0;
+}
+
+static int test_index_rotation_preserves_sequence_with_spare(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint8_t out[4] = {0};
+    size_t out_size = 0;
+    const size_t writes = 2045;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 1200));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 3,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    for (size_t i = 0; i < writes; i++) {
+        uint8_t data = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, "rotating", &data, sizeof(data)));
+    }
+    ASSERT_TRUE(fs.oldest_index_sector == 1);
+    ASSERT_TRUE(fs.index_sequence_count == 2);
+    ASSERT_TRUE(fs.active_index_sector == 2);
+    ASSERT_TRUE(fs.active_index_serial == 2);
+    fffs_unmount(&fs);
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.oldest_index_sector == 1);
+    ASSERT_TRUE(remounted.index_sequence_count == 2);
+    ASSERT_TRUE(remounted.active_index_sector == 2);
+    ASSERT_TRUE(remounted.active_index_serial == 2);
+    ASSERT_OK(read_chunks(&remounted, "rotating", out, sizeof(out),
+                &out_size));
+    ASSERT_TRUE(out_size == 1);
+    ASSERT_TRUE(out[0] == (uint8_t)(writes - 1));
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_index_independent_compaction_spills_and_commits_last(void) {
+    enum {
+        sector_size = 256,
+        sector_count = 512,
+        index_sectors = 3,
+        source_records = (sector_size - TEST_INDEX_HEADER_SIZE) / 4,
+        active_records = source_records - 1,
+    };
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    struct ffsv_flash_snapshot snapshot;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    char name[16];
+    uint8_t data[1];
+
+    ASSERT_OK(new_backend_with_sector_size(&flash, &backend, sector_size,
+                sector_count));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = index_sectors,
+                .sector_size = FFFS_SECTOR_256,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    for (size_t i = 0; i < source_records; i++) {
+        snprintf(name, sizeof(name), "src%02zu", i);
+        data[0] = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, name, data, sizeof(data)));
+    }
+    for (size_t i = 0; i < active_records; i++) {
+        snprintf(name, sizeof(name), "act%02zu", i);
+        data[0] = (uint8_t)i;
+        ASSERT_OK(write_chunks(&fs, name, data, sizeof(data)));
+    }
+
+    ASSERT_TRUE(fs.oldest_index_sector == 0);
+    ASSERT_TRUE(fs.index_sequence_count == 2);
+    ASSERT_TRUE(fs.active_index_sector == 1);
+    ASSERT_TRUE(fs.next_index_offset == sector_size + TEST_INDEX_HEADER_SIZE +
+            active_records * 4u);
+
+    size_t log_before;
+    const struct ffsv_op_record *log = ffsv_flash_log(flash, &log_before);
+    (void)log;
+    ASSERT_OK(fffs_index_compact_oldest(&fs));
+
+    ASSERT_TRUE(fs.oldest_index_sector == 1);
+    ASSERT_TRUE(fs.index_sequence_count == 2);
+    ASSERT_TRUE(fs.active_index_sector == 2);
+    ASSERT_TRUE(fs.next_index_offset == 2u * sector_size +
+            TEST_INDEX_HEADER_SIZE + (source_records - 1u) * 4u);
+
+    size_t log_count;
+    log = ffsv_flash_log(flash, &log_count);
+    uint64_t spill_body_seq = 0;
+    uint64_t spill_header_seq = 0;
+    uint64_t source_tombstone_seq = 0;
+    for (size_t i = log_before; i < log_count; i++) {
+        if (log[i].type != FFSV_OP_PROGRAM || log[i].result != FFSV_OK) {
+            continue;
+        }
+        if (log[i].offset == 2u * sector_size) {
+            spill_header_seq = log[i].sequence;
+        } else if (log[i].offset > 2u * sector_size &&
+                log[i].offset < 3u * sector_size) {
+            spill_body_seq = log[i].sequence;
+        } else if (log[i].offset <= 7u &&
+                log[i].offset + log[i].size > 7u) {
+            source_tombstone_seq = log[i].sequence;
+        }
+    }
+    ASSERT_TRUE(spill_body_seq != 0);
+    ASSERT_TRUE(spill_header_seq != 0);
+    ASSERT_TRUE(source_tombstone_seq != 0);
+    ASSERT_TRUE(spill_header_seq > spill_body_seq);
+    ASSERT_TRUE(source_tombstone_seq > spill_header_seq);
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_snapshot_create(flash, &snapshot)));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    flash = NULL;
+    ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(&flash,
+                    &snapshot)));
+    ffsv_flash_snapshot_destroy(&snapshot);
+    ASSERT_OK(fffs_host_backend_from_verify_flash(&backend, flash));
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    ASSERT_TRUE(remounted.oldest_index_sector == 1);
+    ASSERT_TRUE(remounted.index_sequence_count == 2);
+    ASSERT_TRUE(remounted.active_index_sector == 2);
+
+    for (size_t i = 0; i < source_records; i++) {
+        uint8_t out[4] = {0};
+        size_t out_size = 0;
+        snprintf(name, sizeof(name), "src%02zu", i);
+        ASSERT_OK(read_chunks(&remounted, name, out, sizeof(out),
+                    &out_size));
+        ASSERT_TRUE(out_size == 1);
+        ASSERT_TRUE(out[0] == (uint8_t)i);
+    }
+    for (size_t i = 0; i < active_records; i++) {
+        uint8_t out[4] = {0};
+        size_t out_size = 0;
+        snprintf(name, sizeof(name), "act%02zu", i);
+        ASSERT_OK(read_chunks(&remounted, name, out, sizeof(out),
+                    &out_size));
+        ASSERT_TRUE(out_size == 1);
+        ASSERT_TRUE(out[0] == (uint8_t)i);
+    }
+
+    fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_index_compaction_mixed_history_metrics(void) {
     enum {
         file_count = 256,
@@ -1352,6 +1860,7 @@ static int test_index_compaction_mixed_history_metrics(void) {
     ASSERT_TRUE(summary.index_deletes == 0);
     ASSERT_TRUE(summary.live_entries_corrupt == 0);
     ASSERT_TRUE(summary.md_corrupt == 0);
+    ASSERT_TRUE(ops.calls[FFSV_OP_PROGRAM] < live_count);
 
     char duration[32];
     char op_summary[192] = "";
@@ -1576,6 +2085,11 @@ int main(void) {
     failures += test_format_tiny_sector_wins_over_old_large_remnant();
     failures += test_format_erases_expanded_index_area();
     failures += test_index_rotates_when_active_sector_fills();
+    failures += test_index_rotation_commits_header_before_tombstone();
+    failures += test_mount_finishes_interrupted_index_compaction();
+    failures += test_index_compaction_poweroff_after_each_flash_op();
+    failures += test_index_rotation_preserves_sequence_with_spare();
+    failures += test_index_independent_compaction_spills_and_commits_last();
     failures += test_index_compaction_mixed_history_metrics();
     failures += test_index_header_discovery_without_sector_zero();
     failures += test_large_file_uses_noncontiguous_extents();
