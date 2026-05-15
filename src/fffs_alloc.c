@@ -55,8 +55,7 @@ static int find_free_sector_once(struct fffs *fs, uint16_t *sector,
             s = fffs_next_data_sector(fs, s);
             continue;
         }
-        if (fffs_index_sector_is_live_head(fs, s) ||
-                fffs_sector_is_inflight(fs, (uint16_t)s)) {
+        if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
             fffs_alloc_map_mark_used(fs, (uint16_t)s);
             s = fffs_next_data_sector(fs, s);
             continue;
@@ -84,8 +83,7 @@ static int allocate_erased_gc_sector(struct fffs *fs, uint16_t *sector) {
     if (err != FFFS_OK) {
         return err;
     }
-    if (fffs_index_sector_is_live_head(fs, erased_sector) ||
-            fffs_sector_is_inflight(fs, erased_sector)) {
+    if (fffs_sector_is_inflight(fs, erased_sector)) {
         return FFFS_ERR_CORRUPT;
     }
     err = fffs_flash_span_is_erased(fs,

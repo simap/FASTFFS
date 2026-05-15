@@ -842,7 +842,7 @@ static void run_churn_workload(void)
     uint32_t op = 0;
     uint32_t last_progress_written = 0;
     int64_t last_progress_us = 0;
-    bench_churn_model_t model;
+    static bench_churn_model_t model;
     int16_t rc;
     int64_t t0;
 

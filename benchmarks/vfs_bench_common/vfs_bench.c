@@ -980,7 +980,7 @@ static void run_churn_workload(void)
     uint32_t delete_ops = 0;
     uint32_t op = 0;
     int64_t last_progress_us = 0;
-    bench_churn_model_t model;
+    static bench_churn_model_t model;
 
     ESP_LOGI(TAG, "churn format start");
 #if VFS_BENCH_CHURN_ERASE_BEFORE_FORMAT

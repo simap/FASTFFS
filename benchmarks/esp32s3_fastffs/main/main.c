@@ -35,10 +35,14 @@ _Static_assert(CHURN_MAX_FILES == BENCH_CHURN_MAX_FILES,
 
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
 #define FASTFFS_INDEX_HEADS 0
+#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+#define FASTFFS_INDEX_HEADS FFFS_SLOT_COUNT
 #else
-#define FASTFFS_INDEX_HEADS (FFFS_INDEX_HASH_TABLE_SIZE * 2)
+#define FASTFFS_INDEX_HEADS FFFS_INDEX_HASH_TABLE_SIZE
 #endif
+#ifndef FASTFFS_SCRATCH_SIZE
 #define FASTFFS_SCRATCH_SIZE 512
+#endif
 #define FASTFFS_FORCED_GC_STEPS 4096
 #define FASTFFS_SECTOR_DATA_BYTES (4096 - 64 - 12)
 #define FASTFFS_ALLOC_MAP_WORDS (((4 * 1024 * 1024) / 4096 + 31) / 32)
@@ -919,8 +923,10 @@ static void run_churn_workload(void)
     uint32_t replaces = 0;
     uint32_t deletes = 0;
     uint32_t op = 0;
-    bench_churn_model_t model;
+    static bench_churn_model_t model;
     class_stats_t write_stats[SIZE_CLASS_COUNT] = {0};
+    class_stats_t create_write_stats[SIZE_CLASS_COUNT] = {0};
+    class_stats_t replace_write_stats[SIZE_CLASS_COUNT] = {0};
 
     ESP_LOGI(TAG, "churn format start");
 #if FASTFFS_CHURN_ERASE_BEFORE_FORMAT
@@ -1018,8 +1024,16 @@ static void run_churn_workload(void)
         op++;
         if (event.replacing) {
             replaces++;
+            replace_write_stats[event.cls].ops++;
+            replace_write_stats[event.cls].files++;
+            replace_write_stats[event.cls].bytes += event.size;
+            replace_write_stats[event.cls].time_us += write_us;
         } else {
             creates++;
+            create_write_stats[event.cls].ops++;
+            create_write_stats[event.cls].files++;
+            create_write_stats[event.cls].bytes += event.size;
+            create_write_stats[event.cls].time_us += write_us;
         }
         write_stats[event.cls].ops++;
         write_stats[event.cls].files++;
@@ -1038,6 +1052,8 @@ static void run_churn_workload(void)
              (unsigned long)model.live_bytes, (unsigned long)creates,
              (unsigned long)replaces, (unsigned long)deletes);
     log_class_stats("churn write", write_stats);
+    log_class_stats("churn create write", create_write_stats);
+    log_class_stats("churn replace write", replace_write_stats);
     log_delete_class_stats("churn delete", churn_delete_class_stats,
                            churn_delete_class_max_us);
     log_op_time_stats("churn delete latency", &churn_delete_latency);
