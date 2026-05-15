@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "churn_model.h"
 #include "jesfs.h"
 
 #define BENCH_TINY_FILES 192
@@ -25,7 +26,19 @@
 #define CHURN_TARGET_SLACK_BYTES (128 * 1024)
 #define CHURN_FORCE_LARGE_AFTER_BYTES (7 * 1024 * 1024)
 #define CHURN_SEED 0x4f465346u
+#define CHURN_DELETE_LATENCY_SAMPLES 1024
 #define JESFS_PARTITION_LABEL "jesfs"
+
+_Static_assert(CHURN_MAX_FILES == BENCH_CHURN_MAX_FILES,
+               "churn model and harness slot counts must match");
+
+#ifndef JESFS_BASELINE_ERASE_BEFORE_FORMAT
+#define JESFS_BASELINE_ERASE_BEFORE_FORMAT 1
+#endif
+
+#ifndef JESFS_CHURN_ERASE_BEFORE_FORMAT
+#define JESFS_CHURN_ERASE_BEFORE_FORMAT 1
+#endif
 
 static const char *TAG = "jesfs_bench";
 static uint8_t buf[1024];
@@ -75,9 +88,20 @@ typedef struct {
     uint32_t max_size;
 } live_dist_t;
 
+typedef struct {
+    uint32_t ops;
+    int64_t total_us;
+    int64_t min_us;
+    int64_t max_us;
+    uint32_t sample_count;
+    uint32_t samples_us[CHURN_DELETE_LATENCY_SAMPLES];
+} op_time_stats_t;
+
 static file_slot_t churn_files[CHURN_MAX_FILES];
-static uint32_t prng_state = CHURN_SEED;
-static int protected_large_slot = -1;
+static class_stats_t churn_delete_stats[SIZE_CLASS_COUNT];
+static int64_t churn_delete_max_us[SIZE_CLASS_COUNT];
+static op_time_stats_t churn_delete_latency;
+static uint32_t churn_latency_sorted[CHURN_DELETE_LATENCY_SAMPLES];
 
 static void fill_pattern(uint8_t *dst, size_t len, uint32_t seed);
 static uint32_t bench_read_file_timed(const char *name, read_stats_t *stats);
@@ -120,12 +144,6 @@ static void log_storage_overhead(const char *label, uint32_t files,
              (unsigned long)(payload_bytes ? ((uint64_t)overhead * 100ULL) / payload_bytes : 0ULL));
 }
 
-static uint32_t prng_next(void)
-{
-    prng_state = prng_state * 1664525u + 1013904223u;
-    return prng_state;
-}
-
 static int permuted_index(int i, int count, int stride, int offset)
 {
     return (i * stride + offset) % count;
@@ -140,27 +158,6 @@ static size_class_t classify_size(uint32_t size)
         return SIZE_MEDIUM;
     }
     return SIZE_LARGE;
-}
-
-static uint32_t choose_churn_size(size_class_t *cls)
-{
-    uint32_t r = prng_next() % 1000u;
-    if (r < 930u) {
-        *cls = SIZE_SMALL;
-        return (10u * 1024u) + (prng_next() % (10u * 1024u + 1u));
-    }
-    if (r < 995u) {
-        *cls = SIZE_MEDIUM;
-        return (20u * 1024u) + (prng_next() % (40u * 1024u + 1u));
-    }
-    *cls = SIZE_LARGE;
-    return 350u * 1024u;
-}
-
-static uint32_t forced_large_churn_size(size_class_t *cls)
-{
-    *cls = SIZE_LARGE;
-    return 350u * 1024u;
 }
 
 static const char *class_name(size_class_t cls)
@@ -187,6 +184,28 @@ static const esp_partition_t *find_jesfs_partition(void)
         ESP_LOGE(TAG, "partition '%s' not found", JESFS_PARTITION_LABEL);
     }
     return part;
+}
+
+static int erase_partition_for_phase(const char *label)
+{
+    const esp_partition_t *part = find_jesfs_partition();
+    if (part == NULL) {
+        return -1;
+    }
+    (void)fs_deepsleep();
+    int64_t t0 = now_us();
+    esp_err_t err = esp_partition_erase_range(part, 0, part->size);
+    ESP_LOGI(TAG, "%s preformat erase rc=%s time_us=%lld", label,
+             esp_err_to_name(err), (long long)(now_us() - t0));
+    if (err != ESP_OK) {
+        return -1;
+    }
+
+    t0 = now_us();
+    int16_t rc = fs_start(FS_START_NORMAL);
+    ESP_LOGI(TAG, "%s post-erase wake rc=%d time_us=%lld", label, rc,
+             (long long)(now_us() - t0));
+    return 0;
 }
 
 static void log_raw_result(const char *op, uint32_t bytes, int64_t elapsed_us)
@@ -583,37 +602,6 @@ static void bench_cold_start_phase(void)
     log_read_stats("cold read medium split", &med_stats);
 }
 
-static int find_free_slot(void)
-{
-    for (int i = 0; i < CHURN_MAX_FILES; ++i) {
-        if (!churn_files[i].live) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int choose_live_slot(void)
-{
-    int live_count = 0;
-    for (int i = 0; i < CHURN_MAX_FILES; ++i) {
-        if (churn_files[i].live && i != protected_large_slot) {
-            live_count++;
-        }
-    }
-    if (live_count == 0) {
-        return protected_large_slot >= 0 && churn_files[protected_large_slot].live ? protected_large_slot : -1;
-    }
-
-    int target = (int)(prng_next() % (uint32_t)live_count);
-    for (int i = 0; i < CHURN_MAX_FILES; ++i) {
-        if (churn_files[i].live && i != protected_large_slot && target-- == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 static uint32_t count_live_files(void)
 {
     uint32_t live_count = 0;
@@ -625,20 +613,79 @@ static uint32_t count_live_files(void)
     return live_count;
 }
 
-static int delete_slot(int slot, uint32_t *live_bytes, uint32_t *delete_ops)
+static void record_op_time(op_time_stats_t *stats, int64_t elapsed_us)
 {
-    int64_t t0 = now_us();
-    int rc = bench_delete_file(churn_files[slot].name);
-    int64_t elapsed = now_us() - t0;
-
-    if (rc == 0) {
-        *live_bytes -= churn_files[slot].size;
-        churn_files[slot].live = 0;
-        (*delete_ops)++;
-        ESP_LOGI(TAG, "churn delete name=%s time_us=%lld live_bytes=%lu",
-                 churn_files[slot].name, (long long)elapsed, (unsigned long)*live_bytes);
+    stats->ops++;
+    stats->total_us += elapsed_us;
+    if (stats->ops == 1 || elapsed_us < stats->min_us) {
+        stats->min_us = elapsed_us;
     }
-    return rc;
+    if (elapsed_us > stats->max_us) {
+        stats->max_us = elapsed_us;
+    }
+    if (stats->sample_count < CHURN_DELETE_LATENCY_SAMPLES) {
+        stats->samples_us[stats->sample_count++] = (uint32_t)elapsed_us;
+    }
+}
+
+static void log_op_time_stats(const char *label, const op_time_stats_t *stats)
+{
+    uint32_t avg_us = stats->ops == 0 ? 0 :
+        (uint32_t)(stats->total_us / stats->ops);
+    uint32_t n = stats->sample_count;
+    for (uint32_t i = 0; i < n; ++i) {
+        churn_latency_sorted[i] = stats->samples_us[i];
+        uint32_t j = i;
+        while (j > 0 && churn_latency_sorted[j - 1] > churn_latency_sorted[j]) {
+            uint32_t tmp = churn_latency_sorted[j - 1];
+            churn_latency_sorted[j - 1] = churn_latency_sorted[j];
+            churn_latency_sorted[j] = tmp;
+            j--;
+        }
+    }
+    uint32_t p50 = n == 0 ? 0 : churn_latency_sorted[(50u * (n - 1u) + 50u) / 100u];
+    uint32_t p95 = n == 0 ? 0 : churn_latency_sorted[(95u * (n - 1u) + 50u) / 100u];
+    uint32_t p99 = n == 0 ? 0 : churn_latency_sorted[(99u * (n - 1u) + 50u) / 100u];
+    ESP_LOGI(TAG, "%s ops=%lu total_us=%lld avg_us=%lu min_us=%lld p50_us=%lu p95_us=%lu p99_us=%lu max_us=%lld samples=%lu",
+             label, (unsigned long)stats->ops,
+             (long long)stats->total_us, (unsigned long)avg_us,
+             (long long)stats->min_us, (unsigned long)p50,
+             (unsigned long)p95, (unsigned long)p99,
+             (long long)stats->max_us, (unsigned long)n);
+}
+
+static void record_delete_stats(class_stats_t stats[SIZE_CLASS_COUNT],
+                                int64_t max_us[SIZE_CLASS_COUNT],
+                                op_time_stats_t *latency,
+                                size_class_t cls, uint32_t size,
+                                int64_t elapsed_us)
+{
+    stats[cls].ops++;
+    stats[cls].files++;
+    stats[cls].bytes += size;
+    stats[cls].time_us += elapsed_us;
+    if (elapsed_us > max_us[cls]) {
+        max_us[cls] = elapsed_us;
+    }
+    record_op_time(latency, elapsed_us);
+}
+
+static void log_delete_class_stats(const char *label,
+                                   const class_stats_t stats[SIZE_CLASS_COUNT],
+                                   const int64_t max_us[SIZE_CLASS_COUNT])
+{
+    for (int i = 0; i < SIZE_CLASS_COUNT; ++i) {
+        uint32_t avg_us = stats[i].ops == 0 ? 0 :
+            (uint32_t)(stats[i].time_us / stats[i].ops);
+        ESP_LOGI(TAG, "%s class=%s ops=%lu files=%lu bytes=%lu time_us=%lld avg_us=%lu max_us=%lld",
+                 label, class_name((size_class_t)i),
+                 (unsigned long)stats[i].ops,
+                 (unsigned long)stats[i].files,
+                 (unsigned long)stats[i].bytes,
+                 (long long)stats[i].time_us,
+                 (unsigned long)avg_us,
+                 (long long)max_us[i]);
+    }
 }
 
 static void log_class_stats(const char *label, class_stats_t stats[SIZE_CLASS_COUNT])
@@ -789,19 +836,22 @@ static void run_churn_cold_reads(void)
 static void run_churn_workload(void)
 {
     class_stats_t write_stats[SIZE_CLASS_COUNT] = {0};
-    uint32_t live_bytes = 0;
-    uint32_t total_written = 0;
     uint32_t create_ops = 0;
     uint32_t replace_ops = 0;
     uint32_t delete_ops = 0;
     uint32_t op = 0;
     uint32_t last_progress_written = 0;
-    uint32_t forced_large_written = 0;
     int64_t last_progress_us = 0;
+    bench_churn_model_t model;
     int16_t rc;
     int64_t t0;
 
     ESP_LOGI(TAG, "churn format start");
+#if JESFS_CHURN_ERASE_BEFORE_FORMAT
+    if (erase_partition_for_phase("churn") != 0) {
+        return;
+    }
+#endif
     t0 = now_us();
     rc = fs_format(FS_FORMAT_SOFT);
     ESP_LOGI(TAG, "churn format rc=%d time_us=%lld", rc, (long long)(now_us() - t0));
@@ -817,8 +867,13 @@ static void run_churn_workload(void)
     }
 
     memset(churn_files, 0, sizeof(churn_files));
-    protected_large_slot = -1;
-    prng_state = CHURN_SEED;
+    memset(churn_delete_stats, 0, sizeof(churn_delete_stats));
+    memset(churn_delete_max_us, 0, sizeof(churn_delete_max_us));
+    memset(&churn_delete_latency, 0, sizeof(churn_delete_latency));
+    bench_churn_model_init(&model, CHURN_SEED, CHURN_TARGET_LIVE_BYTES,
+                           CHURN_TARGET_WRITTEN_BYTES,
+                           CHURN_TARGET_SLACK_BYTES,
+                           CHURN_FORCE_LARGE_AFTER_BYTES);
     last_progress_us = now_us();
 
     ESP_LOGI(TAG, "churn target live_percent=%d target_live_bytes=%lu fixed_live_bytes=%lu slack_bytes=%lu written_target=%lu",
@@ -827,118 +882,100 @@ static void run_churn_workload(void)
              (unsigned long)CHURN_TARGET_SLACK_BYTES,
              (unsigned long)CHURN_TARGET_WRITTEN_BYTES);
 
-    while (total_written < CHURN_TARGET_WRITTEN_BYTES) {
-        size_class_t cls;
-        uint32_t size;
-        int replace = 0;
-        int slot = -1;
-
-        if (!forced_large_written && total_written >= CHURN_FORCE_LARGE_AFTER_BYTES) {
-            size = forced_large_churn_size(&cls);
-            forced_large_written = 1;
-        } else {
-            size = choose_churn_size(&cls);
+    while (1) {
+        bench_churn_event_t event;
+        bench_churn_event_type_t type = bench_churn_model_next(&model, &event);
+        if (type == BENCH_CHURN_EVENT_DONE) {
+            break;
         }
-
-        while (live_bytes + size > CHURN_TARGET_LIVE_BYTES + CHURN_TARGET_SLACK_BYTES) {
-            int del = choose_live_slot();
-            if (del < 0 || delete_slot(del, &live_bytes, &delete_ops) != 0) {
-                break;
-            }
-        }
-
-        if (live_bytes > CHURN_TARGET_LIVE_BYTES && (prng_next() & 7u) == 0u) {
-            int del = choose_live_slot();
-            if (del >= 0) {
-                delete_slot(del, &live_bytes, &delete_ops);
-            }
-        }
-
-        if ((prng_next() % 100u) < 25u) {
-            slot = choose_live_slot();
-            if (slot >= 0) {
-                replace = 1;
-            }
-        }
-        if (slot < 0) {
-            slot = find_free_slot();
-        }
-        if (slot < 0) {
-            int del = choose_live_slot();
-            if (del >= 0 && delete_slot(del, &live_bytes, &delete_ops) == 0) {
-                slot = del;
-            }
-        }
-        if (slot < 0) {
+        if (type == BENCH_CHURN_EVENT_NO_SLOT) {
             ESP_LOGE(TAG, "churn no slot available");
             break;
         }
 
-        if (replace) {
-            uint32_t old_size = churn_files[slot].size;
-            if (bench_delete_file(churn_files[slot].name) != 0) {
+        if (type == BENCH_CHURN_EVENT_DELETE) {
+            int64_t dt = now_us();
+            int drc = bench_delete_file(event.name);
+            int64_t elapsed = now_us() - dt;
+            if (drc != 0) {
+                ESP_LOGE(TAG, "churn delete failed name=%s rc=%d",
+                         event.name, drc);
                 break;
             }
-            live_bytes -= old_size;
-            replace_ops++;
-        } else {
-            snprintf(churn_files[slot].name, sizeof(churn_files[slot].name), "w%04d.bin", slot);
-            create_ops++;
+            record_delete_stats(churn_delete_stats, churn_delete_max_us,
+                                &churn_delete_latency,
+                                (size_class_t)event.cls, event.size,
+                                elapsed);
+            bench_churn_model_apply(&model, &event);
+            churn_files[event.slot].live = 0;
+            delete_ops++;
+            ESP_LOGI(TAG, "churn delete name=%s time_us=%lld live_bytes=%lu",
+                     event.name, (long long)elapsed,
+                     (unsigned long)model.live_bytes);
+            continue;
         }
 
         t0 = now_us();
-        int wrc = bench_write_file(churn_files[slot].name, size, total_written ^ (uint32_t)slot);
+        int wrc = bench_write_file(event.name, event.size, event.write_seed);
         int64_t elapsed = now_us() - t0;
         if (wrc != 0) {
             ESP_LOGE(TAG, "churn write failed name=%s rc=%d total_written=%lu live_bytes=%lu",
-                     churn_files[slot].name, wrc, (unsigned long)total_written,
-                     (unsigned long)live_bytes);
+                     event.name, wrc, (unsigned long)model.total_written,
+                     (unsigned long)model.live_bytes);
             break;
         }
 
-        churn_files[slot].live = 1;
-        churn_files[slot].cls = cls;
-        churn_files[slot].size = size;
-        if (cls == SIZE_LARGE && protected_large_slot < 0) {
-            protected_large_slot = slot;
+        bench_churn_model_apply(&model, &event);
+        churn_files[event.slot].live = 1;
+        churn_files[event.slot].cls = (size_class_t)event.cls;
+        churn_files[event.slot].size = event.size;
+        snprintf(churn_files[event.slot].name, sizeof(churn_files[event.slot].name),
+                 "%s", event.name);
+        if (event.replacing) {
+            replace_ops++;
+        } else {
+            create_ops++;
         }
-        live_bytes += size;
-        total_written += size;
-        write_stats[cls].ops++;
-        write_stats[cls].files++;
-        write_stats[cls].bytes += size;
-        write_stats[cls].time_us += elapsed;
+        write_stats[event.cls].ops++;
+        write_stats[event.cls].files++;
+        write_stats[event.cls].bytes += event.size;
+        write_stats[event.cls].time_us += elapsed;
         op++;
 
         ESP_LOGI(TAG, "churn op=%lu name=%s class=%s size=%lu write_us=%lld write_kib_s=%lu total_written=%lu live=%lu",
-                 (unsigned long)op, churn_files[slot].name, class_name(cls),
-                 (unsigned long)size, (long long)elapsed,
-                 (unsigned long)kib_per_s(size, elapsed),
-                 (unsigned long)total_written, (unsigned long)live_bytes);
+                 (unsigned long)op, event.name, class_name((size_class_t)event.cls),
+                 (unsigned long)event.size, (long long)elapsed,
+                 (unsigned long)kib_per_s(event.size, elapsed),
+                 (unsigned long)model.total_written, (unsigned long)model.live_bytes);
 
-        if ((op % 25u) == 0u || total_written >= CHURN_TARGET_WRITTEN_BYTES) {
+        if ((op % 25u) == 0u || model.total_written >= CHURN_TARGET_WRITTEN_BYTES) {
             int64_t now = now_us();
-            uint32_t interval_bytes = total_written - last_progress_written;
+            uint32_t interval_bytes = model.total_written - last_progress_written;
             int64_t interval_us = now - last_progress_us;
             uint32_t live_files = count_live_files();
             ESP_LOGI(TAG, "churn progress ops=%lu written=%lu live=%lu creates=%lu replaces=%lu deletes=%lu",
-                     (unsigned long)op, (unsigned long)total_written, (unsigned long)live_bytes,
+                     (unsigned long)op, (unsigned long)model.total_written,
+                     (unsigned long)model.live_bytes,
                      (unsigned long)create_ops, (unsigned long)replace_ops,
                      (unsigned long)delete_ops);
             ESP_LOGI(TAG, "churn progress interval_bytes=%lu interval_us=%lld interval_kib_s=%lu live_files=%lu forced_large=%lu",
                      (unsigned long)interval_bytes, (long long)interval_us,
                      (unsigned long)kib_per_s(interval_bytes, interval_us),
-                     (unsigned long)live_files, (unsigned long)forced_large_written);
-            last_progress_written = total_written;
+                     (unsigned long)live_files, (unsigned long)model.forced_large_written);
+            last_progress_written = model.total_written;
             last_progress_us = now;
         }
         vTaskDelay(1);
     }
 
     ESP_LOGI(TAG, "churn summary ops=%lu written=%lu live=%lu creates=%lu replaces=%lu deletes=%lu",
-             (unsigned long)op, (unsigned long)total_written, (unsigned long)live_bytes,
+             (unsigned long)op, (unsigned long)model.total_written,
+             (unsigned long)model.live_bytes,
              (unsigned long)create_ops, (unsigned long)replace_ops, (unsigned long)delete_ops);
     log_class_stats("churn write", write_stats);
+    log_delete_class_stats("churn delete", churn_delete_stats,
+                           churn_delete_max_us);
+    log_op_time_stats("churn delete latency", &churn_delete_latency);
     log_live_distribution();
     bench_list();
     run_churn_cold_reads();
@@ -953,12 +990,20 @@ static void run_benchmarks(void)
     read_stats_t tiny_read_stats = {0};
     read_stats_t med_read_stats = {0};
 
+    ESP_LOGI(TAG, "config baseline_erase_before_format=%d churn_erase_before_format=%d",
+             JESFS_BASELINE_ERASE_BEFORE_FORMAT,
+             JESFS_CHURN_ERASE_BEFORE_FORMAT);
     run_raw_partition_bench();
 
     t0 = now_us();
     rc = fs_start(FS_START_NORMAL);
     ESP_LOGI(TAG, "initial mount rc=%d time_us=%lld", rc, (long long)(now_us() - t0));
 
+#if JESFS_BASELINE_ERASE_BEFORE_FORMAT
+    if (erase_partition_for_phase("baseline") != 0) {
+        return;
+    }
+#endif
     t0 = now_us();
     rc = fs_format(FS_FORMAT_SOFT);
     ESP_LOGI(TAG, "format rc=%d time_us=%lld", rc, (long long)(now_us() - t0));

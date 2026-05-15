@@ -6,15 +6,18 @@ CPPFLAGS += -Ibenchmarks/churn_model
 BUILD_ROOT ?= build
 BUILD_DIR ?= $(BUILD_ROOT)/default
 SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
+PTHREAD_FLAGS ?= -pthread
 
 .PHONY: all test test-timing test-timing-full-index test-timing-nocache \
 	test-timing-nocache-small-scratch test-timing-compare test-churn \
 	test-churn-full-index test-churn-nocache test-workload \
-	test-sanitize test-full-index test-nocache test-full-alloc-map clean
+	test-crash-sweep test-api-crash-sweep test-sanitize test-full-index \
+	test-nocache test-full-alloc-map clean
 
 all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe \
-	$(BUILD_DIR)/fffs_churn_probe
+	$(BUILD_DIR)/fffs_churn_probe $(BUILD_DIR)/fffs_crash_sweep \
+	$(BUILD_DIR)/fffs_api_crash_sweep
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -113,6 +116,18 @@ $(BUILD_DIR)/fffs_churn_probe.o: tools/fffs_churn_probe.c \
 	$(CC) $(CPPFLAGS) -DFFFS_HOST_CHURN_IMAGE_PREFIX=\"$(BUILD_DIR)/churn\" \
 		$(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/fffs_crash_sweep.o: tools/fffs_crash_sweep.c \
+		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
+		include/fastffs/fastffs_inspect.h include/fastffs/verify_flash.h \
+		| $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c \
+		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
+		include/fastffs/fastffs_inspect.h include/fastffs/verify_flash.h \
+		benchmarks/churn_model/churn_model.h src/fffs_internal.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_FLAGS) -c $< -o $@
+
 $(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
 		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
 		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
@@ -188,6 +203,41 @@ $(BUILD_DIR)/fffs_churn_probe: $(BUILD_DIR)/src_fastffs.o \
 		$(BUILD_DIR)/fffs_churn_probe.o
 	$(CC) $(CFLAGS) $^ -o $@
 
+$(BUILD_DIR)/fffs_crash_sweep: $(BUILD_DIR)/src_fastffs.o \
+		$(BUILD_DIR)/src_fffs_io.o \
+		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_hashtable_index.o \
+		$(BUILD_DIR)/src_fffs_nocache_index.o \
+		$(BUILD_DIR)/src_fffs_bitset.o \
+		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_alloc_map.o \
+		$(BUILD_DIR)/src_fffs_gc.o \
+		$(BUILD_DIR)/src_fffs_inspect.o \
+		$(BUILD_DIR)/src_fastffs_host.o \
+		$(BUILD_DIR)/src_verify_flash.o \
+		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
+		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
+		$(BUILD_DIR)/fffs_crash_sweep.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BUILD_DIR)/fffs_api_crash_sweep: $(BUILD_DIR)/src_fastffs.o \
+		$(BUILD_DIR)/src_fffs_io.o \
+		$(BUILD_DIR)/src_fffs_ram_index.o \
+		$(BUILD_DIR)/src_fffs_hashtable_index.o \
+		$(BUILD_DIR)/src_fffs_nocache_index.o \
+		$(BUILD_DIR)/src_fffs_bitset.o \
+		$(BUILD_DIR)/src_fffs_alloc.o \
+		$(BUILD_DIR)/src_fffs_alloc_map.o \
+		$(BUILD_DIR)/src_fffs_gc.o \
+		$(BUILD_DIR)/src_fffs_inspect.o \
+		$(BUILD_DIR)/src_fastffs_host.o \
+		$(BUILD_DIR)/src_verify_flash.o \
+		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
+		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
+		$(BUILD_DIR)/benchmarks/churn_model.o \
+		$(BUILD_DIR)/fffs_api_crash_sweep.o
+	$(CC) $(CFLAGS) $(PTHREAD_FLAGS) $^ -o $@
+
 test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 		$(BUILD_DIR)/fffs_tool
 	./$(BUILD_DIR)/test_verify_flash
@@ -234,6 +284,12 @@ test-churn-nocache:
 test-workload: $(BUILD_DIR)/fffs_tool
 	./$(BUILD_DIR)/fffs_tool workload $(BUILD_DIR)/workload-long.img 4194304 16
 	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/workload-long.img
+
+test-crash-sweep: $(BUILD_DIR)/fffs_crash_sweep
+	./$(BUILD_DIR)/fffs_crash_sweep
+
+test-api-crash-sweep: $(BUILD_DIR)/fffs_api_crash_sweep
+	./$(BUILD_DIR)/fffs_api_crash_sweep 0xa11ce000 8 10000 256
 
 test-sanitize:
 	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test

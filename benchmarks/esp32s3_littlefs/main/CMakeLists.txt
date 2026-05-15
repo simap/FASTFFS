@@ -1,12 +1,15 @@
 set(VFS_BENCH_COMMON "${CMAKE_CURRENT_LIST_DIR}/../../vfs_bench_common")
+set(CHURN_MODEL "${CMAKE_CURRENT_LIST_DIR}/../../churn_model")
 
 idf_component_register(
     SRCS
         "backend_littlefs.c"
         "${VFS_BENCH_COMMON}/vfs_bench.c"
+        "${CHURN_MODEL}/churn_model.c"
     INCLUDE_DIRS
         "."
         "${VFS_BENCH_COMMON}"
+        "${CHURN_MODEL}"
     REQUIRES
         esp_partition
         esp_timer
