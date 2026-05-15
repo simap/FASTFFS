@@ -6,9 +6,124 @@ CPPFLAGS += -Ibenchmarks/churn_model
 BUILD_ROOT ?= build
 BUILD_DIR ?= $(BUILD_ROOT)/default
 SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
-PTHREAD_FLAGS ?= -pthread
+PTHREAD_CFLAGS ?= -pthread
+PTHREAD_LDLIBS ?= -pthread
+
 DEPFLAGS = -MMD -MP -MF $(@:.o=.d) -MT $@ -MT $(@:.o=.d)
 COMPILE.c = $(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c
+LINK.o = $(CC) $(CFLAGS) $(LDFLAGS)
+
+CORE_SRCS = \
+	src/fastffs.c \
+	src/fffs_io.c \
+	src/fffs_ram_index.c \
+	src/fffs_hashtable_index.c \
+	src/fffs_nocache_index.c \
+	src/fffs_bitset.c \
+	src/fffs_alloc.c \
+	src/fffs_alloc_map.c \
+	src/fffs_gc.c \
+	src/fffs_inspect.c
+
+HOST_SRCS = \
+	src/fastffs_host.c \
+	src/verify_flash.c
+
+LITTLEFS_SRCS = \
+	tests/littlefs/bd/lfs_emubd.c \
+	tests/littlefs/lfs_util.c
+
+CHURN_SRCS = \
+	benchmarks/churn_model/churn_model.c
+
+TEST_VERIFY_FLASH_SRCS = \
+	tests/test_verify_flash.c
+
+TEST_FASTFFS_SRCS = \
+	tests/test_fastffs.c
+
+FFFS_TOOL_SRCS = \
+	tools/fffs_tool.c
+
+FFFS_TIME_PROBE_SRCS = \
+	tools/fffs_time_probe.c
+
+FFFS_CHURN_PROBE_SRCS = \
+	tools/fffs_churn_probe.c
+
+FFFS_CRASH_SWEEP_SRCS = \
+	tools/fffs_crash_sweep.c
+
+FFFS_API_CRASH_SWEEP_SRCS = \
+	tools/fffs_api_crash_sweep.c
+
+CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
+HOST_OBJS = $(HOST_SRCS:%.c=$(BUILD_DIR)/%.o)
+LITTLEFS_OBJS = $(LITTLEFS_SRCS:%.c=$(BUILD_DIR)/%.o)
+CHURN_OBJS = $(CHURN_SRCS:%.c=$(BUILD_DIR)/%.o)
+TEST_VERIFY_FLASH_OBJS = $(TEST_VERIFY_FLASH_SRCS:%.c=$(BUILD_DIR)/%.o)
+TEST_FASTFFS_OBJS = $(TEST_FASTFFS_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_TOOL_OBJS = $(FFFS_TOOL_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_TIME_PROBE_OBJS = $(FFFS_TIME_PROBE_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_CHURN_PROBE_OBJS = $(FFFS_CHURN_PROBE_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_CRASH_SWEEP_OBJS = $(FFFS_CRASH_SWEEP_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_API_CRASH_SWEEP_OBJS = $(FFFS_API_CRASH_SWEEP_SRCS:%.c=$(BUILD_DIR)/%.o)
+
+VERIFY_FLASH_LINK_OBJS = \
+	$(BUILD_DIR)/src/verify_flash.o \
+	$(LITTLEFS_OBJS)
+
+FASTFFS_LINK_OBJS = \
+	$(CORE_OBJS) \
+	$(HOST_OBJS) \
+	$(LITTLEFS_OBJS)
+
+TEST_VERIFY_FLASH_LINK_OBJS = \
+	$(VERIFY_FLASH_LINK_OBJS) \
+	$(TEST_VERIFY_FLASH_OBJS)
+
+TEST_FASTFFS_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(TEST_FASTFFS_OBJS)
+
+FFFS_TOOL_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(FFFS_TOOL_OBJS)
+
+FFFS_TIME_PROBE_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(FFFS_TIME_PROBE_OBJS)
+
+FFFS_CHURN_PROBE_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(CHURN_OBJS) \
+	$(FFFS_CHURN_PROBE_OBJS)
+
+FFFS_CRASH_SWEEP_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(FFFS_CRASH_SWEEP_OBJS)
+
+FFFS_API_CRASH_SWEEP_LINK_OBJS = \
+	$(FASTFFS_LINK_OBJS) \
+	$(CHURN_OBJS) \
+	$(FFFS_API_CRASH_SWEEP_OBJS)
+
+ALL_OBJS = \
+	$(CORE_OBJS) \
+	$(HOST_OBJS) \
+	$(LITTLEFS_OBJS) \
+	$(CHURN_OBJS) \
+	$(TEST_VERIFY_FLASH_OBJS) \
+	$(TEST_FASTFFS_OBJS) \
+	$(FFFS_TOOL_OBJS) \
+	$(FFFS_TIME_PROBE_OBJS) \
+	$(FFFS_CHURN_PROBE_OBJS) \
+	$(FFFS_CRASH_SWEEP_OBJS) \
+	$(FFFS_API_CRASH_SWEEP_OBJS)
+
+DEPS = $(ALL_OBJS:.o=.d)
+
+.DEFAULT_GOAL := all
 
 .PHONY: all test test-timing test-timing-full-index test-timing-nocache \
 	test-timing-nocache-small-scratch test-timing-compare test-churn \
@@ -21,189 +136,39 @@ all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_churn_probe $(BUILD_DIR)/fffs_crash_sweep \
 	$(BUILD_DIR)/fffs_api_crash_sweep
 
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
-	mkdir -p $(BUILD_DIR)/benchmarks
-	mkdir -p $(BUILD_DIR)/tests/littlefs/bd
-	mkdir -p $(BUILD_DIR)/tests/littlefs
-
-$(BUILD_DIR)/src_verify_flash.o: src/verify_flash.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fastffs.o: src/fastffs.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_io.o: src/fffs_io.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_ram_index.o: src/fffs_ram_index.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_hashtable_index.o: src/fffs_hashtable_index.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_nocache_index.o: src/fffs_nocache_index.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_bitset.o: src/fffs_bitset.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_alloc_map.o: src/fffs_alloc_map.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_gc.o: src/fffs_gc.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fffs_inspect.o: src/fffs_inspect.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/src_fastffs_host.o: src/fastffs_host.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/benchmarks/churn_model.o: benchmarks/churn_model/churn_model.c | $(BUILD_DIR)
-	mkdir -p $(dir $@)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o: tests/littlefs/bd/lfs_emubd.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/tests/littlefs/lfs_util.o: tests/littlefs/lfs_util.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/test_verify_flash.o: tests/test_verify_flash.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/test_fastffs.o: tests/test_fastffs.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/fffs_tool.o: tools/fffs_tool.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/fffs_time_probe.o: tools/fffs_time_probe.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
-
-$(BUILD_DIR)/fffs_churn_probe.o: tools/fffs_churn_probe.c | $(BUILD_DIR)
+$(BUILD_DIR)/tools/fffs_churn_probe.o: tools/fffs_churn_probe.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DFFFS_HOST_CHURN_IMAGE_PREFIX=\"$(BUILD_DIR)/churn\" \
 		$(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/fffs_crash_sweep.o: tools/fffs_crash_sweep.c | $(BUILD_DIR)
-	$(COMPILE.c) $< -o $@
+$(BUILD_DIR)/tools/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_FLAGS) $(DEPFLAGS) -c $< -o $@
+$(BUILD_DIR)/test_verify_flash: $(TEST_VERIFY_FLASH_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/test_verify_flash.o
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/test_fastffs: $(TEST_FASTFFS_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/test_fastffs: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/test_fastffs.o
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/fffs_tool: $(FFFS_TOOL_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/fffs_tool: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/fffs_tool.o
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/fffs_time_probe: $(FFFS_TIME_PROBE_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/fffs_time_probe: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/fffs_time_probe.o
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/fffs_churn_probe: $(FFFS_CHURN_PROBE_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/fffs_churn_probe: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/benchmarks/churn_model.o \
-		$(BUILD_DIR)/fffs_churn_probe.o
-	$(CC) $(CFLAGS) $^ -o $@
+$(BUILD_DIR)/fffs_crash_sweep: $(FFFS_CRASH_SWEEP_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
-$(BUILD_DIR)/fffs_crash_sweep: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/fffs_crash_sweep.o
-	$(CC) $(CFLAGS) $^ -o $@
-
-$(BUILD_DIR)/fffs_api_crash_sweep: $(BUILD_DIR)/src_fastffs.o \
-		$(BUILD_DIR)/src_fffs_io.o \
-		$(BUILD_DIR)/src_fffs_ram_index.o \
-		$(BUILD_DIR)/src_fffs_hashtable_index.o \
-		$(BUILD_DIR)/src_fffs_nocache_index.o \
-		$(BUILD_DIR)/src_fffs_bitset.o \
-		$(BUILD_DIR)/src_fffs_alloc.o \
-		$(BUILD_DIR)/src_fffs_alloc_map.o \
-		$(BUILD_DIR)/src_fffs_gc.o \
-		$(BUILD_DIR)/src_fffs_inspect.o \
-		$(BUILD_DIR)/src_fastffs_host.o \
-		$(BUILD_DIR)/src_verify_flash.o \
-		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
-		$(BUILD_DIR)/tests/littlefs/lfs_util.o \
-		$(BUILD_DIR)/benchmarks/churn_model.o \
-		$(BUILD_DIR)/fffs_api_crash_sweep.o
-	$(CC) $(CFLAGS) $(PTHREAD_FLAGS) $^ -o $@
+$(BUILD_DIR)/fffs_api_crash_sweep: $(FFFS_API_CRASH_SWEEP_LINK_OBJS)
+	$(LINK.o) $^ $(PTHREAD_LDLIBS) $(LDLIBS) -o $@
 
 test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 		$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_crash_sweep
@@ -280,8 +245,4 @@ test-full-alloc-map:
 clean:
 	rm -rf $(BUILD_ROOT)
 
-DEPS := $(wildcard $(BUILD_DIR)/*.d) \
-	$(wildcard $(BUILD_DIR)/benchmarks/*.d) \
-	$(wildcard $(BUILD_DIR)/tests/littlefs/*.d) \
-	$(wildcard $(BUILD_DIR)/tests/littlefs/bd/*.d)
 -include $(DEPS)
