@@ -724,10 +724,11 @@ look ahead through the index journal to skip obsolete records, and it does not
 require obsolete metadata to remain valid. A put record can be inserted into
 an empty hash-cache bucket as a head-only entry with no metadata read. Metadata
 reads are only needed when the compact hash cache encounters an occupied
-bucket/probe path and must decide whether the existing cached head or incoming
-head belongs to the resolved slot being updated. If either side's metadata is
-missing, tombstoned, corrupt, or resolves to a different slot, that side is
-stale and may be evicted by the mutating replay/insert/remove path. Normal
+bucket/probe path and must classify the existing cached head. Incoming put
+records should be trusted as journal-ordered updates. If the occupied bucket's
+metadata is missing, tombstoned, corrupt, or resolves to a slot that cannot
+legally occupy that bucket under the current linear-probe cluster, that bucket
+is stale and may be evicted by the mutating replay/insert/remove path. Normal
 read-side lookup does not repair or evict hash-cache entries; if a candidate
 head cannot be verified, lookup skips that occupied bucket and continues
 probing. A later index record for the same slot naturally overwrites or deletes
@@ -735,7 +736,13 @@ the earlier cached head as replay advances.
 
 The index replay log can be older than the sectors they point to. It's possible for an index entry to point to an invalid head if it was subsequently deleted, and the sector erased and reused.
 
-Instead of trying to read metadata on insert, we can check on delete. We'll need to check anyway to verify the delete is for the correct item.
+Empty-bucket put replay should not read metadata. On insert conflict, the hash
+table must classify the occupied bucket's metadata to determine whether the
+bucket holds the same resolved slot or a collision. That same classification
+should also identify stale heads. If the occupied metadata slot matches the
+incoming slot, the incoming head replaces it. This is the normal copy-on-write
+overwrite case: the old metadata may still be valid but is superseded by the
+newer index record.
 
 During replay of a delete record, the remove code path must keep probing for the
 deleted resolved slot until it finds a verified matching head or reaches the
@@ -744,13 +751,25 @@ different resolved slot, the implementation must decide whether that different
 slot can legally occupy that bucket under the current linear-probe cluster. If
 not, the bucket is stale. The delete probe may discover multiple stale buckets.
 
-Stale buckets can be marked with `head = 1` during the scan to remember that
-they are invalid without creating empty-bucket gaps; `head = 1` is not a legal
-data head because index sectors are reserved. After the scan finishes, clear the
-stale markers and repair the affected linear-probe cluster once. This does not
-prove that a stale bucket originally belonged to the deleted slot; it only
-proves that the current bucket contents are not valid cache entries and must not
-remain in the head-only table.
+Stale buckets can be marked with `head = 1` during a bounded cluster scan to
+remember that they are invalid without creating empty-bucket gaps; `head = 1`
+is an in-RAM hash-cache placeholder, not an on-flash index record. After the
+scan finishes, the affected linear-probe cluster should be repaired once and
+remaining stale markers cleared. Repair must restore the invariant that normal
+lookup can stop at the first empty/stale bucket; lookup should not need to scan
+past holes. This does not prove that a stale bucket originally belonged to the
+deleted slot; it only proves that the current bucket contents are not valid
+cache entries and must not remain in the head-only table.
+
+During repair, an entry may move backward into a stale bucket only if that stale
+bucket is inside the entry's legal probe interval:
+
+```text
+distance(home(slot), stale_bucket) < distance(home(slot), current_bucket)
+```
+
+This prevents moving an entry before its natural bucket while still compacting
+entries downward into legal holes.
 
 This keeps mount replay mostly index-only: put records can still be inserted
 speculatively into empty buckets without reading metadata. Metadata reads are
@@ -834,4 +853,3 @@ If corruption is detected at any point, a sticky corruption flag must be set.
 If corruption is detected that impacts the operation, the operation should fail with an error and not complete normally.
 
 In strict mode, any corruption detected must cause an operational failure, even if it does not directly impact the operation. In non-strict mode, corruption unrelated to the current operation only sets a sticky flag indicating some corruption has been detected, but may continue. A fsck/check could then be run later to find and possibly repair the corruption.
-
