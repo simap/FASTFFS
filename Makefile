@@ -119,6 +119,7 @@ $(BUILD_DIR)/fffs_churn_probe.o: tools/fffs_churn_probe.c \
 $(BUILD_DIR)/fffs_crash_sweep.o: tools/fffs_crash_sweep.c \
 		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
 		include/fastffs/fastffs_inspect.h include/fastffs/verify_flash.h \
+		include/fastffs/fffs_opts.h \
 		| $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -239,9 +240,10 @@ $(BUILD_DIR)/fffs_api_crash_sweep: $(BUILD_DIR)/src_fastffs.o \
 	$(CC) $(CFLAGS) $(PTHREAD_FLAGS) $^ -o $@
 
 test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
-		$(BUILD_DIR)/fffs_tool
+		$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_crash_sweep
 	./$(BUILD_DIR)/test_verify_flash
 	./$(BUILD_DIR)/test_fastffs
+	./$(BUILD_DIR)/fffs_crash_sweep
 	./$(BUILD_DIR)/fffs_tool workload $(BUILD_DIR)/workload.img 524288 4
 	./$(BUILD_DIR)/fffs_tool check $(BUILD_DIR)/workload.img
 	./$(BUILD_DIR)/fffs_tool create 4096 32 $(BUILD_DIR)/load.img
