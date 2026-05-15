@@ -17,21 +17,6 @@ bool fffs_index_cache_config_valid(size_t count) {
     return count >= FFFS_SLOT_COUNT;
 }
 
-int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
-        uint16_t *head, bool *end) {
-    if (!fs || !head || !end) {
-        return FFFS_ERR_INVALID;
-    }
-    *head = 0;
-    *end = false;
-    if (probe > 0 || fs->index_heads[slot] == 0) {
-        *end = true;
-        return FFFS_OK;
-    }
-    *head = fs->index_heads[slot];
-    return FFFS_OK;
-}
-
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head) {
     fs->index_heads[slot] = head;
     return FFFS_OK;
@@ -146,12 +131,25 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
+int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
+        uint16_t *head, bool *found) {
+    *head = fs->index_heads[slot];
+    *found = *head != 0;
+    return FFFS_OK;
+}
+
 int fffs_index_record_is_current(struct fffs *fs,
         size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
         bool *current) {
     (void)seq_pos;
     (void)offset;
-    *current = fs->index_heads[slot] == head;
+    uint16_t current_head;
+    bool found;
+    int err = fffs_index_head_for_slot(fs, slot, &current_head, &found);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    *current = found && current_head == head;
     return FFFS_OK;
 }
 
@@ -162,45 +160,6 @@ void fffs_index_mark_live_heads_used(struct fffs *fs) {
             fffs_alloc_map_mark_used(fs, head);
         }
     }
-}
-
-bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
-    for (size_t i = 0; i < FFFS_SLOT_COUNT; i++) {
-        if (fs->index_heads[i] == sector) {
-            return true;
-        }
-    }
-    return false;
-}
-
-int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
-        bool *reachable) {
-    *reachable = false;
-    for (size_t i = 0; i < FFFS_SLOT_COUNT; i++) {
-        uint16_t head = fs->index_heads[i];
-        if (head == 0) {
-            continue;
-        }
-        uint16_t current = head;
-        for (size_t depth = 0; current != 0 && depth < fs->sector_count;
-                depth++) {
-            if (current == sector) {
-                *reachable = true;
-                return FFFS_OK;
-            }
-            uint16_t next_sector;
-            int err = fffs_read_metadata(fs, current, NULL, NULL, NULL,
-                    NULL, &next_sector);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            current = next_sector;
-        }
-        if (current != 0) {
-            return FFFS_ERR_CORRUPT;
-        }
-    }
-    return FFFS_OK;
 }
 
 #endif

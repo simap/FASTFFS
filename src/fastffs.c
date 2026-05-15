@@ -295,7 +295,7 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
             file->old_head = head;
             file->old_next = resolved_next;
         }
-        err = fffs_find_free_sector(fs, &sector);
+        err = fffs_alloc_next_sector(file, &sector);
         if (err != FFFS_OK) {
             return err;
         }
@@ -401,7 +401,7 @@ static int start_next_extent(struct fffs_file *file) {
     }
 
     uint16_t next_sector;
-    err = fffs_find_free_sector(file->fs, &next_sector);
+    err = fffs_alloc_next_sector(file, &next_sector);
     if (err != FFFS_OK) {
         return err;
     }

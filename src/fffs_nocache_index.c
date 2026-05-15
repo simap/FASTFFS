@@ -202,19 +202,6 @@ bool fffs_index_cache_config_valid(size_t count) {
     return true;
 }
 
-int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
-        uint16_t *head, bool *end) {
-    (void)fs;
-    (void)slot;
-    (void)probe;
-    if (!head || !end) {
-        return FFFS_ERR_INVALID;
-    }
-    *head = 0;
-    *end = true;
-    return FFFS_OK;
-}
-
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head) {
     (void)fs;
     (void)slot;
@@ -409,6 +396,37 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
+int fffs_index_head_for_slot(struct fffs *fs, uint16_t candidate_slot,
+        uint16_t *head, bool *found) {
+    struct index_scan scan;
+    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
+    *head = 0;
+    *found = false;
+    for (size_t seq_count = fs->index_sequence_count; seq_count > 0;
+            seq_count--) {
+        size_t seq_pos = seq_count - 1;
+        size_t begin = logical_sector_begin(fs, seq_pos);
+        size_t off = logical_sector_end(fs, seq_pos);
+        while (off >= begin + 4) {
+            off -= 4;
+            uint16_t slot;
+            uint16_t rec_head;
+            bool erased;
+            int err = read_index_at(&scan, off, &slot, &rec_head, &erased);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (erased || slot != candidate_slot) {
+                continue;
+            }
+            *head = rec_head;
+            *found = rec_head != 0;
+            return FFFS_OK;
+        }
+    }
+    return FFFS_OK;
+}
+
 int fffs_index_record_is_current(struct fffs *fs,
         size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
         bool *current) {
@@ -428,121 +446,8 @@ int fffs_index_record_is_current(struct fffs *fs,
     return FFFS_OK;
 }
 
-static int current_head_is_live(struct index_scan *scan, uint16_t head,
-        bool *live) {
-    struct fffs *fs = scan->fs;
-    *live = false;
-    for (size_t seq_count = fs->index_sequence_count; seq_count > 0;
-            seq_count--) {
-        size_t seq_pos = seq_count - 1;
-        size_t begin = logical_sector_begin(fs, seq_pos);
-        size_t off = logical_sector_end(fs, seq_pos);
-        while (off >= begin + 4) {
-            off -= 4;
-            uint16_t slot;
-            uint16_t rec_head;
-            bool erased;
-            int err = read_index_at(scan, off, &slot, &rec_head, &erased);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            if (erased || rec_head == 0) {
-                continue;
-            }
-            if (rec_head == head) {
-                struct logical_pos pos = {
-                    .seq_pos = seq_pos,
-                    .offset = off,
-                };
-                bool newer;
-                err = newer_record_for_slot(scan, &pos, slot, &newer);
-                if (err != FFFS_OK) {
-                    return err;
-                }
-                *live = !newer;
-                return FFFS_OK;
-            }
-        }
-    }
-    return FFFS_OK;
-}
-
-bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
-    struct index_scan scan;
-    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
-    bool live = false;
-    int err = current_head_is_live(&scan, (uint16_t)sector, &live);
-    return err == FFFS_OK && live;
-}
-
 void fffs_index_mark_live_heads_used(struct fffs *fs) {
     (void)fs;
-}
-
-static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
-        size_t sector, bool *reachable) {
-    uint16_t current = head;
-    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        if (current == sector) {
-            *reachable = true;
-            return FFFS_OK;
-        }
-        uint16_t next_sector;
-        int err = fffs_read_metadata(fs, current, NULL, NULL, NULL, NULL,
-                &next_sector);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        current = next_sector;
-    }
-    if (current != 0) {
-        return FFFS_ERR_CORRUPT;
-    }
-    return FFFS_OK;
-}
-
-int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
-        bool *reachable) {
-    struct index_scan scan;
-    index_scan_init(&scan, fs, NULL, fs->scratch, fs->scratch_size, true);
-    *reachable = false;
-    for (size_t seq_count = fs->index_sequence_count; seq_count > 0;
-            seq_count--) {
-        size_t seq_pos = seq_count - 1;
-        size_t begin = logical_sector_begin(fs, seq_pos);
-        size_t off = logical_sector_end(fs, seq_pos);
-        while (off >= begin + 4) {
-            off -= 4;
-            uint16_t slot;
-            uint16_t head;
-            bool erased;
-            int err = read_index_at(&scan, off, &slot, &head, &erased);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            if (erased || head == 0) {
-                continue;
-            }
-            struct logical_pos pos = {
-                .seq_pos = seq_pos,
-                .offset = off,
-            };
-            bool newer;
-            err = newer_record_for_slot(&scan, &pos, slot, &newer);
-            if (err != FFFS_OK) {
-                return err;
-            }
-            if (newer) {
-                continue;
-            }
-            err = sector_is_reachable_from_chain(fs, head, sector,
-                    reachable);
-            if (err != FFFS_OK || *reachable) {
-                return err;
-            }
-        }
-    }
-    return FFFS_OK;
 }
 
 #endif

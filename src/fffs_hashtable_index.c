@@ -24,13 +24,15 @@ static int hash_remove_at(struct fffs *fs, size_t remove_idx);
 static int hash_repair_from(struct fffs *fs, size_t hole);
 static bool bucket_can_hold_slot(struct fffs *fs, size_t idx,
         uint16_t slot);
+static int index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
+        uint16_t *head, bool *end);
 
 bool fffs_index_cache_config_valid(size_t count) {
     return is_power_of_two(count) &&
         count <= FFFS_INDEX_HASH_TABLE_SIZE_MAX;
 }
 
-int fffs_index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
+static int index_candidate(struct fffs *fs, uint16_t slot, size_t probe,
         uint16_t *head, bool *end) {
     if (!fs || !head || !end) {
         return FFFS_ERR_INVALID;
@@ -312,7 +314,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         for (size_t probe = 0; probe < fs->index_hash_table_size;) {
             uint16_t candidate_head;
             bool end;
-            int err = fffs_index_candidate(fs, candidate, probe,
+            int err = index_candidate(fs, candidate, probe,
                     &candidate_head, &end);
             if (err != FFFS_OK) {
                 return err;
@@ -402,27 +404,22 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
-int fffs_index_record_is_current(struct fffs *fs,
-        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
-        bool *current) {
-    (void)seq_pos;
-    (void)offset;
-    *current = false;
+int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
+        uint16_t *head, bool *found) {
+    *head = 0;
+    *found = false;
     for (size_t probe = 0; probe < fs->index_hash_table_size; probe++) {
         uint16_t candidate_head;
         bool end;
-        int err = fffs_index_candidate(fs, slot, probe, &candidate_head,
+        int err = index_candidate(fs, slot, probe, &candidate_head,
                 &end);
-        if (err != FFFS_OK) {
+        if (err != FFFS_OK || end) {
             return err;
-        }
-        if (end) {
-            return FFFS_OK;
         }
 
         uint16_t md_slot;
-        err = fffs_read_metadata(fs, candidate_head, NULL, &md_slot,
-                NULL, NULL, NULL);
+        err = fffs_read_metadata(fs, candidate_head, NULL, &md_slot, NULL,
+                NULL, NULL);
         if (err == FFFS_ERR_CORRUPT) {
             continue;
         }
@@ -430,10 +427,26 @@ int fffs_index_record_is_current(struct fffs *fs,
             return err;
         }
         if (md_slot == slot) {
-            *current = candidate_head == head;
+            *head = candidate_head;
+            *found = true;
             return FFFS_OK;
         }
     }
+    return FFFS_OK;
+}
+
+int fffs_index_record_is_current(struct fffs *fs,
+        size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
+        bool *current) {
+    (void)seq_pos;
+    (void)offset;
+    uint16_t current_head;
+    bool found;
+    int err = fffs_index_head_for_slot(fs, slot, &current_head, &found);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    *current = found && current_head == head;
     return FFFS_OK;
 }
 
@@ -444,54 +457,6 @@ void fffs_index_mark_live_heads_used(struct fffs *fs) {
             fffs_alloc_map_mark_used(fs, head);
         }
     }
-}
-
-bool fffs_index_sector_is_live_head(struct fffs *fs, size_t sector) {
-    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
-        if (fs->index_heads[i] == sector) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
-        size_t sector, bool *reachable) {
-    uint16_t current = head;
-    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        if (current == sector) {
-            *reachable = true;
-            return FFFS_OK;
-        }
-        uint16_t next_sector;
-        int err = fffs_read_metadata(fs, current, NULL, NULL, NULL, NULL,
-                &next_sector);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        current = next_sector;
-    }
-    if (current != 0) {
-        return FFFS_ERR_CORRUPT;
-    }
-    return FFFS_OK;
-}
-
-int fffs_index_sector_is_live_extent(struct fffs *fs, size_t sector,
-        bool *reachable) {
-    *reachable = false;
-    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
-        uint16_t head = fs->index_heads[i];
-        if (head == 0 || head == FFFS_INDEX_STALE_HEAD) {
-            continue;
-        }
-        int err = sector_is_reachable_from_chain(fs, head, sector,
-                reachable);
-        if (err != FFFS_OK || *reachable) {
-            return err;
-        }
-    }
-    return FFFS_OK;
 }
 
 #endif

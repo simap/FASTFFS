@@ -70,6 +70,28 @@ static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
     return sector;
 }
 
+static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
+        size_t sector, bool *reachable) {
+    uint16_t current = head;
+    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
+        if (current == sector) {
+            *reachable = true;
+            return FFFS_OK;
+        }
+        uint16_t next_sector;
+        int err = fffs_read_metadata(fs, current, NULL, NULL, NULL, NULL,
+                &next_sector);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        current = next_sector;
+    }
+    if (current != 0) {
+        return FFFS_ERR_CORRUPT;
+    }
+    return FFFS_OK;
+}
+
 static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         bool use_map) {
     if (!fs) {
@@ -135,16 +157,17 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     }
 
     struct fffs_stat st;
-    uint16_t md_slot;
+    uint16_t md_slot = 0;
     uint16_t md_data_off;
     uint16_t md_data_len;
     uint16_t md_next;
     err = fffs_read_metadata(fs, (uint16_t)s, &st, &md_slot, &md_data_off,
             &md_data_len, &md_next);
+    bool have_md = err == FFFS_OK;
     if (err != FFFS_OK && err != FFFS_ERR_CORRUPT) {
         return err;
     }
-    if (err == FFFS_OK && fffs_name_is_inflight(fs, st.name)) {
+    if (have_md && fffs_name_is_inflight(fs, st.name)) {
         fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_live = true;
         fs->gc_cursor = fffs_next_data_sector(fs, s);
@@ -153,15 +176,27 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    (void)md_slot;
     (void)md_data_off;
     (void)md_data_len;
     (void)md_next;
 
     bool live_extent = false;
-    err = fffs_index_sector_is_live_extent(fs, s, &live_extent);
-    if (err != FFFS_OK) {
-        return err;
+    if (have_md) {
+        uint16_t head;
+        bool found;
+        err = fffs_index_head_for_slot(fs, md_slot, &head, &found);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (!found) {
+            live_extent = false;
+        } else {
+            err = sector_is_reachable_from_chain(fs, head, s,
+                    &live_extent);
+        }
+        if (err != FFFS_OK) {
+            return err;
+        }
     }
     if (live_extent) {
         fffs_alloc_map_mark_used(fs, (uint16_t)s);
