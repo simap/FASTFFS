@@ -7,6 +7,8 @@ BUILD_ROOT ?= build
 BUILD_DIR ?= $(BUILD_ROOT)/default
 SANITIZE_CFLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 PTHREAD_FLAGS ?= -pthread
+DEPFLAGS = -MMD -MP -MF $(@:.o=.d) -MT $@ -MT $(@:.o=.d)
+COMPILE.c = $(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c
 
 .PHONY: all test test-timing test-timing-full-index test-timing-nocache \
 	test-timing-nocache-small-scratch test-timing-compare test-churn \
@@ -25,109 +27,73 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)/tests/littlefs/bd
 	mkdir -p $(BUILD_DIR)/tests/littlefs
 
-$(BUILD_DIR)/src_verify_flash.o: src/verify_flash.c include/fastffs/verify_flash.h \
-		tests/littlefs/bd/lfs_emubd.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_verify_flash.o: src/verify_flash.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fastffs.o: src/fastffs.c include/fastffs/fastffs.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fastffs.o: src/fastffs.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_io.o: src/fffs_io.c src/fffs_internal.h \
-		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_io.o: src/fffs_io.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_ram_index.o: src/fffs_ram_index.c \
-		src/fffs_internal.h include/fastffs/fastffs.h \
-		include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_ram_index.o: src/fffs_ram_index.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_hashtable_index.o: src/fffs_hashtable_index.c \
-		src/fffs_internal.h include/fastffs/fastffs.h \
-		include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_hashtable_index.o: src/fffs_hashtable_index.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_nocache_index.o: src/fffs_nocache_index.c \
-		src/fffs_internal.h include/fastffs/fastffs.h \
-		include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_nocache_index.o: src/fffs_nocache_index.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_bitset.o: src/fffs_bitset.c \
-		src/fffs_internal.h include/fastffs/fastffs.h \
-		include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_bitset.o: src/fffs_bitset.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c src/fffs_internal.h \
-		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_alloc.o: src/fffs_alloc.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_alloc_map.o: src/fffs_alloc_map.c src/fffs_internal.h \
-		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_alloc_map.o: src/fffs_alloc_map.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_gc.o: src/fffs_gc.c src/fffs_internal.h \
-		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_gc.o: src/fffs_gc.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fffs_inspect.o: src/fffs_inspect.c \
-		src/fffs_internal.h include/fastffs/fastffs_inspect.h \
-		include/fastffs/fastffs.h include/fastffs/fffs_opts.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fffs_inspect.o: src/fffs_inspect.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/src_fastffs_host.o: src/fastffs_host.c \
-		include/fastffs/fastffs_host.h include/fastffs/fastffs.h \
-		include/fastffs/verify_flash.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/src_fastffs_host.o: src/fastffs_host.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/benchmarks/churn_model.o: benchmarks/churn_model/churn_model.c \
-		benchmarks/churn_model/churn_model.h | $(BUILD_DIR)
+$(BUILD_DIR)/benchmarks/churn_model.o: benchmarks/churn_model/churn_model.c | $(BUILD_DIR)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o: \
-		tests/littlefs/bd/lfs_emubd.c \
-		tests/littlefs/bd/lfs_emubd.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o: tests/littlefs/bd/lfs_emubd.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
 $(BUILD_DIR)/tests/littlefs/lfs_util.o: tests/littlefs/lfs_util.c | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/test_verify_flash.o: tests/test_verify_flash.c include/fastffs/verify_flash.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/test_verify_flash.o: tests/test_verify_flash.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/test_fastffs.o: tests/test_fastffs.c include/fastffs/fastffs.h \
-		include/fastffs/fastffs_host.h include/fastffs/fastffs_inspect.h \
-		include/fastffs/verify_flash.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/test_fastffs.o: tests/test_fastffs.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/fffs_tool.o: tools/fffs_tool.c include/fastffs/fastffs.h \
-		include/fastffs/fastffs_host.h include/fastffs/fastffs_inspect.h \
-		include/fastffs/verify_flash.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/fffs_tool.o: tools/fffs_tool.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/fffs_time_probe.o: tools/fffs_time_probe.c \
-		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
-		include/fastffs/verify_flash.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/fffs_time_probe.o: tools/fffs_time_probe.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/fffs_churn_probe.o: tools/fffs_churn_probe.c \
-		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
-		include/fastffs/verify_flash.h benchmarks/churn_model/churn_model.h \
-		| $(BUILD_DIR)
+$(BUILD_DIR)/fffs_churn_probe.o: tools/fffs_churn_probe.c | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -DFFFS_HOST_CHURN_IMAGE_PREFIX=\"$(BUILD_DIR)/churn\" \
-		$(CFLAGS) -c $< -o $@
+		$(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/fffs_crash_sweep.o: tools/fffs_crash_sweep.c \
-		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
-		include/fastffs/fastffs_inspect.h include/fastffs/verify_flash.h \
-		include/fastffs/fffs_opts.h \
-		| $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/fffs_crash_sweep.o: tools/fffs_crash_sweep.c | $(BUILD_DIR)
+	$(COMPILE.c) $< -o $@
 
-$(BUILD_DIR)/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c \
-		include/fastffs/fastffs.h include/fastffs/fastffs_host.h \
-		include/fastffs/fastffs_inspect.h include/fastffs/verify_flash.h \
-		benchmarks/churn_model/churn_model.h src/fffs_internal.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_FLAGS) -c $< -o $@
+$(BUILD_DIR)/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_FLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/test_verify_flash: $(BUILD_DIR)/src_verify_flash.o \
 		$(BUILD_DIR)/tests/littlefs/bd/lfs_emubd.o \
@@ -313,3 +279,9 @@ test-full-alloc-map:
 
 clean:
 	rm -rf $(BUILD_ROOT)
+
+DEPS := $(wildcard $(BUILD_DIR)/*.d) \
+	$(wildcard $(BUILD_DIR)/benchmarks/*.d) \
+	$(wildcard $(BUILD_DIR)/tests/littlefs/*.d) \
+	$(wildcard $(BUILD_DIR)/tests/littlefs/bd/*.d)
+-include $(DEPS)
