@@ -48,6 +48,7 @@
 uint16_t fffs_hash16(const char *name);
 int fffs_index_compact_oldest(struct fffs *fs);
 int fffs_rotate_index(struct fffs *fs);
+int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -873,6 +874,251 @@ static int test_alloc_failure_runs_gc_to_free_sector(void) {
     ASSERT_OK(fffs_stat(&fs, "f004", &st));
     ASSERT_TRUE(st.size == sizeof(replacement));
 
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_reservation_skips_other_open_writer(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count > 0);
+    uint16_t reserved = first.reserve_first;
+
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(second.head != reserved);
+
+    ASSERT_OK(fffs_close(&second));
+    ASSERT_OK(fffs_close(&first));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_reservation_released_on_close(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count > 0);
+    uint16_t reserved = first.reserve_first;
+    ASSERT_OK(fffs_close(&first));
+
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(second.head == reserved);
+
+    ASSERT_OK(fffs_close(&second));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_uses_owner_reservation_for_next_extent(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
+    size_t written = 0;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    memset(payload, 0x71, sizeof(payload));
+    ASSERT_OK(fffs_open(&fs, &file, "large",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(file.reserve_count > 0);
+    uint16_t reserved = file.reserve_first;
+
+    ASSERT_OK(fffs_write(&file, payload,
+                test_max_file_data_size(&fs) + 1, &written));
+    ASSERT_TRUE(written == test_max_file_data_size(&fs) + 1);
+    ASSERT_TRUE(file.current == reserved);
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_skips_invalid_reserved_candidate(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
+    uint8_t dirty[FFFS_MAX_PROGRAM_GRANULE];
+    size_t written = 0;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    memset(payload, 0x29, sizeof(payload));
+    memset(dirty, 0xa7, sizeof(dirty));
+    ASSERT_OK(fffs_open(&fs, &file, "large",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(file.reserve_count > 0);
+    uint16_t reserved = file.reserve_first;
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
+                    (size_t)reserved * fs.sector_size, dirty, sizeof(dirty),
+                    FFSV_CALLSITE)));
+
+    ASSERT_OK(fffs_write(&file, payload,
+                test_max_file_data_size(&fs) + 1, &written));
+    ASSERT_TRUE(written == test_max_file_data_size(&fs) + 1);
+    ASSERT_TRUE(file.current != reserved);
+
+    ASSERT_OK(fffs_close(&file));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_trims_other_reservations_under_pressure(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 1
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 7));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    uint16_t first_count = first.reserve_count;
+    ASSERT_TRUE(first_count > 1);
+
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count == (first_count >> 1u));
+
+    ASSERT_OK(fffs_close(&second));
+    ASSERT_OK(fffs_close(&first));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_alloc_revokes_other_reservation_under_pressure(void) {
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    struct fffs_file third;
+    struct fffs_file fourth;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 6));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count > 0);
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_open(&fs, &third, "third",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_open(&fs, &fourth, "fourth",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count == 0);
+
+    ASSERT_OK(fffs_close(&fourth));
+    ASSERT_OK(fffs_close(&third));
+    ASSERT_OK(fffs_close(&second));
+    ASSERT_OK(fffs_close(&first));
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
+static int test_gc_pressure_does_not_free_reserved_sector(void) {
+#if !FFFS_GC_ON_ALLOC_FAILURE || FFFS_ALLOC_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file first;
+    struct fffs_file second;
+    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    uint16_t erased_sector = 0;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &first, "first",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(first.reserve_count > 0);
+    uint16_t reserved = first.reserve_first;
+
+    fs.gc_cursor = reserved;
+    ASSERT_EQ_INT(FFFS_ERR_NO_SPACE,
+            fffs_gc_until_erased(&fs, &erased_sector));
+    ASSERT_TRUE(first.reserve_count > 0);
+
+    ASSERT_OK(fffs_open(&fs, &second, "second",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(second.head != reserved);
+
+    ASSERT_OK(fffs_close(&second));
+    ASSERT_OK(fffs_close(&first));
     fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
     return 0;
@@ -2075,6 +2321,13 @@ int main(void) {
     failures += test_gc_reclaims_failed_open_writer_after_remount();
     failures += test_gc_reclaims_obsolete_index_history();
     failures += test_alloc_failure_runs_gc_to_free_sector();
+    failures += test_alloc_reservation_skips_other_open_writer();
+    failures += test_alloc_reservation_released_on_close();
+    failures += test_alloc_uses_owner_reservation_for_next_extent();
+    failures += test_alloc_skips_invalid_reserved_candidate();
+    failures += test_alloc_trims_other_reservations_under_pressure();
+    failures += test_alloc_revokes_other_reservation_under_pressure();
+    failures += test_gc_pressure_does_not_free_reserved_sector();
     failures += test_full_alloc_map_mount_requires_storage();
     failures += test_streaming_write_forces_gc_without_reclaiming_self();
     failures += test_streaming_write_fails_after_gc_exhausts_reclaimable_space();

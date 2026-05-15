@@ -176,5 +176,6 @@ size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
 int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size);
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
 int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector);
+void fffs_alloc_release_reservation(struct fffs_file *file);
 
 #endif

@@ -661,6 +661,8 @@ Reservations don't need to be blank checked or verified until allocated.
 
 The allocator can avoid allocating sectors potentially used by other files by using the open/in flight file data to see what sectors are not fully written, and by skipping over sectors that appear to belong to any of the open/in flight files, identified by slot and/or name.
 
+Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or there were none to free. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
+
 ## Expected Performance
 
 These estimates assume candidate sectors are already erased or can be blank-checked before use.

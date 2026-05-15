@@ -512,6 +512,7 @@ int fffs_close(struct fffs_file *file) {
                         file->old_next, true);
             }
         }
+        fffs_alloc_release_reservation(file);
         unregister_inflight_writer(file);
     }
     file->closed = true;

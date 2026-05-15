@@ -7,3 +7,5 @@ benchmarks/*/sdkconfig.old
 benchmarks/*/dependencies.lock
 benchmarks/*/managed_components/
 benchmarks/results/*.log
+
+crash_sweep_logs
