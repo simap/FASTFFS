@@ -185,8 +185,7 @@ The default FASTFFS row is repeated here as the baseline for optional-feature co
 
 | Stat | Default: 1K hash heads + alloc map, inline GC | Default: 1K hash heads + alloc map, debt GC | 1K hash heads, no alloc map, inline GC | No index cache + alloc map, inline GC | Full index cache + alloc map, debt GC, 4K scratch |
 |---|---:|---:|---:|---:|---:|
-| Run status | measured | measured | measured | built, flash blocked | built, flash blocked |
-| Build directory | `build-default-inline-split` | `build-default-gcdebt-split` | `build-noalloc-inline-split` | `build-nocache-fullmap-inline-split` | `build-allthings-fullindex-fullmap-gcdebt-4k` |
+| Run status | measured | measured | measured | measured | measured |
 | Index cache | hash heads | hash heads | hash heads | none | full slot heads |
 | Hash-head/full-index entries | 1,024 | 1,024 | 1,024 | 0 | 65,536 |
 | Index cache bytes | 2,048 B | 2,048 B | 2,048 B | 0 B | 131,072 B |
@@ -195,33 +194,37 @@ The default FASTFFS row is repeated here as the baseline for optional-feature co
 | Scratch bytes | 512 B | 512 B | 512 B | 512 B | 4,096 B |
 | Total configured buffers | 2,688 B | 2,688 B | 2,560 B | 640 B | 135,296 B |
 | Benchmark-side GC | none | debt, max 16 steps/op | none | none | debt, max 16 steps/op |
-| Baseline format | 40.3 ms | 40.6 ms | 42.2 ms | pending | pending |
-| Baseline mount after format | 492 us | 432 us | 492 us | pending | pending |
-| Write 192 x 64 B total throughput | 16 KiB/s | 16 KiB/s | 16 KiB/s | pending | pending |
-| Read 192 x 64 B open time/file | 101 us | 97 us | 101 us | pending | pending |
-| Write 16 x 50 KiB total throughput | 177 KiB/s | 177 KiB/s | 177 KiB/s | pending | pending |
-| Read 16 x 50 KiB after-open throughput | 4,637 KiB/s | 4,637 KiB/s | 4,637 KiB/s | pending | pending |
-| Warm list, 208 files | 15.2 ms | 15.2 ms | 15.2 ms | pending | pending |
-| Churn total time | 191.8 s | 105.5 s | 352.1 s | pending | pending |
-| Churn logical bytes written | 8,391,942 B | 8,391,942 B | 8,391,942 B | pending | pending |
-| Churn final live files | 123 | 123 | 123 | pending | pending |
-| Churn creates / replaces / deletes | 346 / 114 / 223 | 346 / 114 / 223 | 346 / 114 / 223 | pending | pending |
-| Churn write 10-20 KiB total throughput | 45 KiB/s | 180 KiB/s | 24 KiB/s | pending | pending |
-| Churn create 10-20 KiB throughput | 45 KiB/s | 181 KiB/s | 24 KiB/s | pending | pending |
-| Churn replace 10-20 KiB throughput | 47 KiB/s | 177 KiB/s | 25 KiB/s | pending | pending |
-| Churn write 20-60 KiB total throughput | 45 KiB/s | 184 KiB/s | 23 KiB/s | pending | pending |
-| Churn create 20-60 KiB throughput | 47 KiB/s | 184 KiB/s | 24 KiB/s | pending | pending |
-| Churn replace 20-60 KiB throughput | 39 KiB/s | 184 KiB/s | 20 KiB/s | pending | pending |
-| Churn write 350 KiB total throughput | 27 KiB/s | 185 KiB/s | 15 KiB/s | pending | pending |
-| Churn benchmark-side GC time | 0 s | 50.4 s | 0 s | pending | pending |
-| Churn GC erased sectors | inline only | 1,507 | inline only | pending | pending |
-| Churn final cold mount | 31.1 ms | 31.2 ms | 31.1 ms | pending | pending |
-| Churn final cold list | 9.06 ms | 9.06 ms | 9.08 ms | pending | pending |
-| Churn cold read 350 KiB after-open throughput | 4,598 KiB/s | 4,597 KiB/s | 4,597 KiB/s | pending | pending |
-| Churn cold exists, existing avg | 84 us | 84 us | 84 us | pending | pending |
-| Churn cold exists, missing avg | 548 us | 548 us | 549 us | pending | pending |
+| Baseline format | 40.3 ms | 40.6 ms | 42.2 ms | 46.2 ms | 40.3 ms |
+| Baseline mount after format | 492 us | 432 us | 492 us | 297 us | 7.13 ms |
+| Write 192 x 64 B total throughput | 16 KiB/s | 16 KiB/s | 16 KiB/s | 13 KiB/s | 6 KiB/s |
+| Read 192 x 64 B open time/file | 101 us | 97 us | 101 us | 1.12 ms | 77 us |
+| Write 16 x 50 KiB total throughput | 177 KiB/s | 177 KiB/s | 177 KiB/s | 172 KiB/s | 136 KiB/s |
+| Read 16 x 50 KiB after-open throughput | 4,637 KiB/s | 4,637 KiB/s | 4,637 KiB/s | 4,637 KiB/s | 4,644 KiB/s |
+| Warm list, 208 files | 15.2 ms | 15.2 ms | 15.2 ms | 61.1 ms | 22.5 ms |
+| Churn total time | 191.8 s | 105.5 s | 352.1 s | 526.2 s | 125.7 s |
+| Churn logical bytes written | 8,391,942 B | 8,391,942 B | 8,391,942 B | 8,391,942 B | 8,391,942 B |
+| Churn final live files | 123 | 123 | 123 | 123 | 123 |
+| Churn creates / replaces / deletes | 346 / 114 / 223 | 346 / 114 / 223 | 346 / 114 / 223 | 346 / 114 / 223 | 346 / 114 / 223 |
+| Churn write 10-20 KiB total throughput | 45 KiB/s | 180 KiB/s | 24 KiB/s | 16 KiB/s | 126 KiB/s |
+| Churn create 10-20 KiB throughput | 45 KiB/s | 181 KiB/s | 24 KiB/s | 16 KiB/s | 127 KiB/s |
+| Churn replace 10-20 KiB throughput | 47 KiB/s | 177 KiB/s | 25 KiB/s | 17 KiB/s | 123 KiB/s |
+| Churn write 20-60 KiB total throughput | 45 KiB/s | 184 KiB/s | 23 KiB/s | 16 KiB/s | 129 KiB/s |
+| Churn create 20-60 KiB throughput | 47 KiB/s | 184 KiB/s | 24 KiB/s | 16 KiB/s | 129 KiB/s |
+| Churn replace 20-60 KiB throughput | 39 KiB/s | 184 KiB/s | 20 KiB/s | 15 KiB/s | 130 KiB/s |
+| Churn write 350 KiB total throughput | 27 KiB/s | 185 KiB/s | 15 KiB/s | 7 KiB/s | 111 KiB/s |
+| Churn benchmark-side GC time | 0 s | 50.4 s | 0 s | 0 s | 50.9 s |
+| Churn GC erased sectors | inline only | 1,507 | inline only | inline only | 1,507 |
+| Churn final cold mount | 31.1 ms | 31.2 ms | 31.1 ms | 1.62 ms | 7.92 ms |
+| Churn final cold list | 9.06 ms | 9.06 ms | 9.08 ms | 174.9 ms | 16.4 ms |
+| Churn cold read 350 KiB after-open throughput | 4,598 KiB/s | 4,597 KiB/s | 4,597 KiB/s | 4,598 KiB/s | 4,602 KiB/s |
+| Churn cold exists, existing avg | 84 us | 84 us | 84 us | 1.86 ms | 76 us |
+| Churn cold exists, missing avg | 548 us | 548 us | 549 us | 6.73 ms | 31 us |
 
 The current same-sequence no-alloc run is slower than the default alloc-bitmap run under inline GC. That comparison is now 1K hash heads versus 1K hash heads, with the same `346 / 114 / 223` create/replace/delete mix. The previous “older” rows in this section were from 2K hash-head builds and an older churn model with no replacement writes, so they should not be used as evidence that no-alloc and alloc-bitmap should match. The about-106-second churn result still comes from benchmark-side debt GC, which keeps foreground writes fast while doing about 50 seconds of collection work between operations.
+
+The no-cache index variant confirms the 2 KiB hash-head table is buying more than existence checks. With alloc bitmap still enabled, removing index cache makes warm/final lists and churn writes substantially slower because metadata lookup falls back to flash scans.
+
+The full-index + alloc-bitmap + benchmark-side-GC + 4 KiB scratch variant is useful as a reference point, but it is not the default tradeoff. It spends 135,296 B on filesystem buffers, makes lookup/list operations much faster than no-cache, and keeps missing-exists near 31 us, but its churn write throughput is still below the 1K-hash debt-GC run and its total churn wall time is higher. A control run with the same full-index + alloc-bitmap + debt-GC settings and 512 B scratch produced the same shape: `126.2 s` churn total, `124 / 126 / 111 KiB/s` churn write throughput, `50.3 s` benchmark-side GC, and `8.08 ms` final cold mount. That points at the full slot-head index tradeoff rather than the 4 KiB scratch buffer.
 
 ## Design Implications for FASTFFS
 
