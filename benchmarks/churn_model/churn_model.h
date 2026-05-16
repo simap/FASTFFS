@@ -64,6 +64,9 @@ typedef struct {
     uint32_t replace_count;
     uint32_t delete_count;
     uint32_t forced_large_written;
+    uint32_t live_file_count;
+    uint32_t live_file_samples;
+    uint64_t live_file_sum;
 
     uint8_t pending_write;
     uint8_t optional_delete_checked;

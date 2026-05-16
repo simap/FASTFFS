@@ -96,6 +96,12 @@ static void fill_write_event(const bench_churn_model_t *model,
     }
 }
 
+static void sample_live_file_count(bench_churn_model_t *model)
+{
+    model->live_file_sum += model->live_file_count;
+    model->live_file_samples++;
+}
+
 void bench_churn_model_init(bench_churn_model_t *model,
                             uint32_t seed,
                             uint32_t target_live_bytes,
@@ -207,8 +213,12 @@ void bench_churn_model_apply(bench_churn_model_t *model,
         if (slot->live) {
             model->live_bytes -= slot->size;
             slot->live = 0;
+            if (model->live_file_count > 0) {
+                model->live_file_count--;
+            }
             model->delete_count++;
         }
+        sample_live_file_count(model);
         break;
 
     case BENCH_CHURN_EVENT_WRITE:
@@ -217,6 +227,7 @@ void bench_churn_model_apply(bench_churn_model_t *model,
             model->live_bytes -= slot->size;
             model->replace_count++;
         } else {
+            model->live_file_count++;
             model->create_count++;
         }
         slot->live = 1;
@@ -233,6 +244,7 @@ void bench_churn_model_apply(bench_churn_model_t *model,
         model->pending_write = 0;
         model->pending_slot = -1;
         model->slot_chosen = 0;
+        sample_live_file_count(model);
         break;
 
     default:

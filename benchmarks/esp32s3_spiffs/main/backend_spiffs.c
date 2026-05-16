@@ -20,7 +20,7 @@ esp_err_t bench_backend_mount(bool format_if_mount_failed)
     esp_vfs_spiffs_conf_t conf = {
         .base_path = VFS_BENCH_BASE_PATH,
         .partition_label = VFS_BENCH_PARTITION_LABEL,
-        .max_files = 512,
+        .max_files = 8,
         .format_if_mount_failed = format_if_mount_failed,
     };
     esp_err_t err = esp_vfs_spiffs_register(&conf);

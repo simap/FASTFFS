@@ -699,6 +699,16 @@ static void log_class_stats(const char *label, class_stats_t stats[SIZE_CLASS_CO
     }
 }
 
+static void record_class_stats(class_stats_t stats[SIZE_CLASS_COUNT],
+                               size_class_t cls, uint32_t size,
+                               int64_t elapsed_us)
+{
+    stats[cls].ops++;
+    stats[cls].files++;
+    stats[cls].bytes += size;
+    stats[cls].time_us += elapsed_us;
+}
+
 static void log_read_stats(const char *label, const read_stats_t *stats)
 {
     ESP_LOGI(TAG,
@@ -836,6 +846,8 @@ static void run_churn_cold_reads(void)
 static void run_churn_workload(void)
 {
     class_stats_t write_stats[SIZE_CLASS_COUNT] = {0};
+    class_stats_t create_write_stats[SIZE_CLASS_COUNT] = {0};
+    class_stats_t replace_write_stats[SIZE_CLASS_COUNT] = {0};
     uint32_t create_ops = 0;
     uint32_t replace_ops = 0;
     uint32_t delete_ops = 0;
@@ -933,13 +945,15 @@ static void run_churn_workload(void)
                  "%s", event.name);
         if (event.replacing) {
             replace_ops++;
+            record_class_stats(replace_write_stats, (size_class_t)event.cls,
+                               event.size, elapsed);
         } else {
             create_ops++;
+            record_class_stats(create_write_stats, (size_class_t)event.cls,
+                               event.size, elapsed);
         }
-        write_stats[event.cls].ops++;
-        write_stats[event.cls].files++;
-        write_stats[event.cls].bytes += event.size;
-        write_stats[event.cls].time_us += elapsed;
+        record_class_stats(write_stats, (size_class_t)event.cls, event.size,
+                           elapsed);
         op++;
 
         ESP_LOGI(TAG, "churn op=%lu name=%s class=%s size=%lu write_us=%lld write_kib_s=%lu total_written=%lu live=%lu",
@@ -972,7 +986,13 @@ static void run_churn_workload(void)
              (unsigned long)op, (unsigned long)model.total_written,
              (unsigned long)model.live_bytes,
              (unsigned long)create_ops, (unsigned long)replace_ops, (unsigned long)delete_ops);
+    ESP_LOGI(TAG, "churn live files avg=%lu samples=%lu",
+             (unsigned long)(model.live_file_samples ?
+                 model.live_file_sum / model.live_file_samples : 0),
+             (unsigned long)model.live_file_samples);
     log_class_stats("churn write", write_stats);
+    log_class_stats("churn create write", create_write_stats);
+    log_class_stats("churn replace write", replace_write_stats);
     log_delete_class_stats("churn delete", churn_delete_stats,
                            churn_delete_max_us);
     log_op_time_stats("churn delete latency", &churn_delete_latency);

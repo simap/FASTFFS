@@ -142,11 +142,11 @@ typedef struct {
 static const esp_partition_t *s_part;
 static struct fffs_backend s_backend;
 static struct fffs s_fs;
-#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
-static uint16_t *s_index_heads;
-#else
-static uint16_t s_index_heads[FASTFFS_INDEX_HEADS];
-#endif
+static uint32_t s_index_cache[
+    ((FFFS_INDEX_CACHE_BYTES(FASTFFS_INDEX_HEADS) + sizeof(uint32_t) - 1u) /
+     sizeof(uint32_t)) ?
+    ((FFFS_INDEX_CACHE_BYTES(FASTFFS_INDEX_HEADS) + sizeof(uint32_t) - 1u) /
+     sizeof(uint32_t)) : 1u];
 static uint8_t s_scratch[FASTFFS_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
 static uint32_t s_alloc_map[FASTFFS_ALLOC_MAP_WORDS];
@@ -279,7 +279,8 @@ static int setup_backend(void)
 static int mount_fastffs(void)
 {
     struct fffs_mount_options opts = {
-        .index_heads = s_index_heads,
+        .index_cache = s_index_cache,
+        .index_cache_size = sizeof(s_index_cache),
         .index_hash_table_size = FASTFFS_INDEX_HEADS,
         .scratch = s_scratch,
         .scratch_size = sizeof(s_scratch),
@@ -1051,6 +1052,10 @@ static void run_churn_workload(void)
              (unsigned long)op, (unsigned long)model.total_written,
              (unsigned long)model.live_bytes, (unsigned long)creates,
              (unsigned long)replaces, (unsigned long)deletes);
+    ESP_LOGI(TAG, "churn live files avg=%lu samples=%lu",
+             (unsigned long)(model.live_file_samples ?
+                 model.live_file_sum / model.live_file_samples : 0),
+             (unsigned long)model.live_file_samples);
     log_class_stats("churn write", write_stats);
     log_class_stats("churn create write", create_write_stats);
     log_class_stats("churn replace write", replace_write_stats);

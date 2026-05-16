@@ -91,3 +91,31 @@ Additional targets in the `Makefile` exercise cache variants, churn workloads,
 timing probes, and crash sweeps.
 
 See `design.md` for the deeper design notes.
+
+## Benchmark Snapshot
+
+Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
+
+FASTFFS inline-GC performs no scheduled GC steps during the workload; GC runs on demand inside foreground mutation operations when needed. 
+FASTFFS scheduled debt-GC uses the same filesystem configuration, but during churn runs measured GC steps between foreground operations; that GC time is included in total churn runtime. This rougly simulates spending some idle cycles on GC opportunistically.
+
+The churn benchmark writes about 8 MiB of creates/replaces/deletes while keeping about 2.4 MiB live, measuring mutation throughput during the run and final 123-file read/list behavior.
+
+| Metric | FASTFFS inline-GC | FASTFFS scheduled debt-GC | LittleFS | JesFS | SPIFFS |
+|---|---:|---:|---:|---:|---:|
+| FS RAM config | 2.8 KiB + 360 B/open | 2.8 KiB + 360 B/open | 1.4 KiB + 636 B/open | 164 B + 28 B/open | 532 B + 324 B/open slot |
+| Tiny-file storage, 192 x 64 B | 4,138 B/file | 4,138 B/file | 554 B/file | 4,096 B/file | 502 B/file |
+| Write 192 x 64 B | 20 KiB/s | 20 KiB/s | 0.6 KiB/s | 2 KiB/s | 0.2 KiB/s |
+| Read 192 x 64 B total | 279 KiB/s | 279 KiB/s | 3 KiB/s | 4 KiB/s | 68.8 KiB/s |
+| Read 192 x 64 B open/file | 78 us | 78 us | 9.61 ms | 12.6 ms | 509 us |
+| Write 16 x 50 KiB | 179 KiB/s | 177 KiB/s | 92 KiB/s | 73 KiB/s | 65.8 KiB/s |
+| Read 16 x 50 KiB total | 4,548 KiB/s | 4,547 KiB/s | 2,384 KiB/s | 1,237 KiB/s | 383 KiB/s |
+| List 208 files | 15.3 ms | 15.3 ms | 277 ms | 78.8 ms | 133 ms |
+| Existing-name probe | 76 us | 76 us | 17.6 ms | 12.2 ms | 51.1 ms |
+| Missing-name probe | 63 us | 63 us | 15.3 ms | 27.2 ms | 131 ms |
+| Churn total time | 153.4 s | 105.7 s | 173.4 s | 164.4 s | 826 s |
+| Churn 10-20 KiB write | 57 KiB/s | 178 KiB/s | 51 KiB/s | 52 KiB/s | 10.6 KiB/s |
+| Churn 20-60 KiB write | 57 KiB/s | 181 KiB/s | 60 KiB/s | 57 KiB/s | 11.5 KiB/s |
+| Churn 350 KiB write | 36 KiB/s | 183 KiB/s | 79 KiB/s | 48 KiB/s | 6.5 KiB/s |
+| Churn final cold list, 123 files | 9.15 ms | 9.14 ms | 400 ms | 74.3 ms | 126 ms |
+| Churn cold read 350 KiB total | 4,564 KiB/s | 4,565 KiB/s | 2,431 KiB/s | 2,996 KiB/s | 454 KiB/s |
