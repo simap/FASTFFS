@@ -17,9 +17,10 @@
  * directory iteration, GC liveness, and index compaction scan the on-flash
  * index as needed.
  *
- * FFFS_INDEX_CACHE_HASH_HEADS stores only head sectors in a caller-provided
- * power-of-two hash table. The resolved slot key is recovered from root
- * metadata when hash collisions occur.
+ * FFFS_INDEX_CACHE_HASH_HEADS stores resolved slot plus head-sector entries in
+ * a caller-provided power-of-two hash table. It uses twice the RAM of a
+ * head-only table with the same bucket count, but bucket mechanics do not need
+ * root metadata reads.
  *
  * FFFS_INDEX_CACHE_FULL_SLOT_HEADS stores one head sector per possible
  * resolved slot. It uses 128 KiB but provides direct slot lookup.
@@ -73,6 +74,15 @@
 
 #ifndef FFFS_LAZY_DELETE_TOMBSTONES
 #define FFFS_LAZY_DELETE_TOMBSTONES 0
+#endif
+
+/* Bytes of caller-owned mount cache storage required for this cache mode. */
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
+#define FFFS_INDEX_CACHE_BYTES(count) 0
+#elif FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_HASH_HEADS
+#define FFFS_INDEX_CACHE_BYTES(count) ((count) * 4u)
+#else
+#define FFFS_INDEX_CACHE_BYTES(count) ((count) * 2u)
 #endif
 
 #endif

@@ -14,6 +14,11 @@
 #else
 #define INDEX_HASH_TABLE_SIZE FFFS_INDEX_HASH_TABLE_SIZE
 #endif
+#define INDEX_CACHE_WORDS \
+    (((FFFS_INDEX_CACHE_BYTES(INDEX_HASH_TABLE_SIZE) + sizeof(uint32_t) - 1u) / \
+      sizeof(uint32_t)) ? \
+     ((FFFS_INDEX_CACHE_BYTES(INDEX_HASH_TABLE_SIZE) + sizeof(uint32_t) - 1u) / \
+      sizeof(uint32_t)) : 1u)
 
 #ifndef FFFS_HOST_CHURN_FLASH_SIZE
 #define FFFS_HOST_CHURN_FLASH_SIZE (2u * 1024u * 1024u)
@@ -74,8 +79,8 @@ struct class_stats {
     uint64_t flash_blank_checks;
 };
 
-static uint16_t index_heads[INDEX_HASH_TABLE_SIZE];
-static uint16_t remount_heads[INDEX_HASH_TABLE_SIZE];
+static uint32_t index_cache[INDEX_CACHE_WORDS];
+static uint32_t remount_cache[INDEX_CACHE_WORDS];
 static uint8_t scratch[FFFS_HOST_CHURN_SCRATCH_SIZE];
 static uint8_t *io_buffer;
 
@@ -92,16 +97,17 @@ static const char *cache_mode_name(void) {
 }
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
-        uint16_t *heads) {
+        uint32_t *cache) {
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     static uint32_t alloc_map[2048];
 #endif
-    memset(heads, 0, sizeof(uint16_t) * INDEX_HASH_TABLE_SIZE);
+    memset(cache, 0, sizeof(cache[0]) * INDEX_CACHE_WORDS);
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     memset(alloc_map, 0, sizeof(alloc_map));
 #endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
-        .index_heads = heads,
+        .index_cache = cache,
+        .index_cache_size = sizeof(cache[0]) * INDEX_CACHE_WORDS,
         .index_hash_table_size = INDEX_HASH_TABLE_SIZE,
         .scratch = scratch,
         .scratch_size = sizeof(scratch),
@@ -378,7 +384,7 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
         ffsv_flash_destroy(flash);
         return 1;
     }
-    err = mount_fs(&fs, &backend, index_heads);
+    err = mount_fs(&fs, &backend, index_cache);
     if (err != FFFS_OK) {
         fprintf(stderr, "mount failed: %s\n", fffs_status_name(err));
         dump_final_image(flash, profile_name);
@@ -508,7 +514,7 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
 
     uint64_t mount_before_seq = ffsv_flash_next_sequence(flash);
     uint64_t mount_before = ffsv_flash_time_ns(flash);
-    err = mount_fs(&remounted, &backend, remount_heads);
+    err = mount_fs(&remounted, &backend, remount_cache);
     uint64_t mount_after = ffsv_flash_time_ns(flash);
     uint64_t mount_after_seq = ffsv_flash_next_sequence(flash);
     if (err != FFFS_OK) {

@@ -14,6 +14,7 @@
 #else
 #define SWEEP_INDEX_HEADS FFFS_INDEX_HASH_TABLE_SIZE
 #endif
+#define SWEEP_INDEX_CACHE_SIZE FFFS_INDEX_CACHE_BYTES(SWEEP_INDEX_HEADS)
 
 enum {
     SWEEP_SECTOR_SIZE = 256,
@@ -49,7 +50,7 @@ struct sweep_stats {
 };
 
 struct mount_storage {
-    uint16_t *index_heads;
+    void *index_cache;
     uint8_t scratch[SWEEP_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     uint32_t alloc_map[256];
@@ -90,20 +91,21 @@ static int new_flash(struct ffsv_flash **flash, struct fffs_backend *backend) {
 
 static int mount_storage_init(struct mount_storage *storage) {
     memset(storage, 0, sizeof(*storage));
-    storage->index_heads = calloc(SWEEP_INDEX_HEADS,
-            sizeof(*storage->index_heads));
-    return storage->index_heads ? FFFS_OK : FFFS_ERR_NOMEM;
+    size_t cache_size = SWEEP_INDEX_CACHE_SIZE ? SWEEP_INDEX_CACHE_SIZE : 1u;
+    storage->index_cache = calloc(1, cache_size);
+    return storage->index_cache ? FFFS_OK : FFFS_ERR_NOMEM;
 }
 
 static void mount_storage_destroy(struct mount_storage *storage) {
-    free(storage->index_heads);
+    free(storage->index_cache);
     *storage = (struct mount_storage){0};
 }
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         struct mount_storage *storage) {
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
-        .index_heads = storage->index_heads,
+        .index_cache = storage->index_cache,
+        .index_cache_size = SWEEP_INDEX_CACHE_SIZE,
         .index_hash_table_size = SWEEP_INDEX_HEADS,
         .scratch = storage->scratch,
         .scratch_size = sizeof(storage->scratch),

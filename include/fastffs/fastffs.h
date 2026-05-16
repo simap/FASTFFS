@@ -86,7 +86,9 @@ struct fffs_format_options {
 };
 
 struct fffs_mount_options {
-    uint16_t *index_heads;
+    /* Caller-owned namespace cache storage. Size with FFFS_INDEX_CACHE_BYTES. */
+    void *index_cache;
+    size_t index_cache_size;
     size_t index_hash_table_size;
     void *scratch;
     size_t scratch_size;
@@ -99,6 +101,7 @@ struct fffs_mount_options {
 struct fffs {
     struct fffs_backend backend;
     struct fffs_file *inflight_writers;
+    void *index_cache;
     uint16_t *index_heads;
     size_t index_hash_table_size;
     uint8_t *scratch;

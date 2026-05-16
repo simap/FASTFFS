@@ -16,6 +16,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct fffs_index_bucket {
+    uint16_t slot;
+    uint16_t head;
+};
+
 #define FFFS_INDEX_MAGIC "FFFS"
 #define FFFS_INDEX_VERSION 1
 #define FFFS_HEADER_SIZE 8
@@ -137,6 +142,7 @@ int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head);
 int fffs_index_remove(struct fffs *fs, uint16_t slot);
 int fffs_index_set(struct fffs *fs, uint16_t slot, uint16_t head);
 bool fffs_index_cache_config_valid(size_t count);
+size_t fffs_index_cache_required_size(size_t count);
 
 /*
  * Resolve a filename through the bounded hash/probe namespace for public name

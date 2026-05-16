@@ -202,6 +202,11 @@ bool fffs_index_cache_config_valid(size_t count) {
     return true;
 }
 
+size_t fffs_index_cache_required_size(size_t count) {
+    (void)count;
+    return 0;
+}
+
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head) {
     (void)fs;
     (void)slot;

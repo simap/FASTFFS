@@ -17,6 +17,11 @@ bool fffs_index_cache_config_valid(size_t count) {
     return count >= FFFS_SLOT_COUNT;
 }
 
+size_t fffs_index_cache_required_size(size_t count) {
+    (void)count;
+    return sizeof(uint16_t) * FFFS_SLOT_COUNT;
+}
+
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head) {
     fs->index_heads[slot] = head;
     return FFFS_OK;

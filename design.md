@@ -80,7 +80,11 @@ The probe distance is bounded by a configured maximum, defaulting to 50. If no f
 [hash16(filename), hash16(filename) + max_probe_distance]
 ```
 
-If no occupied slot exists in that range, the file cannot exist. If occupied slots do exist in that range, the implementation reads the pointed root metadata records and checks the filename. With an in-RAM occupied-slot map, missing lookups do not need to read every possible slot in the window, only occupied candidate slots.
+If no occupied slot exists in that range, the file cannot exist. If occupied
+slots do exist in that range, the implementation reads the pointed root
+metadata records and checks the filename. With a replayed in-RAM index cache,
+missing lookups do not need to read every possible slot in the window, only
+occupied candidate slots.
 
 Example:
 
@@ -228,16 +232,39 @@ This would allow multiple index changes to be atomic, and CRC protected. Similar
 It also allows for a CRC-backed index update even for single 
 records, though would consume 4 records worth of index space.
 
-## Startup
+## Startup & Mount
+
+The phases of startup are:
+
+1. Index sector discovery
+2. Index log replay
+3. Interrupted index maintenance recovery
+4. Allocator/GC hint initialization
+5. Optional background scanning
+
+The later phases are covered in the index rotation, allocation, and reclaim
+sections. This section focuses on index sector discovery and index replay.
+
+### Index Log Replay
 
 On startup:
 
-1. If not given in mount data, discover the sector size by scanning for valid index headers at plausible `256 << sector_shift` boundaries, so mount can recover even when sector `0` is erased.
-2. Select valid, non-tombstoned index sectors whose headers agree on magic, version, index count, and sector shift.
-3. Replay the index into RAM.
-4. Later entries replace earlier entries.
-5. Delete records remove earlier live entries.
-6. Ambiguous/colliding slots can be resolved by reading the pointed file metadata and verifying filenames.
+1. Replay the index into RAM.
+2. Later entries replace earlier entries.
+3. Delete records remove earlier live entries.
+
+Replay reads index records from the oldest selected sector through the active
+sector. It stops at erased index-record space in each sector and remembers the
+next append offset in the active sector. Clobbered all-zero records and live
+heads outside the data-sector range are rejected.
+
+Index replay does not read file metadata. After replay reaches the end of the
+selected index sequence, the in-memory index is the authoritative view of which
+resolved slots exist. If a later operation follows an authoritative
+`(slot, head)` mapping and finds missing, invalid, or wrong-slot root metadata,
+corruption has occurred.
+
+### Index Sector Discovery
 
 Mount discovery is bounded to plausible index-sector header locations. When the sector size is not supplied by mount options, the
 implementation probes candidate sector sizes in this order:
@@ -288,12 +315,14 @@ validation fail. If a new format is interrupted before the fresh header is
 valid, mount may still discover an older larger-format header; that is treated
 as a failed format rather than a normal recovery path.
 
-Cold start cost is bounded by reading the compact index plus any needed file-header probes.
+Cold start cost is bounded by reading the compact index.
 
 Startup caching is configurable:
 
 - Low-RAM mode can scan the index and read root metadata only when an operation needs it.
-- Default mode caches the replayed index and enough occupied-slot state to make missing lookups cheap.
+- Default mode caches the replayed index in a hash table of
+  `(slot, head)` entries, which makes missing lookups cheap without metadata
+  reads.
 - Larger-MCU mode can cache live root metadata and/or extent lists to make `stat`, `ls`, open, and seek mostly RAM operations.
 
 The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
@@ -705,82 +734,162 @@ Useful stats for this mode:
 - maximum probe distance observed
 - probe-limit failures
 - metadata probes per lookup/open
-- candidate slots skipped by the RAM occupied-slot filter
+- candidate slots skipped by the RAM index cache
 
 Duplicate raw hashes are not the baseline because they change delete and replay semantics: the index key is no longer unique without consulting metadata.
 
-## Index-Only Cache Hash Table
+## Replayed Index Cache
 
-The default replayed index cache can be a compact hash table that stores only
-head sectors. It intentionally does not store resolved slots beside each head.
-Slot identity is provided by the on-flash index record during replay and by
-root metadata only when hash-cache collisions require disambiguation.
+The replayed index cache is an in-memory accelerator for the authoritative
+append-only index journal. It is not a second source of truth. Mount replay
+applies index records in journal order:
 
-The compact hash table's worst-case probe work is bounded by the caller-provided
-hash table size. There is no separate probe limit in the baseline; deployments
-should size the table for their expected live-file count, RAM budget, and
-acceptable collision rate.
+- a put record stores or replaces the current `slot -> head` mapping,
+- a delete record removes the current mapping for that slot,
+- later records win over earlier records,
+- replay does not read file metadata to prove that an index record is valid.
 
-Mount replay processes one index record at a time in journal order. It does not
-look ahead through the index journal to skip obsolete records, and it does not
-require obsolete metadata to remain valid. A put record can be inserted into
-an empty hash-cache bucket as a head-only entry with no metadata read. Metadata
-reads are only needed when the compact hash cache encounters an occupied
-bucket/probe path and must classify the existing cached head. Incoming put
-records should be trusted as journal-ordered updates. If the occupied bucket's
-metadata is missing, tombstoned, corrupt, or resolves to a slot that cannot
-legally occupy that bucket under the current linear-probe cluster, that bucket
-is stale and may be evicted by the mutating replay/insert/remove path. Normal
-read-side lookup does not repair or evict hash-cache entries; if a candidate
-head cannot be verified, lookup skips that occupied bucket and continues
-probing. A later index record for the same slot naturally overwrites or deletes
-the earlier cached head as replay advances.
+After replay reaches the end of the selected index sequence, the in-memory
+cache represents the authoritative view of which resolved slots exist. If a
+later operation reads root metadata through an authoritative `(slot, head)`
+mapping and the metadata is missing, invalid, or belongs to a different slot,
+corruption has occurred.
 
-The index replay log can be older than the sectors they point to. It's possible for an index entry to point to an invalid head if it was subsequently deleted, and the sector erased and reused.
+### Hash Table Cache
 
-Empty-bucket put replay should not read metadata. On insert conflict, the hash
-table must classify the occupied bucket's metadata to determine whether the
-bucket holds the same resolved slot or a collision. That same classification
-should also identify stale heads. If the occupied metadata slot matches the
-incoming slot, the incoming head replaces it. This is the normal copy-on-write
-overwrite case: the old metadata may still be valid but is superseded by the
-newer index record.
-
-During replay of a delete record, the remove code path must keep probing for the
-deleted resolved slot until it finds a verified matching head or reaches the
-hash-table probe bound. If a probed bucket's head reads as valid metadata for a
-different resolved slot, the implementation must decide whether that different
-slot can legally occupy that bucket under the current linear-probe cluster. If
-not, the bucket is stale. The delete probe may discover multiple stale buckets.
-
-Stale buckets can be marked with `head = 1` during a bounded cluster scan to
-remember that they are invalid without creating empty-bucket gaps; `head = 1`
-is an in-RAM hash-cache placeholder, not an on-flash index record. After the
-scan finishes, the affected linear-probe cluster should be repaired once and
-remaining stale markers cleared. Repair must restore the invariant that normal
-lookup can stop at the first empty/stale bucket; lookup should not need to scan
-past holes. This does not prove that a stale bucket originally belonged to the
-deleted slot; it only proves that the current bucket contents are not valid
-cache entries and must not remain in the head-only table.
-
-During repair, an entry may move backward into a stale bucket only if that stale
-bucket is inside the entry's legal probe interval:
+The default replayed index cache is an open-addressed hash table of
+`(slot, head)` entries. The resolved slot is the hash-table key and determines
+the entry's home bucket:
 
 ```text
-distance(home(slot), stale_bucket) < distance(home(slot), current_bucket)
+home = slot & (bucket_count - 1)
 ```
 
-This prevents moving an entry before its natural bucket while still compacting
-entries downward into legal holes.
+`slot == 0` is reserved as the empty-bucket marker, matching the resolved-slot
+rules that avoid `0x0000`. The table size is a caller-provided power of two.
+There is no separate cache-level probe limit; deployments should size the table
+for their expected live-file count, RAM budget, and acceptable collision rate.
+Every live file needs one hash-cache bucket, so performance degrades as the
+table fills, but remains an in-memory search.
 
-This keeps mount replay mostly index-only: put records can still be inserted
-speculatively into empty buckets without reading metadata. Metadata reads are
-paid by delete/remove, collision, and stale-cluster repair paths, not by every
-index record.
+Hash-cache insertion and deletion are purely RAM/index operations:
 
-This index hash table also limits the maximum number of files, since every file
-must be stored in the hashtable. Performance degrades as the table fills.
+- insert probes by stored slot and writes `(slot, head)` into an empty or
+  matching bucket,
+- overwrite replaces the head for the same slot,
+- delete removes the matching slot entry,
+- cluster repair moves entries according to their stored slots and does not
+  consult metadata.
 
+Because the slot key is stored in RAM, hash-cache replay, bucket insertion,
+bucket deletion, lookup, and repair do not need root metadata reads. This gives
+the hash table cache the same flash behavior as a full slot-head table for
+slot lookup paths, while using `4 * bucket_count` bytes instead of a fixed
+128 KiB full-slot table.
+
+The cache only answers slot-to-head questions. Filename-to-slot probing is the
+resolved-slot namespace rule described in the global index section. During
+lookup by name, the cache is used to test whether each candidate resolved slot
+is occupied and, when occupied, to return the head sector for that slot. Name
+comparison happens only after reading the root metadata for that exact
+`(slot, head)`.
+
+This creates two layered hash tables with different meanings. The global
+namespace hash/probe rule assigns a sticky resolved slot to a file and persists
+that slot in the index log. The in-memory index-cache hash table only stores
+current `(slot, head)` mappings for fast lookup. Cache buckets may move during
+collision handling or cluster repair, but the resolved slot key does not change.
+
+Example:
+
+```text
+Global index (persistent) resolved slot allocation            
+                                                              
+  hash("cfg/net") -> base slot abcd                           
+                         │                                    
+                         ▼                                    
+        ◄───────────probe window─────►                        
+        abcd    abce      abcf  ...                           
+         ▼       ▼         ▼                                  
+    occupied  occupied   free                                 
+                           │                                  
+                           ▼                                  
+                    index log stores:                         
+                    (abcf -> head 42)                         
+                                                              
+RAM index cache:                                              
+  bucket count = 8                                            
+  home bucket = abcf & 7                                      
+                                                              
+              home bucket occupied by another cache entry     
+              │                                               
+              │      abcf,42 was bumped to the adjacent bucket
+              │      │                                        
+     bucket   ▼      ▼                                        
+       0      1      2      3      4      5      6      7     
+     +------+------+------+------+------+------+------+------+
+slot:|      | b015 | abcf |      |      |      |      |      |
+head:|      |  17  |  42  |      |      |      |      |      |
+     +------+------+------+------+------+------+------+------+
+```
+
+Directory listing iterates cache entries and reads the root metadata
+for each entry's exact `(slot, head)`. It must not treat a head sector as having
+one canonical file identity, because one sector may contain root metadata for
+multiple files.
+
+### Full Slot-Head Cache
+
+The full slot-head cache stores one 16-bit head value for every resolved slot.
+It uses 128 KiB with the v1 16-bit slot namespace. Slot lookup is direct:
+
+```text
+head = heads[slot]
+```
+
+This mode avoids hash-cache collision behavior entirely and can be more
+RAM-efficient than the hash table cache for very large live-file counts:
+
+```text
+hash cache bytes = 4 * bucket_count
+full slot cache bytes = 2 * 65536 = 128 KiB
+```
+
+The hash table cache is more RAM-efficient below 32K buckets. At 32K or more
+entries, the full slot-head table uses the same or less RAM and provides direct
+slot addressing without conflicts. Both modes are otherwise equivalent at the
+flash-operation level: root metadata is still read only when a caller needs
+names, stats, root file data, or consistency validation.
+
+### No-Cache Mode
+
+The lowest-RAM mode keeps no replayed namespace cache. Slot lookup, filename
+resolution, directory iteration, GC liveness, and index compaction scan the
+on-flash index as needed. It minimizes RAM, but may read one or more index 
+sectors from flash before they can identify the current head for a slot (or
+prove that it doesn't exist).
+
+### Head-Only Hash Table Cache Concept (Tabled)
+
+A smaller hash table cache can store only head sectors and recover the slot key
+from root metadata when collisions or deletes need disambiguation. This saves
+two bytes per bucket compared to `(slot, head)`, but it makes bucket mechanics
+depend on sector-local metadata.
+
+That design is problematic once a head sector can contain root metadata for
+multiple files. The head sector is no longer a unique file key, so the cache
+cannot reliably answer "which slot does this bucket represent?" by reading a
+single sector-level metadata identity. It also risks treating metadata
+disagreement as a cache-repair signal even though the global index is the
+authoritative existence state. For multi-metadata sectors, the baseline hash
+table cache stores the slot key explicitly.
+
+This may still be useful if small file storage compactness was less of a 
+concern. If configured so that no sector is shared, a head-only hash table
+can have twice as many buckets as the (slot,head) hash table for the same RAM.
+
+This still needs to read file metadata in various circumstances, but is much
+faster than no-cache full index scans.
 
 ## Configuration Options
 

@@ -44,11 +44,20 @@
 #define TEST_ALLOC_MAP_WORDS 256
 #define TEST_SCRATCH_SIZE 4096
 #define TEST_INDEX_HEADER_SIZE 8
+#define TEST_INDEX_CACHE_WORDS \
+    (((FFFS_INDEX_CACHE_BYTES(TEST_INDEX_HASH_TABLE_SIZE) + \
+       sizeof(uint32_t) - 1u) / sizeof(uint32_t)) ? \
+     ((FFFS_INDEX_CACHE_BYTES(TEST_INDEX_HASH_TABLE_SIZE) + \
+       sizeof(uint32_t) - 1u) / sizeof(uint32_t)) : 1u)
+
+typedef uint32_t test_index_cache_t;
 
 uint16_t fffs_hash16(const char *name);
 int fffs_index_compact_oldest(struct fffs *fs);
 int fffs_rotate_index(struct fffs *fs);
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
+int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
+        uint16_t *head, bool *found);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -191,13 +200,14 @@ static int new_backend_with_sector_size(struct ffsv_flash **flash,
 }
 
 static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
-        uint16_t *index_heads) {
+        test_index_cache_t *index_cache) {
     static uint8_t scratch[TEST_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     static uint32_t alloc_map[TEST_ALLOC_MAP_WORDS];
 #endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
-        .index_heads = index_heads,
+        .index_cache = index_cache,
+        .index_cache_size = sizeof(index_cache[0]) * TEST_INDEX_CACHE_WORDS,
         .index_hash_table_size =
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
             TEST_INDEX_HASH_TABLE_SIZE,
@@ -222,7 +232,7 @@ static int test_mount_requires_scratch(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t tiny_scratch[FFFS_MIN_SCRATCH_SIZE - 1u];
 
     ASSERT_OK(new_backend(&flash, &backend));
@@ -230,12 +240,14 @@ static int test_mount_requires_scratch(void) {
 
     ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
                 &(struct fffs_mount_options){
-                    .index_heads = fs_index_heads,
+                    .index_cache = fs_index_heads,
+                    .index_cache_size = sizeof(fs_index_heads),
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
                 }));
     ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
                 &(struct fffs_mount_options){
-                    .index_heads = fs_index_heads,
+                    .index_cache = fs_index_heads,
+                    .index_cache_size = sizeof(fs_index_heads),
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
                     .scratch = tiny_scratch,
                     .scratch_size = sizeof(tiny_scratch),
@@ -300,8 +312,8 @@ static int test_format_mount_write_read_remount(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t alpha[] = {1, 2, 3, 4, 5};
     const uint8_t beta[] = {0xaa, 0xbb, 0xcc};
     uint8_t out[16] = {0};
@@ -356,8 +368,8 @@ static int test_overwrite_delete_and_remount(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *old_value = "old";
     const char *new_value = "new value";
     uint8_t out[32] = {0};
@@ -405,7 +417,7 @@ static int test_reserved_hash_slots_are_skipped(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t zero_hash[] = {0x11};
     const uint8_t erased_hash[] = {0x22};
     uint8_t out[4] = {0};
@@ -434,8 +446,8 @@ static int test_replay_skips_reused_stale_index_heads(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *old_name = "stale-a";
     const char *new_name = "fresh-b";
     const uint8_t old_data[] = "old";
@@ -476,7 +488,7 @@ static int test_gc_reclaims_unindexed_orphan_sector(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t footer[12] = {
         0x7b, 0x00, 0x00, 0x00,
         0x01, 0x7f, 0xff, 0xff,
@@ -520,7 +532,7 @@ static int test_gc_erases_dirty_sector_with_erased_footer(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[16];
     enum fffs_gc_action action;
 
@@ -550,7 +562,7 @@ static int test_gc_skips_open_writer_dirty_root_sector(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -585,7 +597,7 @@ static int test_gc_skips_multiple_open_writer_dirty_sectors(void) {
     struct fffs fs;
     struct fffs_file first;
     struct fffs_file second;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -628,7 +640,7 @@ static int test_gc_skips_open_writer_root_and_current_extents(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -672,7 +684,7 @@ static int test_gc_skips_open_writer_middle_extent(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -716,7 +728,7 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -770,8 +782,8 @@ static int test_gc_reclaims_failed_open_writer_after_remount(void) {
     struct fffs fs;
     struct fffs remounted;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
     enum fffs_gc_action action;
     size_t written = 0;
@@ -816,8 +828,8 @@ static int test_gc_reclaims_obsolete_index_history(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *old_value = "old";
     const char *new_value = "new";
     struct fffs_stat st;
@@ -855,7 +867,7 @@ static int test_alloc_failure_runs_gc_to_free_sector(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t value[] = {1, 2, 3, 4};
     const uint8_t replacement[] = {5, 6, 7, 8};
     struct fffs_stat st;
@@ -889,7 +901,7 @@ static int test_alloc_reservation_skips_other_open_writer(void) {
     struct fffs fs;
     struct fffs_file first;
     struct fffs_file second;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -921,7 +933,7 @@ static int test_alloc_reservation_released_on_close(void) {
     struct fffs fs;
     struct fffs_file first;
     struct fffs_file second;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -952,7 +964,7 @@ static int test_alloc_uses_owner_reservation_for_next_extent(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
     size_t written = 0;
 
@@ -986,7 +998,7 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs_file file;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
     uint8_t dirty[FFFS_MAX_PROGRAM_GRANULE];
     size_t written = 0;
@@ -1026,7 +1038,7 @@ static int test_alloc_trims_other_reservations_under_pressure(void) {
     struct fffs fs;
     struct fffs_file first;
     struct fffs_file second;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 7));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1060,7 +1072,7 @@ static int test_alloc_revokes_other_reservation_under_pressure(void) {
     struct fffs_file second;
     struct fffs_file third;
     struct fffs_file fourth;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 6));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1096,7 +1108,7 @@ static int test_gc_pressure_does_not_free_reserved_sector(void) {
     struct fffs fs;
     struct fffs_file first;
     struct fffs_file second;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint16_t erased_sector = 0;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
@@ -1132,7 +1144,7 @@ static int test_full_alloc_map_mount_requires_storage(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t scratch[TEST_SCRATCH_SIZE];
     uint32_t tiny_map[1];
     uint32_t ok_map[TEST_ALLOC_MAP_WORDS];
@@ -1142,14 +1154,16 @@ static int test_full_alloc_map_mount_requires_storage(void) {
 
     ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
                 &(struct fffs_mount_options){
-                    .index_heads = fs_index_heads,
+                    .index_cache = fs_index_heads,
+                    .index_cache_size = sizeof(fs_index_heads),
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
                     .scratch = scratch,
                     .scratch_size = sizeof(scratch),
                 }));
     ASSERT_EQ_INT(FFFS_ERR_INVALID, fffs_mount(&fs, &backend,
                 &(struct fffs_mount_options){
-                    .index_heads = fs_index_heads,
+                    .index_cache = fs_index_heads,
+                    .index_cache_size = sizeof(fs_index_heads),
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
                     .scratch = scratch,
                     .scratch_size = sizeof(scratch),
@@ -1158,7 +1172,8 @@ static int test_full_alloc_map_mount_requires_storage(void) {
                         sizeof(tiny_map[0]),
                 }));
     ASSERT_OK(fffs_mount(&fs, &backend, &(struct fffs_mount_options){
-                    .index_heads = fs_index_heads,
+                    .index_cache = fs_index_heads,
+                    .index_cache_size = sizeof(fs_index_heads),
                     .index_hash_table_size = TEST_INDEX_HASH_TABLE_SIZE,
                     .scratch = scratch,
                     .scratch_size = sizeof(scratch),
@@ -1179,7 +1194,7 @@ static int test_streaming_write_forces_gc_without_reclaiming_self(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t value[] = {1, 2, 3, 4};
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE * 4];
     static uint8_t readback[FFFS_DEFAULT_SECTOR_SIZE * 4];
@@ -1243,7 +1258,7 @@ static int test_streaming_write_fails_after_gc_exhausts_reclaimable_space(void) 
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t value[] = {1, 2, 3, 4};
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE * 6];
     static uint8_t readback[FFFS_DEFAULT_SECTOR_SIZE * 6];
@@ -1310,18 +1325,18 @@ static int test_replay_evicts_stale_hash_collision_head(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *stale_name = "collision-38";
     const char *live_name = "collision-42";
     const char *stale_value = "stale";
     const char *live_value = "live";
     uint16_t stale_slot = fffs_hash16(stale_name);
-    size_t stale_bucket = stale_slot & (TEST_INDEX_HASH_TABLE_SIZE - 1);
     uint8_t tombstone[4] = {0x01, 0x3f, 0xff, 0xff};
     uint8_t out[16] = {0};
     size_t out_size = 0;
     uint16_t stale_head;
+    bool found;
 
     uint16_t live_slot = fffs_hash16(live_name);
     ASSERT_TRUE((stale_slot & (TEST_INDEX_HASH_TABLE_SIZE - 1)) ==
@@ -1332,7 +1347,8 @@ static int test_replay_evicts_stale_hash_collision_head(void) {
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_OK(write_chunks(&fs, stale_name, (const uint8_t *)stale_value,
                 strlen(stale_value)));
-    stale_head = fs.index_heads[stale_bucket];
+    ASSERT_OK(fffs_index_head_for_slot(&fs, stale_slot, &stale_head, &found));
+    ASSERT_TRUE(found);
     ASSERT_TRUE(stale_head >= fs.index_sectors);
     ASSERT_OK(write_chunks(&fs, live_name, (const uint8_t *)live_value,
                 strlen(live_value)));
@@ -1358,8 +1374,8 @@ static int test_mount_uses_orphan_lookahead_for_serial_hint(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *value = "committed";
     uint8_t orphan_footer[12] = {
         0x2c, 0x01, 0x00, 0x00,
@@ -1394,8 +1410,8 @@ static int test_mount_discovers_sector_size(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t data[] = {0x31, 0x32, 0x33};
     uint8_t out[8] = {0};
     size_t out_size = 0;
@@ -1429,8 +1445,8 @@ static int test_mount_discovers_small_sector_size(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t data[] = {0x41, 0x42, 0x43};
     uint8_t out[8] = {0};
     size_t out_size = 0;
@@ -1463,7 +1479,7 @@ static int test_format_tiny_sector_wins_over_old_large_remnant(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 8192 * 8));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
@@ -1491,7 +1507,7 @@ static int test_format_erases_expanded_index_area(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 16));
     ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
@@ -1525,8 +1541,8 @@ static int test_index_rotates_when_active_sector_fills(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t out[4] = {0};
     size_t out_size = 0;
     const size_t writes = 1030;
@@ -1566,8 +1582,8 @@ static int test_index_rotation_commits_header_before_tombstone(void) {
     struct fffs fs;
     struct fffs remounted;
     struct ffsv_flash_snapshot snapshot;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     char name[16];
     uint8_t data[1];
 
@@ -1652,7 +1668,7 @@ static int test_mount_finishes_interrupted_index_compaction(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct ffsv_flash_snapshot before_rotate;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     char name[16];
     uint8_t data[1];
 
@@ -1683,7 +1699,7 @@ static int test_mount_finishes_interrupted_index_compaction(void) {
         struct fffs attempt;
         struct ffsv_flash *attempt_flash = NULL;
         struct fffs_backend attempt_backend;
-        static uint16_t attempt_heads[TEST_INDEX_HASH_TABLE_SIZE];
+        static test_index_cache_t attempt_heads[TEST_INDEX_CACHE_WORDS];
 
         ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(
                         &attempt_flash, &before_rotate)));
@@ -1708,7 +1724,7 @@ static int test_mount_finishes_interrupted_index_compaction(void) {
             0x7f;
         if (err != FFFS_OK && new_valid && old_not_tombstoned) {
             struct fffs recovered;
-            static uint16_t recovered_heads[TEST_INDEX_HASH_TABLE_SIZE];
+            static test_index_cache_t recovered_heads[TEST_INDEX_CACHE_WORDS];
             found_window = true;
 
             fffs_unmount(&attempt);
@@ -1787,7 +1803,7 @@ static int test_index_compaction_poweroff_after_each_flash_op(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct ffsv_flash_snapshot before_trigger;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint64_t mutation_sequences[max_mutations];
     size_t mutation_count = 0;
     char name[16];
@@ -1848,8 +1864,8 @@ static int test_index_compaction_poweroff_after_each_flash_op(void) {
             struct fffs_backend attempt_backend;
             struct fffs attempt;
             struct fffs recovered;
-            static uint16_t attempt_heads[TEST_INDEX_HASH_TABLE_SIZE];
-            static uint16_t recovered_heads[TEST_INDEX_HASH_TABLE_SIZE];
+            static test_index_cache_t attempt_heads[TEST_INDEX_CACHE_WORDS];
+            static test_index_cache_t recovered_heads[TEST_INDEX_CACHE_WORDS];
 
             ASSERT_OK(flash_to_fs(ffsv_flash_reopen_from_snapshot(
                             &attempt_flash, &before_trigger)));
@@ -1892,8 +1908,8 @@ static int test_index_rotation_preserves_sequence_with_spare(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t out[4] = {0};
     size_t out_size = 0;
     const size_t writes = 2045;
@@ -1941,8 +1957,8 @@ static int test_index_independent_compaction_spills_and_commits_last(void) {
     struct fffs fs;
     struct fffs remounted;
     struct ffsv_flash_snapshot snapshot;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     char name[16];
     uint8_t data[1];
 
@@ -2052,7 +2068,7 @@ static int test_index_compaction_mixed_history_metrics(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     bool live[file_count] = {0};
     size_t live_count = 0;
     uint32_t rng = 0x51f0ca7eu;
@@ -2135,7 +2151,7 @@ static int test_index_header_discovery_without_sector_zero(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t data[] = {9, 8, 7, 6};
     uint8_t header[8] = {'F', 'F', 'F', 'S', 1,
         (uint8_t)(2 << 4 | 1), FFFS_DEFAULT_SECTOR_SHIFT, 0x7f};
@@ -2164,8 +2180,8 @@ static int test_large_file_uses_noncontiguous_extents(void) {
     struct fffs_backend backend;
     struct fffs fs;
     struct fffs remounted;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
-    static uint16_t remount_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     const uint8_t tiny[] = {0x42};
     const size_t large_size = 350u * 1024u;
     uint8_t *large = malloc(large_size);
@@ -2213,7 +2229,7 @@ static int test_inspect_classifies_live_and_orphaned_metadata(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *old_value = "old";
     const char *new_value = "new";
     struct fffs_inspect_summary summary;
@@ -2251,7 +2267,7 @@ static int test_inspect_reports_corrupt_live_head(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const char *value = "value";
     struct fffs_inspect_summary summary;
     uint8_t corrupt = 0;
@@ -2280,7 +2296,7 @@ static int test_workload_generator_runs_deterministically(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
-    static uint16_t fs_index_heads[TEST_INDEX_HASH_TABLE_SIZE];
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     struct fffs_workload_summary workload;
     struct fffs_inspect_summary inspect;
 

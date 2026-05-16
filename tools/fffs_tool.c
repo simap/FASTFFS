@@ -25,8 +25,13 @@
 #else
 #define TOOL_INDEX_HASH_TABLE_SIZE FFFS_INDEX_HASH_TABLE_SIZE
 #endif
+#define TOOL_INDEX_CACHE_WORDS \
+    (((FFFS_INDEX_CACHE_BYTES(TOOL_INDEX_HASH_TABLE_SIZE) + \
+       sizeof(uint32_t) - 1u) / sizeof(uint32_t)) ? \
+     ((FFFS_INDEX_CACHE_BYTES(TOOL_INDEX_HASH_TABLE_SIZE) + \
+       sizeof(uint32_t) - 1u) / sizeof(uint32_t)) : 1u)
 
-static uint16_t index_heads[TOOL_INDEX_HASH_TABLE_SIZE];
+static uint32_t index_cache[TOOL_INDEX_CACHE_WORDS];
 static uint8_t scratch[4096];
 
 static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend);
@@ -239,7 +244,8 @@ static int mount_tool_fs(struct fffs *fs, const struct fffs_backend *backend) {
     static uint32_t alloc_map[2048];
 #endif
     return fffs_mount(fs, backend, &(struct fffs_mount_options){
-        .index_heads = index_heads,
+        .index_cache = index_cache,
+        .index_cache_size = sizeof(index_cache),
         .index_hash_table_size =
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
             FFFS_SLOT_COUNT,

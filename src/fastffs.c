@@ -163,21 +163,26 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
         return FFFS_ERR_INVALID;
     }
 #if FFFS_INDEX_CACHE_MODE != FFFS_INDEX_CACHE_NONE
-    if (!options->index_heads) {
+    if (!options->index_cache || options->index_cache_size <
+            fffs_index_cache_required_size(options->index_hash_table_size)) {
         return FFFS_ERR_INVALID;
     }
 #endif
-    uint16_t *index_heads = options->index_heads;
+    void *index_cache = options->index_cache;
+    uint16_t *index_heads = NULL;
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+    index_heads = index_cache;
+#endif
     size_t index_hash_table_size = options->index_hash_table_size;
     if (!options->scratch || options->scratch_size < FFFS_MIN_SCRATCH_SIZE ||
             options->scratch_size < backend->read_granule) {
         return FFFS_ERR_INVALID;
     }
     *fs = (struct fffs){0};
-    if (index_heads) {
-        memset(index_heads, 0, sizeof(index_heads[0]) *
-                index_hash_table_size);
-    }
+#if FFFS_INDEX_CACHE_MODE != FFFS_INDEX_CACHE_NONE
+    memset(index_cache, 0, fffs_index_cache_required_size(
+                index_hash_table_size));
+#endif
 
     struct fffs_index_sequence sequence;
     int err = fffs_find_index_sequence(backend, &sequence);
@@ -191,6 +196,7 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     }
 
     fs->backend = *backend;
+    fs->index_cache = index_cache;
     fs->index_heads = index_heads;
     fs->index_hash_table_size = index_hash_table_size;
     fs->scratch = options->scratch;
