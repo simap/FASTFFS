@@ -29,7 +29,7 @@ enum fffs_status {
     FFFS_ERR_NOT_FOUND = -5,
     FFFS_ERR_EXISTS = -6,
     FFFS_ERR_NAME_TOO_LONG = -7,
-    FFFS_ERR_CORRUPT = -8,
+    FFFS_ERR_CORRUPT = -8, //this is reserved for actual corruption, defined as: loss of previously successfully committed filesystem data/metadata"
     FFFS_ERR_IO = -9,
 };
 
@@ -145,6 +145,8 @@ struct fffs_file {
     uint16_t root_next;
     uint16_t old_head;
     uint16_t old_next;
+    uint16_t reserve_first;
+    uint16_t reserve_count;
     uint32_t size;
     uint32_t pos;
     uint32_t extent_pos;
