@@ -563,7 +563,7 @@ static int test_gc_skips_open_writer_dirty_root_sector(void) {
     struct fffs fs;
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
 
@@ -598,7 +598,7 @@ static int test_gc_skips_multiple_open_writer_dirty_sectors(void) {
     struct fffs_file first;
     struct fffs_file second;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
 
@@ -641,7 +641,7 @@ static int test_gc_skips_open_writer_root_and_current_extents(void) {
     struct fffs fs;
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
 
@@ -685,7 +685,7 @@ static int test_gc_skips_open_writer_middle_extent(void) {
     struct fffs fs;
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
     uint16_t middle;
@@ -729,7 +729,7 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
     struct fffs fs;
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
     uint16_t second_middle;
@@ -784,7 +784,7 @@ static int test_gc_reclaims_failed_open_writer_after_remount(void) {
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
-    uint8_t data[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
     size_t written = 0;
     uint16_t head;
@@ -1000,7 +1000,7 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
-    uint8_t dirty[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t dirty[FFFS_FILE_WRITE_BUFFER];
     size_t written = 0;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
@@ -1220,7 +1220,7 @@ static int test_streaming_write_forces_gc_without_reclaiming_self(void) {
     ASSERT_OK(fffs_delete_file(&fs, "f006"));
 
     payload_size = test_max_file_data_size(&fs) * 3 +
-        FFFS_MAX_PROGRAM_GRANULE;
+        FFFS_FILE_WRITE_BUFFER;
     ASSERT_TRUE(payload_size <= sizeof(payload));
     for (size_t i = 0; i < payload_size; i++) {
         payload[i] = (uint8_t)(i * 31u + 7u);

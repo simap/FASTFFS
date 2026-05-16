@@ -66,7 +66,6 @@ enum {
     FFFS_DEFAULT_INDEX_SECTORS = 2,
     FFFS_MAX_NAME = 32,
     FFFS_MAX_PROBE_DISTANCE = 50,
-    FFFS_MAX_PROGRAM_GRANULE = 256,
     FFFS_SLOT_COUNT = 65536,
 };
 
@@ -157,7 +156,7 @@ struct fffs_file {
     uint32_t root_sector_serial;
     size_t tail_len;
     char name[FFFS_MAX_NAME + 1];
-    uint8_t tail[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t tail[FFFS_FILE_WRITE_BUFFER];
     bool root_deferred;
     bool found;
     bool closed;

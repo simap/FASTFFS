@@ -39,7 +39,7 @@ int fffs_map_backend_status(int status) {
 bool fffs_valid_backend(const struct fffs_backend *backend) {
     return backend && backend->ctx && backend->size &&
         backend->read_granule && backend->program_granule &&
-        backend->program_granule <= FFFS_MAX_PROGRAM_GRANULE &&
+        backend->program_granule <= FFFS_FILE_WRITE_BUFFER &&
         backend->size % backend->program_granule == 0 &&
         backend->program_granule % backend->read_granule == 0 &&
         backend->read && backend->program && backend->erase;
@@ -95,7 +95,7 @@ static int backend_program_aligned(const struct fffs_backend *backend,
                     offset, buffer, size));
     }
 
-    uint8_t chunk[FFFS_MAX_PROGRAM_GRANULE];
+    uint8_t chunk[FFFS_FILE_WRITE_BUFFER];
     const uint8_t *src = buffer;
     size_t done = 0;
     while (done < size) {

@@ -72,6 +72,14 @@
 #define FFFS_MIN_SCRATCH_SIZE 64
 #endif
 
+#ifndef FFFS_FILE_WRITE_BUFFER
+#define FFFS_FILE_WRITE_BUFFER 256
+#endif
+
+#if FFFS_FILE_WRITE_BUFFER < 1
+#error "FFFS_FILE_WRITE_BUFFER must be greater than zero"
+#endif
+
 #ifndef FFFS_LAZY_DELETE_TOMBSTONES
 #define FFFS_LAZY_DELETE_TOMBSTONES 0
 #endif
