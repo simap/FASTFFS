@@ -1,6 +1,6 @@
 # FASTFFS - The Fast Atomic Sector Table Flash File System
 
-***It's FAST, FFS!***
+***It's FAST, FFS!*** [[1]](#benchmark-snapshot)
 
 FASTFFS is a small NOR flash filesystem prototype for embedded systems that
 create, replace, list, and read named files. It is aimed at workloads with many
@@ -32,7 +32,8 @@ GC, but is much faster with it.
 2. Safe, crash/power failure resilient, atomic updates of file data and metadata.
 3. Fast, reduce file read/write overhead as much as possible.
 4. Optimal for its designed workload.
-5. Usable in a variety of use cases, without trying to be everything.
+5. Reasonable flash wear leveling. 
+6. Usable in a variety of use cases, without trying to be everything.
 
 ## What Exists Now
 
@@ -94,14 +95,21 @@ See `design.md` for the deeper design notes.
 
 ## Benchmark Snapshot
 
+This is a comparison of other permissively licensed filesystems that were reasonably easy to port/integrate. There are many others, but most appeared to be glued to a whole operating system.
+
+In this benchmark, FASTFFS writes tiny files 10x faster, writes 50 KB
+files about 2x faster, lists directories 5x faster, performs name lookups over
+160x faster, and can complete the churn workload about 1.5x faster than the
+tested flash filesystems.
+
 Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
 
 FASTFFS inline-GC performs no scheduled GC steps during the workload; GC runs on demand inside foreground mutation operations when needed. 
-FASTFFS scheduled debt-GC uses the same filesystem configuration, but during churn runs measured GC steps between foreground operations; that GC time is included in total churn runtime. This rougly simulates spending some idle cycles on GC opportunistically.
+FASTFFS scheduled debt-GC uses the same filesystem configuration, but during churn runs measured GC steps between foreground operations; that GC time is included in total churn runtime. This roughly simulates spending some idle cycles on GC opportunistically.
 
 The churn benchmark writes about 8 MiB of creates/replaces/deletes while keeping about 2.4 MiB live, measuring mutation throughput during the run and final 123-file read/list behavior.
 
-| Metric | FASTFFS inline-GC | FASTFFS scheduled debt-GC | LittleFS | JesFS | SPIFFS |
+| Metric | FASTFFS inline-GC | FASTFFS scheduled debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
 |---|---:|---:|---:|---:|---:|
 | FS RAM config | 2.8 KiB + 360 B/open | 2.8 KiB + 360 B/open | 1.4 KiB + 636 B/open | 164 B + 28 B/open | 532 B + 324 B/open slot |
 | Tiny-file storage, 192 x 64 B | 4,138 B/file | 4,138 B/file | 554 B/file | 4,096 B/file | 502 B/file |
@@ -119,3 +127,11 @@ The churn benchmark writes about 8 MiB of creates/replaces/deletes while keeping
 | Churn 350 KiB write | 36 KiB/s | 183 KiB/s | 79 KiB/s | 48 KiB/s | 6.5 KiB/s |
 | Churn final cold list, 123 files | 9.15 ms | 9.14 ms | 400 ms | 74.3 ms | 126 ms |
 | Churn cold read 350 KiB total | 4,564 KiB/s | 4,565 KiB/s | 2,431 KiB/s | 2,996 KiB/s | 454 KiB/s |
+
+## Notes in no particular order
+
+JesFS really punches above it's weight. It's simple and lightweight.
+
+LittleFS has some really solid test/verification stuff, and has really improved over time. I've borrowed their flash emulation framework to verify FASTFFS.
+
+Some design concepts were borrowed from Zephyr ZMS.
