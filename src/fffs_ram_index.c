@@ -41,8 +41,9 @@ int fffs_index_set(struct fffs *fs, uint16_t slot, uint16_t head) {
 
 int fffs_index_resolve(struct fffs *fs, const char *name,
         uint16_t *slot, uint16_t *head, bool *found,
-        struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
-        uint16_t *next) {
+        struct fffs_stat *out_st, uint16_t *payload_data_off,
+        uint16_t *payload_data_len, uint16_t *next,
+        struct fffs_read_cache_view *cache) {
     size_t name_len = strlen(name);
     if (name_len == 0) {
         return FFFS_ERR_INVALID;
@@ -66,31 +67,27 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         }
 
         struct fffs_stat st;
-        uint16_t md_slot;
-        uint16_t md_data_off;
-        uint16_t md_data_len;
+        uint16_t md_payload_data_off;
+        uint16_t md_payload_data_len;
         uint16_t md_next;
-        int err = fffs_read_metadata(fs, candidate_head, &st, &md_slot,
-                &md_data_off, &md_data_len, &md_next);
-        if (err == FFFS_ERR_CORRUPT) {
-            candidate = fffs_next_slot(candidate);
-            continue;
-        }
+        int err = fffs_read_metadata_for_slot(fs, candidate_head,
+                candidate, &st, &md_payload_data_off, &md_payload_data_len, &md_next,
+                cache);
         if (err != FFFS_OK) {
             return err;
         }
-        if (md_slot == candidate && strcmp(st.name, name) == 0) {
+        if (strcmp(st.name, name) == 0) {
             *slot = candidate;
             *head = candidate_head;
             *found = true;
             if (out_st) {
                 *out_st = st;
             }
-            if (data_off) {
-                *data_off = md_data_off;
+            if (payload_data_off) {
+                *payload_data_off = md_payload_data_off;
             }
-            if (data_len) {
-                *data_len = md_data_len;
+            if (payload_data_len) {
+                *payload_data_len = md_payload_data_len;
             }
             if (next) {
                 *next = md_next;
@@ -117,8 +114,8 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
         }
 
         struct fffs_stat candidate;
-        int err = fffs_read_metadata(dir->fs, head, &candidate,
-                NULL, NULL, NULL, NULL);
+        int err = fffs_read_metadata_for_slot(dir->fs, head,
+                (uint16_t)(dir->pos - 1u), &candidate, NULL, NULL, NULL, NULL);
         if (err != FFFS_OK) {
             dir->status = err;
             return false;

@@ -1191,9 +1191,10 @@ retry_after_bootstrap:
 void app_main(void)
 {
     ESP_LOGI(TAG, "FASTFFS ESP32-S3 benchmark starting");
-    ESP_LOGI(TAG, "config index_cache_mode=%d index_heads=%u scratch=%u alloc_map_mode=%d alloc_map_words=%u",
+    ESP_LOGI(TAG, "config index_cache_mode=%d index_heads=%u scratch=%u file_write_buffer=%u alloc_map_mode=%d alloc_map_words=%u",
              FFFS_INDEX_CACHE_MODE, FASTFFS_INDEX_HEADS,
-             FASTFFS_SCRATCH_SIZE, FFFS_ALLOC_MAP_MODE,
+             FASTFFS_SCRATCH_SIZE, FFFS_FILE_WRITE_BUFFER,
+             FFFS_ALLOC_MAP_MODE,
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
              FASTFFS_ALLOC_MAP_WORDS
 #else

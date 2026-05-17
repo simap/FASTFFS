@@ -10,6 +10,7 @@
 #ifndef FASTFFS_FFFS_INTERNAL_H
 #define FASTFFS_FFFS_INTERNAL_H
 
+#include "fffs_bitmirror.h"
 #include "fastffs/fastffs.h"
 
 #include <stdbool.h>
@@ -21,6 +22,13 @@ struct fffs_index_bucket {
     uint16_t head;
 };
 
+struct fffs_read_cache_view {
+    uint8_t *data;
+    size_t capacity;
+    size_t len;
+    uint32_t data_pos;
+};
+
 #define FFFS_INDEX_MAGIC "FFFS"
 #define FFFS_INDEX_VERSION 1
 #define FFFS_HEADER_SIZE 8
@@ -28,19 +36,91 @@ struct fffs_index_bucket {
 #define FFFS_INDEX_FLAG_TOMBSTONED 0x40
 #define FFFS_INDEX_FLAG_MD_CRC_REQUIRED 0x20
 #define FFFS_INDEX_FLAGS_VALID 0x7f
-#define FFFS_MD_SIZE 64
+#define FFFS_MD_FILE_RECORD_SIZE 16
+#define FFFS_MD_SIZE FFFS_MD_FILE_RECORD_SIZE
 #define FFFS_MD_FLAG_VALID 0x80
 #define FFFS_MD_FLAG_TOMBSTONED 0x40
-#define FFFS_MD_FLAGS_VALID 0x7f
-#define FFFS_MD_FLAGS_TOMBSTONED 0x3f
-#define FFFS_MD_TYPE_BASELINE 0x01
+#define FFFS_LIFECYCLE_VALID 0x7e
+#define FFFS_LIFECYCLE_TOMBSTONED 0x3c
+#define FFFS_LIFECYCLE_FULL 0x5a
+#define FFFS_MD_FLAGS_VALID FFFS_LIFECYCLE_VALID
+#define FFFS_MD_FLAGS_TOMBSTONED FFFS_LIFECYCLE_TOMBSTONED
+#define FFFS_MD_TYPE_FILE_ROOT_V1 0x11
+#define FFFS_MD_TYPE_FILE_CONT_V1 0x12
 #define FFFS_SECTOR_FOOTER_SIZE 12
 #define FFFS_SECTOR_MAGIC "FFSD"
 #define FFFS_SECTOR_FLAG_VALID 0x80
 #define FFFS_SECTOR_FLAG_TOMBSTONED 0x40
-#define FFFS_SECTOR_FLAGS_VALID 0x7f
-#define FFFS_SECTOR_FLAGS_TOMBSTONED 0x3f
-#define FFFS_SECTOR_TYPE_MIXED 0x01
+#define FFFS_SECTOR_FLAGS_VALID FFFS_LIFECYCLE_VALID
+#define FFFS_SECTOR_FLAGS_TOMBSTONED FFFS_LIFECYCLE_TOMBSTONED
+#define FFFS_SECTOR_FLAGS_FULL FFFS_LIFECYCLE_FULL
+#define FFFS_SECTOR_TYPE_FILE 0x01
+
+enum fffs_lifecycle_object_state {
+    FFFS_LIFECYCLE_OBJECT_INVALID,
+    FFFS_LIFECYCLE_OBJECT_ERASED,
+    FFFS_LIFECYCLE_OBJECT_LIVE,
+    FFFS_LIFECYCLE_OBJECT_TOMBSTONED,
+};
+
+static inline enum fffs_bitmirror_state fffs_lifecycle_valid_pair(
+        uint8_t state) {
+    return fffs_bitmirror_state(state, 0x81);
+}
+
+static inline enum fffs_bitmirror_state fffs_lifecycle_tombstone_pair(
+        uint8_t state) {
+    return fffs_bitmirror_state(state, 0x42);
+}
+
+static inline enum fffs_bitmirror_state fffs_lifecycle_hint_pair(
+        uint8_t state) {
+    return fffs_bitmirror_state(state, 0x24);
+}
+
+static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_footer(
+        uint8_t state) {
+    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
+    enum fffs_bitmirror_state tombstone =
+        fffs_lifecycle_tombstone_pair(state);
+    enum fffs_bitmirror_state hint = fffs_lifecycle_hint_pair(state);
+    if (valid == FFFS_BITMIRROR_MIXED ||
+            tombstone == FFFS_BITMIRROR_MIXED ||
+            hint == FFFS_BITMIRROR_MIXED) {
+        return FFFS_LIFECYCLE_OBJECT_INVALID;
+    }
+    if (tombstone == FFFS_BITMIRROR_CLEARED) {
+        return FFFS_LIFECYCLE_OBJECT_TOMBSTONED;
+    }
+    if (valid == FFFS_BITMIRROR_CLEARED) {
+        return FFFS_LIFECYCLE_OBJECT_LIVE;
+    }
+    if (state == 0xff) {
+        return FFFS_LIFECYCLE_OBJECT_ERASED;
+    }
+    return FFFS_LIFECYCLE_OBJECT_INVALID;
+}
+
+static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_md(
+        uint8_t state) {
+    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
+    enum fffs_bitmirror_state tombstone =
+        fffs_lifecycle_tombstone_pair(state);
+    if (valid == FFFS_BITMIRROR_MIXED) {
+        return FFFS_LIFECYCLE_OBJECT_INVALID;
+    }
+    if (tombstone == FFFS_BITMIRROR_CLEARED ||
+            tombstone == FFFS_BITMIRROR_MIXED) {
+        return FFFS_LIFECYCLE_OBJECT_TOMBSTONED;
+    }
+    if (valid == FFFS_BITMIRROR_CLEARED) {
+        return FFFS_LIFECYCLE_OBJECT_LIVE;
+    }
+    if (state == 0xff) {
+        return FFFS_LIFECYCLE_OBJECT_ERASED;
+    }
+    return FFFS_LIFECYCLE_OBJECT_INVALID;
+}
 
 int fffs_map_backend_status(int status);
 bool fffs_valid_backend(const struct fffs_backend *backend);
@@ -108,14 +188,40 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
 int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t serial);
 int fffs_tombstone_sector(struct fffs *fs, uint16_t sector);
+int fffs_mark_sector_full(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_footer_offset(struct fffs *fs, uint16_t sector);
-int fffs_read_metadata(struct fffs *fs, uint16_t sector,
-        struct fffs_stat *st, uint16_t *slot, uint16_t *data_off,
-        uint16_t *data_len, uint16_t *next);
+int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
+        uint16_t *data_len, uint16_t *next,
+        struct fffs_read_cache_view *cache);
+int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot);
 int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_len, uint32_t total_size,
-        uint16_t next, bool commit_index);
+        uint32_t serial, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint32_t total_size,
+        uint16_t next, uint32_t file_offset, bool commit_index);
+int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
+        uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
+        uint16_t *record_off, bool *needs_footer);
+struct fffs_md_record {
+    uint8_t type;
+    uint8_t state;
+    uint16_t slot;
+    uint16_t next;
+    uint16_t data_off;
+    uint16_t data_len;
+    size_t record_start;
+    size_t record_len;
+};
+typedef int (*fffs_md_record_visitor)(struct fffs *fs,
+        const struct fffs_md_record *record, void *ctx);
+int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
+        fffs_md_record_visitor visitor, void *ctx);
+int fffs_read_metadata_record_at(struct fffs *fs, uint16_t sector,
+        size_t cursor, size_t *claimed_data_end,
+        struct fffs_md_record *record, size_t *next_cursor,
+        bool *erased, bool *invalid, bool *done);
 
 void fffs_bitset_clear(uint32_t *words, size_t word_count);
 bool fffs_bitset_get(const uint32_t *words, size_t bit);
@@ -163,8 +269,9 @@ size_t fffs_index_cache_required_size(size_t count);
  */
 int fffs_index_resolve(struct fffs *fs, const char *name,
         uint16_t *slot, uint16_t *head, bool *found,
-        struct fffs_stat *out_st, uint16_t *data_off, uint16_t *data_len,
-        uint16_t *next);
+        struct fffs_stat *out_st, uint16_t *payload_data_off,
+        uint16_t *payload_data_len, uint16_t *next,
+        struct fffs_read_cache_view *cache);
 
 /*
  * Resolve an already-known namespace slot:
@@ -185,9 +292,9 @@ int fffs_index_record_is_current(struct fffs *fs,
 /* Seed the allocation map with current live root heads after mount replay. */
 void fffs_index_mark_live_heads_used(struct fffs *fs);
 
-/* Inflight writer checks protect sectors and names not yet in the index. */
+/* Inflight writer checks protect sectors for allocation and slots for GC. */
 bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector);
-bool fffs_name_is_inflight(struct fffs *fs, const char *name);
+bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot);
 size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
 
 /* Allocation and GC helpers for erased data sectors. */

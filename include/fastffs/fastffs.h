@@ -169,7 +169,11 @@ struct fffs {
     uint8_t active_index_serial;
     size_t alloc_cursor;
     size_t gc_cursor;
+    size_t gc_md_cursor;
+    size_t gc_md_claimed_data_end;
+    uint16_t gc_md_sector;
     bool gc_live;
+    bool gc_md_active;
     uint32_t next_sector_serial;
 };
 
@@ -191,7 +195,11 @@ struct fffs_file {
     uint16_t current_data_len;
     uint16_t current_next;
     uint16_t current_write_offset;
+    uint16_t current_metadata_offset;
     uint16_t root_data_len;
+    uint16_t root_data_offset;
+    uint16_t root_metadata_offset;
+    uint16_t root_payload_offset;
     uint16_t root_next;
     uint16_t old_head;
     uint16_t old_next;
@@ -199,12 +207,16 @@ struct fffs_file {
     uint16_t reserve_count;
     uint32_t size;
     uint32_t pos;
-    uint32_t extent_pos;
+    uint32_t current_data_pos;
+    uint32_t cache_data_pos;
+    uint32_t current_file_offset;
     uint32_t current_sector_serial;
     uint32_t root_sector_serial;
-    size_t tail_len;
+    size_t cache_len;
     char name[FFFS_MAX_NAME + 1];
-    uint8_t tail[FFFS_FILE_WRITE_BUFFER];
+    uint8_t cache[FFFS_FILE_CACHE_SIZE];
+    bool current_needs_footer;
+    bool root_needs_footer;
     bool root_deferred;
     bool found;
     bool closed;

@@ -17,6 +17,7 @@
 #include <string.h>
 
 struct decoded_md {
+    uint8_t type;
     uint8_t state;
     uint16_t slot;
     uint16_t data_off;
@@ -62,11 +63,13 @@ static bool span_erased(const uint8_t *p, size_t size) {
 
 static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t *serial) {
-    if (footer[4] != FFFS_SECTOR_TYPE_MIXED ||
-            (footer[5] != FFFS_SECTOR_FLAGS_VALID &&
-             footer[5] != FFFS_SECTOR_FLAGS_TOMBSTONED) ||
+    enum fffs_lifecycle_object_state footer_state =
+        fffs_lifecycle_decode_footer(footer[5]);
+    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
             footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0) {
+            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
+            (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
+             footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED)) {
         return false;
     }
     if (serial) {
@@ -76,39 +79,108 @@ static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
 }
 
 static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
-        size_t max_data, struct decoded_md *out) {
+        size_t data_limit, struct decoded_md *out) {
     if (span_erased(md, FFFS_MD_SIZE)) {
         return MD_ERASED;
     }
-    if (md[63] != FFFS_MD_TYPE_BASELINE) {
+    enum fffs_lifecycle_object_state md_state =
+        fffs_lifecycle_decode_md(md[0]);
+    if (md_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
+            md_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
         return MD_CORRUPT;
     }
-    if (md[0] != FFFS_MD_FLAGS_VALID &&
-            md[0] != FFFS_MD_FLAGS_TOMBSTONED) {
+    if (md[15] != FFFS_MD_TYPE_FILE_ROOT_V1 &&
+            md[15] != FFFS_MD_TYPE_FILE_CONT_V1) {
         return MD_CORRUPT;
     }
-    if (md[1] == 0 || md[1] > FFFS_MAX_NAME) {
-        return MD_CORRUPT;
-    }
-
-    uint16_t data_off = load16(md + 4);
-    uint16_t data_len = load16(md + 6);
-    if ((size_t)data_off + data_len > max_data) {
+    uint16_t data_off = load16(md + 7);
+    uint16_t data_len = load16(md + 9);
+    if ((size_t)data_off + data_len > data_limit || load16(md + 5) == 0) {
         return MD_CORRUPT;
     }
 
     if (out) {
         memset(out, 0, sizeof(*out));
+        out->type = md[15];
         out->state = md[0];
-        out->slot = load16(md + 2);
+        out->slot = load16(md + 1);
         out->data_off = data_off;
         out->data_len = data_len;
-        out->next = load16(md + 12);
-        out->size = load32(md + 8);
-        memcpy(out->name, md + 14, md[1]);
-        out->name[md[1]] = '\0';
+        out->next = load16(md + 3);
+        if (md[15] == FFFS_MD_TYPE_FILE_ROOT_V1) {
+            out->size = load32(md + 11);
+        }
     }
-    return md[0] == FFFS_MD_FLAGS_TOMBSTONED ? MD_TOMBSTONED : MD_VALID;
+    return md_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED ?
+        MD_TOMBSTONED : MD_VALID;
+}
+
+static int read_root_name_for_decoded(const struct fffs_backend *backend,
+        const struct fffs_inspect_summary *summary, size_t sector,
+        struct decoded_md *decoded, enum md_state *state) {
+    if (*state != MD_VALID ||
+            decoded->type != FFFS_MD_TYPE_FILE_ROOT_V1) {
+        return FFFS_OK;
+    }
+
+    uint8_t name_len = 0;
+    int err = backend_read(backend, sector * summary->sector_size +
+            decoded->data_off, &name_len, sizeof(name_len));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (name_len == 0 || name_len > FFFS_MAX_NAME ||
+            (size_t)1u + name_len + 1u > decoded->data_len) {
+        *state = MD_CORRUPT;
+        return FFFS_OK;
+    }
+    err = backend_read(backend, sector * summary->sector_size +
+            decoded->data_off + 1u, decoded->name, name_len);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    decoded->name[name_len] = '\0';
+    return FFFS_OK;
+}
+
+static int read_record_before(const struct fffs_backend *backend,
+        const struct fffs_inspect_summary *summary, size_t sector,
+        size_t cursor, struct decoded_md *decoded, enum md_state *state,
+        size_t *record_start) {
+    if (cursor < FFFS_MD_FILE_RECORD_SIZE) {
+        *state = MD_CORRUPT;
+        return FFFS_OK;
+    }
+
+    uint8_t type;
+    int err = backend_read(backend, sector * summary->sector_size +
+            cursor - 1u, &type, sizeof(type));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (type == 0xff) {
+        *state = MD_ERASED;
+        return FFFS_OK;
+    }
+
+    size_t len = FFFS_MD_FILE_RECORD_SIZE;
+    if (cursor < len) {
+        *state = MD_CORRUPT;
+        return FFFS_OK;
+    }
+    uint8_t md[FFFS_MD_SIZE];
+    size_t start = cursor - len;
+    err = backend_read(backend, sector * summary->sector_size + start,
+            md, sizeof(md));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    *state = decode_md(md, start, decoded);
+    if (record_start) {
+        *record_start = start;
+    }
+    return read_root_name_for_decoded(backend, summary, sector, decoded,
+            state);
 }
 
 static int discover(const struct fffs_backend *backend,
@@ -216,7 +288,8 @@ static int inspect_index(const struct fffs_backend *backend,
 
 static int read_decoded_md(const struct fffs_backend *backend,
         const struct fffs_inspect_summary *summary, size_t sector,
-        struct decoded_md *decoded, enum md_state *state) {
+        uint16_t want_slot, struct decoded_md *decoded,
+        enum md_state *state) {
     uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
     size_t footer_off = sector * summary->sector_size +
         summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
@@ -229,14 +302,63 @@ static int read_decoded_md(const struct fffs_backend *backend,
         return FFFS_OK;
     }
 
-    uint8_t md[FFFS_MD_SIZE];
-    err = backend_read(backend, footer_off - FFFS_MD_SIZE, md, sizeof(md));
-    if (err != FFFS_OK) {
-        return err;
+    size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+    size_t claimed_data_end = 0;
+    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
+        size_t record_start = 0;
+        err = read_record_before(backend, summary, sector, cursor, decoded,
+                state, &record_start);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (*state == MD_ERASED || *state == MD_CORRUPT) {
+            return FFFS_OK;
+        }
+        cursor = record_start;
+        size_t data_end = (size_t)decoded->data_off + decoded->data_len;
+        if (data_end > claimed_data_end) {
+            claimed_data_end = data_end;
+        }
+        if (*state == MD_TOMBSTONED || decoded->slot != want_slot) {
+            if (cursor <= claimed_data_end) {
+                break;
+            }
+            continue;
+        }
+        break;
     }
-    size_t max_data = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE -
-        FFFS_MD_SIZE;
-    *state = decode_md(md, max_data, decoded);
+    return FFFS_OK;
+}
+
+static int record_reachable_for_slot(const struct fffs_backend *backend,
+        const struct fffs_inspect_summary *summary,
+        const uint16_t *live_heads, uint16_t slot, size_t sector,
+        bool *reachable) {
+    *reachable = false;
+    uint16_t current = live_heads[slot];
+    for (size_t depth = 0; current != 0 &&
+            depth < summary->sector_count; depth++) {
+        if (current < summary->index_sectors ||
+                current >= summary->sector_count) {
+            return FFFS_OK;
+        }
+        if (current == sector) {
+            *reachable = true;
+            return FFFS_OK;
+        }
+
+        struct decoded_md decoded;
+        enum md_state state;
+        int err = read_decoded_md(backend, summary, current, slot,
+                &decoded, &state);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (state != MD_VALID || decoded.slot != slot) {
+            return FFFS_OK;
+        }
+        current = decoded.next;
+    }
     return FFFS_OK;
 }
 
@@ -258,15 +380,10 @@ static int mark_live_chains(const struct fffs_backend *backend,
                 corrupt = true;
                 break;
             }
-            if (reachable[current]) {
-                corrupt = true;
-                break;
-            }
-
             struct decoded_md decoded;
             enum md_state state;
-            int err = read_decoded_md(backend, summary, current, &decoded,
-                    &state);
+            int err = read_decoded_md(backend, summary, current,
+                    (uint16_t)slot, &decoded, &state);
             if (err != FFFS_OK) {
                 return err;
             }
@@ -289,10 +406,7 @@ static int mark_live_chains(const struct fffs_backend *backend,
 }
 
 static int inspect_data_sectors(const struct fffs_backend *backend,
-        struct fffs_inspect_summary *summary, const bool *reachable) {
-    size_t max_data = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE -
-        FFFS_MD_SIZE;
-
+        struct fffs_inspect_summary *summary, const uint16_t *live_heads) {
     for (size_t sector = summary->index_sectors;
             sector < summary->sector_count; sector++) {
         uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
@@ -311,32 +425,59 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             summary->data_sectors_corrupt += 1;
             continue;
         }
-        if (footer[5] == FFFS_SECTOR_FLAGS_TOMBSTONED) {
+        if (fffs_lifecycle_decode_footer(footer[5]) ==
+                FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
             summary->data_sectors_tombstoned += 1;
             summary->md_tombstoned += 1;
             continue;
         }
         summary->data_sectors_owned += 1;
 
-        uint8_t md[FFFS_MD_SIZE];
-        size_t md_off = footer_off - FFFS_MD_SIZE;
-        err = backend_read(backend, md_off, md, sizeof(md));
-        if (err != FFFS_OK) {
-            return err;
-        }
+        size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+        size_t claimed_data_end = 0;
+        while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
+            struct decoded_md decoded;
+            enum md_state state;
+            size_t record_start = 0;
+            err = read_record_before(backend, summary, sector, cursor,
+                    &decoded, &state, &record_start);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (state == MD_ERASED) {
+                break;
+            }
+            if (state == MD_CORRUPT) {
+                summary->md_corrupt += 1;
+                break;
+            }
+            cursor = record_start;
+            size_t data_end = (size_t)decoded.data_off + decoded.data_len;
+            if (data_end > claimed_data_end) {
+                claimed_data_end = data_end;
+            }
+            if (state == MD_TOMBSTONED) {
+                if (cursor <= claimed_data_end) {
+                    break;
+                }
+                summary->md_tombstoned += 1;
+                continue;
+            }
 
-        struct decoded_md decoded;
-        enum md_state state = decode_md(md, max_data, &decoded);
-        if (state == MD_ERASED) {
-            summary->md_obsolete_orphaned += 1;
-        } else if (state == MD_TOMBSTONED) {
-            summary->md_tombstoned += 1;
-        } else if (state == MD_CORRUPT) {
-            summary->md_corrupt += 1;
-        } else if (reachable[sector]) {
-            summary->md_live += 1;
-        } else {
-            summary->md_obsolete_orphaned += 1;
+            bool record_live = false;
+            err = record_reachable_for_slot(backend, summary, live_heads,
+                    decoded.slot, sector, &record_live);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (record_live) {
+                summary->md_live += 1;
+            } else {
+                summary->md_obsolete_orphaned += 1;
+            }
+            if (cursor <= claimed_data_end) {
+                break;
+            }
         }
     }
     return FFFS_OK;
@@ -370,7 +511,7 @@ int fffs_inspect_check(const struct fffs_backend *backend,
                 seen_root);
     }
     if (err == FFFS_OK) {
-        err = inspect_data_sectors(backend, &tmp, reachable);
+        err = inspect_data_sectors(backend, &tmp, live_heads);
     }
 
     free(reachable);
@@ -449,10 +590,7 @@ static int dump_active_index(const struct fffs_backend *backend, FILE *out,
 
 static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
         const struct fffs_inspect_summary *summary,
-        const bool *reachable) {
-    size_t max_data = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE -
-        FFFS_MD_SIZE;
-
+        const uint16_t *live_heads) {
     for (size_t sector = summary->index_sectors;
             sector < summary->sector_count; sector++) {
         uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
@@ -472,22 +610,53 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
             continue;
         }
 
-        uint8_t md[FFFS_MD_SIZE];
-        err = backend_read(backend, footer_off - FFFS_MD_SIZE, md,
-                sizeof(md));
-        if (err != FFFS_OK) {
-            return err;
+        size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+        size_t claimed_data_end = 0;
+        bool printed_any = false;
+        while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
+            struct decoded_md decoded;
+            enum md_state state;
+            size_t record_start = 0;
+            err = read_record_before(backend, summary, sector, cursor,
+                    &decoded, &state, &record_start);
+            if (err != FFFS_OK) {
+                return err;
+            }
+            if (state == MD_ERASED) {
+                break;
+            }
+            bool live = false;
+            if (state == MD_VALID) {
+                err = record_reachable_for_slot(backend, summary, live_heads,
+                        decoded.slot, sector, &live);
+                if (err != FFFS_OK) {
+                    return err;
+                }
+            }
+            fprintf(out, "sector=%zu serial=%" PRIu32 " md=%s",
+                    sector, serial, md_state_name(state, live));
+            if (state == MD_VALID || state == MD_TOMBSTONED) {
+                fprintf(out, " slot=%u size=%" PRIu32 " name=%s",
+                        (unsigned)decoded.slot, decoded.size, decoded.name);
+            }
+            fputc('\n', out);
+            printed_any = true;
+            if (state == MD_CORRUPT) {
+                break;
+            }
+            cursor = record_start;
+            size_t data_end = (size_t)decoded.data_off + decoded.data_len;
+            if (data_end > claimed_data_end) {
+                claimed_data_end = data_end;
+            }
+            if (cursor <= claimed_data_end) {
+                break;
+            }
         }
-        struct decoded_md decoded;
-        enum md_state state = decode_md(md, max_data, &decoded);
-        bool live = state == MD_VALID && reachable[sector];
-        fprintf(out, "sector=%zu serial=%" PRIu32 " md=%s",
-                sector, serial, md_state_name(state, live));
-        if (state == MD_VALID || state == MD_TOMBSTONED) {
-            fprintf(out, " slot=%u size=%" PRIu32 " name=%s",
-                    (unsigned)decoded.slot, decoded.size, decoded.name);
+        if (!printed_any) {
+            fprintf(out, "sector=%zu serial=%" PRIu32 " md=%s\n",
+                    sector, serial, md_state_name(MD_ERASED, false));
         }
-        fputc('\n', out);
     }
     return FFFS_OK;
 }
@@ -545,7 +714,7 @@ int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out) {
         err = dump_active_index(backend, out, &summary);
     }
     if (err == FFFS_OK) {
-        err = dump_data_sectors(backend, out, &summary, reachable);
+        err = dump_data_sectors(backend, out, &summary, live_heads);
     }
 
     free(reachable);
