@@ -19,8 +19,10 @@ enum gc_sector_state {
 static int sector_footer_state(struct fffs *fs, size_t sector,
         enum gc_sector_state *state) {
     uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_FOOTER_STATE);
     int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs,
                 (uint16_t)sector), footer, sizeof(footer));
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_FOOTER_STATE);
     if (err != FFFS_OK) {
         return err;
     }
@@ -73,22 +75,27 @@ static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
 static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t head,
         size_t sector, bool *reachable) {
     uint16_t current = head;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_REACHABILITY);
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
         if (current == sector) {
             *reachable = true;
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return FFFS_OK;
         }
         uint16_t next_sector;
         int err = fffs_read_metadata(fs, current, NULL, NULL, NULL, NULL,
                 &next_sector);
         if (err != FFFS_OK) {
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return err;
         }
         current = next_sector;
     }
     if (current != 0) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
         return FFFS_ERR_CORRUPT;
     }
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
     return FFFS_OK;
 }
 
@@ -144,6 +151,10 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
             state == GC_SECTOR_DIRTY_NO_FOOTER) {
         err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
                     s * fs->sector_size, fs->sector_size));
+#if FFFS_PROFILE_TRACE
+        fffs_profile_flash(fs, FFFS_PROFILE_FLASH_ERASE,
+                s * fs->sector_size, fs->sector_size);
+#endif
         if (err != FFFS_OK) {
             return err;
         }
@@ -271,10 +282,12 @@ int fffs_gc(struct fffs *fs, size_t max_steps, size_t *out_erased) {
         *out_erased = 0;
     }
     size_t erased = 0;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC);
     for (size_t i = 0; i < max_steps; i++) {
         enum fffs_gc_action action;
         int err = fffs_gc_step(fs, &action);
         if (err != FFFS_OK) {
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC);
             return err;
         }
         if (action == FFFS_GC_ERASED) {
@@ -284,5 +297,6 @@ int fffs_gc(struct fffs *fs, size_t max_steps, size_t *out_erased) {
             }
         }
     }
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC);
     return FFFS_OK;
 }

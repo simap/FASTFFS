@@ -69,6 +69,44 @@ enum {
     FFFS_SLOT_COUNT = 65536,
 };
 
+#ifndef FFFS_PROFILE_TRACE
+#define FFFS_PROFILE_TRACE 0
+#endif
+
+#if FFFS_PROFILE_TRACE
+enum fffs_profile_scope {
+    FFFS_PROFILE_UNSCOPED = 0,
+    FFFS_PROFILE_MOUNT,
+    FFFS_PROFILE_INDEX_REPLAY,
+    FFFS_PROFILE_INDEX_RESOLVE,
+    FFFS_PROFILE_DIR_READ,
+    FFFS_PROFILE_READ_METADATA,
+    FFFS_PROFILE_SPAN_IS_ERASED,
+    FFFS_PROFILE_ALLOC_NEXT_SECTOR,
+    FFFS_PROFILE_GC,
+    FFFS_PROFILE_GC_STEP,
+    FFFS_PROFILE_GC_FOOTER_STATE,
+    FFFS_PROFILE_GC_REACHABILITY,
+    FFFS_PROFILE_READ,
+    FFFS_PROFILE_WRITE,
+    FFFS_PROFILE_CLOSE,
+    FFFS_PROFILE_DELETE,
+    FFFS_PROFILE_COUNT,
+};
+
+enum fffs_profile_flash_op {
+    FFFS_PROFILE_FLASH_READ = 0,
+    FFFS_PROFILE_FLASH_PROGRAM = 1,
+    FFFS_PROFILE_FLASH_ERASE = 2,
+};
+
+struct fffs;
+typedef void (*fffs_profile_trace_fn)(struct fffs *fs,
+        const enum fffs_profile_scope *scope_stack, size_t scope_depth,
+        enum fffs_profile_flash_op op, size_t offset, size_t size,
+        void *user);
+#endif
+
 struct fffs_backend {
     void *ctx;
     size_t size;
@@ -95,6 +133,10 @@ struct fffs_mount_options {
     uint32_t *alloc_map;
     size_t alloc_map_words;
 #endif
+#if FFFS_PROFILE_TRACE
+    fffs_profile_trace_fn profile_trace;
+    void *profile_trace_user;
+#endif
 };
 
 struct fffs {
@@ -103,6 +145,12 @@ struct fffs {
     void *index_cache;
     uint16_t *index_heads;
     size_t index_hash_table_size;
+#if FFFS_PROFILE_TRACE
+    fffs_profile_trace_fn profile_trace;
+    void *profile_trace_user;
+    enum fffs_profile_scope profile_stack[12];
+    size_t profile_depth;
+#endif
     uint8_t *scratch;
     size_t scratch_size;
     uint32_t scratch_serial;

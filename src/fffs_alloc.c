@@ -14,7 +14,9 @@ int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size) {
     size_t chunk_size = fs->scratch_size;
     while (size > 0) {
         size_t n = size < chunk_size ? size : chunk_size;
+        FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_SPAN_IS_ERASED);
         int err = fffs_flash_read(fs, offset, chunk, n);
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_SPAN_IS_ERASED);
         if (err != FFFS_OK) {
             return err;
         }
@@ -245,13 +247,16 @@ int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector) {
         return FFFS_ERR_INVALID;
     }
     struct fffs *fs = file->fs;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_ALLOC_NEXT_SECTOR);
     uint16_t skip_sector = 0;
     bool have_skip = false;
     int err = try_reserved_sector(file, sector, &skip_sector, &have_skip);
     if (err == FFFS_OK) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_ALLOC_NEXT_SECTOR);
         return FFFS_OK;
     }
     if (err != FFFS_ERR_NO_SPACE) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_ALLOC_NEXT_SECTOR);
         return err;
     }
     err = alloc_erased_sector_once(file, sector, true, skip_sector,
@@ -264,8 +269,9 @@ int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector) {
     }
 #if FFFS_GC_ON_ALLOC_FAILURE
     if (err == FFFS_ERR_NO_SPACE && fs->sector_count > fs->index_sectors) {
-        return allocate_erased_gc_sector(file, sector);
+        err = allocate_erased_gc_sector(file, sector);
     }
 #endif
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_ALLOC_NEXT_SECTOR);
     return err;
 }

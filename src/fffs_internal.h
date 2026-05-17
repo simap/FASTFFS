@@ -56,6 +56,18 @@ int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
 void fffs_scratch_bump(struct fffs *fs);
 
+#if FFFS_PROFILE_TRACE
+void fffs_profile_push(struct fffs *fs, enum fffs_profile_scope scope);
+void fffs_profile_pop(struct fffs *fs, enum fffs_profile_scope scope);
+void fffs_profile_flash(struct fffs *fs, enum fffs_profile_flash_op op,
+        size_t offset, size_t size);
+#define FFFS_PROFILE_PUSH(fs, scope) fffs_profile_push((fs), (scope))
+#define FFFS_PROFILE_POP(fs, scope) fffs_profile_pop((fs), (scope))
+#else
+#define FFFS_PROFILE_PUSH(fs, scope) ((void)0)
+#define FFFS_PROFILE_POP(fs, scope) ((void)0)
+#endif
+
 /* Decode and validate an index-sector header. */
 bool fffs_valid_index_header(const uint8_t hdr[FFFS_HEADER_SIZE],
         uint8_t *index_sectors, uint8_t *sector_shift, uint8_t *serial);

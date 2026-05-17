@@ -199,6 +199,10 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->index_cache = index_cache;
     fs->index_heads = index_heads;
     fs->index_hash_table_size = index_hash_table_size;
+#if FFFS_PROFILE_TRACE
+    fs->profile_trace = options->profile_trace;
+    fs->profile_trace_user = options->profile_trace_user;
+#endif
     fs->scratch = options->scratch;
     fs->scratch_size = options->scratch_size;
     fs->sector_size = sector_size;
@@ -264,8 +268,10 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
     uint16_t resolved_data_off = 0;
     uint16_t resolved_data_len = 0;
     uint16_t resolved_next = 0;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_INDEX_RESOLVE);
     int err = fffs_index_resolve(fs, name, &slot, &head, &found, &resolved_st,
             &resolved_data_off, &resolved_data_len, &resolved_next);
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_INDEX_RESOLVE);
     if (err != FFFS_OK) {
         return err;
     }
@@ -333,9 +339,11 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
         return FFFS_OK;
     }
 
+    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_READ);
     while (total < want) {
         if (file->extent_pos >= file->current_data_len) {
             if (file->current_next == 0) {
+                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
                 return FFFS_ERR_CORRUPT;
             }
             uint16_t slot;
@@ -344,6 +352,7 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
             int err = fffs_read_metadata(file->fs, file->current_next, NULL,
                     &slot, &file->data_offset, &data_len, &next);
             if (err != FFFS_OK || slot != file->slot) {
+                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
                 return err == FFFS_OK ? FFFS_ERR_CORRUPT : err;
             }
             file->current = file->current_next;
@@ -358,6 +367,7 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
                 file->fs->sector_size + file->data_offset +
                 file->extent_pos, dst + total, n);
         if (err != FFFS_OK) {
+            FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
             return err;
         }
         file->extent_pos += (uint32_t)n;
@@ -367,6 +377,7 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
     if (out_read) {
         *out_read = total;
     }
+    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
     return FFFS_OK;
 }
 
@@ -444,10 +455,12 @@ int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
     }
     const uint8_t *src = buffer;
     size_t remaining = size;
+    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_WRITE);
     while (remaining > 0) {
         if (file->current_data_len >= fffs_max_file_data_size(file->fs)) {
             int err = start_next_extent(file);
             if (err != FFFS_OK) {
+                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
                 return err;
             }
         }
@@ -467,6 +480,7 @@ int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
         if (file->tail_len == sizeof(file->tail)) {
             int err = flush_write_tail(file, false);
             if (err != FFFS_OK) {
+                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
                 return err;
             }
         }
@@ -474,6 +488,7 @@ int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
     if (out_written) {
         *out_written = size;
     }
+    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
     return FFFS_OK;
 }
 
@@ -496,6 +511,7 @@ int fffs_close(struct fffs_file *file) {
         return FFFS_ERR_INVALID;
     }
     int err = FFFS_OK;
+    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_CLOSE);
     if ((file->flags & FFFS_O_WRONLY) != 0) {
         err = flush_write_tail(file, true);
         if (err == FFFS_OK) {
@@ -522,6 +538,7 @@ int fffs_close(struct fffs_file *file) {
         unregister_inflight_writer(file);
     }
     file->closed = true;
+    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_CLOSE);
     return err;
 }
 
@@ -532,8 +549,10 @@ int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st) {
     uint16_t slot;
     uint16_t head;
     bool found;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_INDEX_RESOLVE);
     int err = fffs_index_resolve(fs, name, &slot, &head, &found, st, NULL,
             NULL, NULL);
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_INDEX_RESOLVE);
     if (err != FFFS_OK) {
         return err;
     }
@@ -568,19 +587,26 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
     uint16_t head;
     uint16_t next = 0;
     bool found;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_DELETE);
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_INDEX_RESOLVE);
     int err = fffs_index_resolve(fs, name, &slot, &head, &found, NULL, NULL,
             NULL, &next);
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_INDEX_RESOLVE);
     if (err != FFFS_OK) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
         return err;
     }
     if (!found) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
         return FFFS_ERR_NOT_FOUND;
     }
     err = fffs_append_index_record(fs, slot, 0);
     if (err != FFFS_OK) {
+        FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
         return err;
     }
     invalidate_old_chain(fs, slot, head, next, true);
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
     return FFFS_OK;
 }
 
@@ -611,7 +637,10 @@ bool fffs_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
         }
         return false;
     }
-    return fffs_index_dir_read(dir, st);
+    FFFS_PROFILE_PUSH(dir->fs, FFFS_PROFILE_DIR_READ);
+    bool found = fffs_index_dir_read(dir, st);
+    FFFS_PROFILE_POP(dir->fs, FFFS_PROFILE_DIR_READ);
+    return found;
 }
 
 int fffs_dir_status(const struct fffs_dir *dir) {

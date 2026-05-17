@@ -2,6 +2,7 @@
 #include "fastffs/fastffs_host.h"
 #include "fastffs/verify_flash.h"
 #include "churn_model.h"
+#include "../src/fffs_internal.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -79,10 +80,168 @@ struct class_stats {
     uint64_t flash_blank_checks;
 };
 
+enum profile_bucket {
+    PROFILE_INDEX_READ,
+    PROFILE_INDEX_PROGRAM,
+    PROFILE_MD_TAIL_READ,
+    PROFILE_MD_TAIL_PROGRAM,
+    PROFILE_FOOTER_READ,
+    PROFILE_FOOTER_PROGRAM,
+    PROFILE_FOOTER_TOMBSTONE,
+    PROFILE_SECTOR_SCAN_READ,
+    PROFILE_DATA_READ,
+    PROFILE_DATA_PROGRAM,
+    PROFILE_ERASE,
+    PROFILE_OTHER,
+    PROFILE_COUNT,
+};
+
+struct profile_stats {
+    uint64_t calls;
+    uint64_t bytes;
+    uint64_t ns;
+};
+
 static uint32_t index_cache[INDEX_CACHE_WORDS];
 static uint32_t remount_cache[INDEX_CACHE_WORDS];
 static uint8_t scratch[FFFS_HOST_CHURN_SCRATCH_SIZE];
 static uint8_t *io_buffer;
+
+#if FFFS_PROFILE_TRACE
+struct scope_profile {
+    uint64_t calls;
+    uint64_t bytes;
+    uint64_t ns;
+    uint64_t reads;
+    uint64_t programs;
+    uint64_t erases;
+};
+
+struct trace_capture {
+    struct ffsv_flash *flash;
+    uint64_t last_ns;
+    struct scope_profile scopes[FFFS_PROFILE_COUNT];
+};
+
+static struct trace_capture *active_trace;
+static struct trace_capture *active_extra_trace;
+
+static const char *scope_name(enum fffs_profile_scope scope) {
+    switch (scope) {
+    case FFFS_PROFILE_UNSCOPED:
+        return "unscoped";
+    case FFFS_PROFILE_MOUNT:
+        return "mount";
+    case FFFS_PROFILE_INDEX_REPLAY:
+        return "index replay";
+    case FFFS_PROFILE_INDEX_RESOLVE:
+        return "index resolve";
+    case FFFS_PROFILE_DIR_READ:
+        return "dir read";
+    case FFFS_PROFILE_READ_METADATA:
+        return "read metadata";
+    case FFFS_PROFILE_SPAN_IS_ERASED:
+        return "span is erased";
+    case FFFS_PROFILE_ALLOC_NEXT_SECTOR:
+        return "alloc next sector";
+    case FFFS_PROFILE_GC:
+        return "gc";
+    case FFFS_PROFILE_GC_STEP:
+        return "gc step";
+    case FFFS_PROFILE_GC_FOOTER_STATE:
+        return "gc footer state";
+    case FFFS_PROFILE_GC_REACHABILITY:
+        return "gc reachability";
+    case FFFS_PROFILE_READ:
+        return "read";
+    case FFFS_PROFILE_WRITE:
+        return "write";
+    case FFFS_PROFILE_CLOSE:
+        return "close";
+    case FFFS_PROFILE_DELETE:
+        return "delete";
+    default:
+        return "unknown";
+    }
+}
+
+static void trace_reset(struct trace_capture *trace,
+        struct ffsv_flash *flash) {
+    memset(trace, 0, sizeof(*trace));
+    trace->flash = flash;
+    trace->last_ns = ffsv_flash_time_ns(flash);
+}
+
+static void trace_add_op(struct trace_capture *trace,
+        const enum fffs_profile_scope *scope_stack, size_t scope_depth,
+        enum fffs_profile_flash_op op, size_t size, uint64_t delta_ns) {
+    if (!trace) {
+        return;
+    }
+    for (size_t i = 0; i < scope_depth; i++) {
+        enum fffs_profile_scope scope = scope_stack[i];
+        if (scope >= FFFS_PROFILE_COUNT) {
+            continue;
+        }
+        struct scope_profile *s = &trace->scopes[scope];
+        s->calls++;
+        s->bytes += size;
+        s->ns += delta_ns;
+        if (op == FFFS_PROFILE_FLASH_READ) {
+            s->reads++;
+        } else if (op == FFFS_PROFILE_FLASH_PROGRAM) {
+            s->programs++;
+        } else if (op == FFFS_PROFILE_FLASH_ERASE) {
+            s->erases++;
+        }
+    }
+}
+
+static void trace_callback(struct fffs *fs,
+        const enum fffs_profile_scope *scope_stack, size_t scope_depth,
+        enum fffs_profile_flash_op op, size_t offset, size_t size,
+        void *user) {
+    (void)fs;
+    (void)offset;
+    struct trace_capture *primary = user;
+    if (!primary) {
+        primary = active_trace;
+    }
+    if (!primary) {
+        return;
+    }
+    uint64_t now = ffsv_flash_time_ns(primary->flash);
+    uint64_t delta_ns = now - primary->last_ns;
+    primary->last_ns = now;
+    trace_add_op(primary, scope_stack, scope_depth, op, size, delta_ns);
+    if (active_extra_trace) {
+        active_extra_trace->last_ns = now;
+        trace_add_op(active_extra_trace, scope_stack, scope_depth, op, size,
+                delta_ns);
+    }
+}
+
+static void print_scope_profile(const char *label,
+        const struct trace_capture *trace) {
+    printf("%s inclusive scope profile\n", label);
+    for (size_t i = 0; i < FFFS_PROFILE_COUNT; i++) {
+        const struct scope_profile *s = &trace->scopes[i];
+        if (s->calls == 0) {
+            continue;
+        }
+        double ms = (double)s->ns / 1000000.0;
+        printf("  %-19s calls=%6llu bytes=%9llu time=%9.3f ms "
+               "ops=r%llu/p%llu/e%llu\n",
+               scope_name((enum fffs_profile_scope)i),
+               (unsigned long long)s->calls,
+               (unsigned long long)s->bytes,
+               ms,
+               (unsigned long long)s->reads,
+               (unsigned long long)s->programs,
+               (unsigned long long)s->erases);
+    }
+}
+#endif
 
 static const char *cache_mode_name(void) {
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
@@ -111,6 +270,10 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
         .index_hash_table_size = INDEX_HASH_TABLE_SIZE,
         .scratch = scratch,
         .scratch_size = sizeof(scratch),
+#if FFFS_PROFILE_TRACE
+        .profile_trace = trace_callback,
+        .profile_trace_user = NULL,
+#endif
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
         .alloc_map = alloc_map,
         .alloc_map_words = sizeof(alloc_map) / sizeof(alloc_map[0]),
@@ -258,6 +421,147 @@ static void add_flash_counts(struct class_stats *stats,
     stats->flash_blank_checks += ops[FFSV_OP_BLANK_CHECK].calls;
 }
 
+static const char *profile_bucket_name(enum profile_bucket bucket) {
+    switch (bucket) {
+    case PROFILE_INDEX_READ:
+        return "index read";
+    case PROFILE_INDEX_PROGRAM:
+        return "index program";
+    case PROFILE_MD_TAIL_READ:
+        return "metadata tail read";
+    case PROFILE_MD_TAIL_PROGRAM:
+        return "metadata tail program";
+    case PROFILE_FOOTER_READ:
+        return "footer read";
+    case PROFILE_FOOTER_PROGRAM:
+        return "footer program";
+    case PROFILE_FOOTER_TOMBSTONE:
+        return "footer tombstone";
+    case PROFILE_SECTOR_SCAN_READ:
+        return "sector scan read";
+    case PROFILE_DATA_READ:
+        return "data read";
+    case PROFILE_DATA_PROGRAM:
+        return "data program";
+    case PROFILE_ERASE:
+        return "erase";
+    case PROFILE_OTHER:
+        return "other";
+    default:
+        return "unknown";
+    }
+}
+
+static bool op_is_at_sector_offset(const struct fffs *fs,
+        const struct ffsv_op_record *r, size_t pos, size_t size) {
+    return r->offset % fs->sector_size == pos && r->size == size;
+}
+
+static enum profile_bucket classify_profile_op(const struct fffs *fs,
+        const struct ffsv_op_record *r) {
+    if (r->type == FFSV_OP_ERASE) {
+        return PROFILE_ERASE;
+    }
+
+    if (r->sector < fs->index_sectors) {
+        if (r->type == FFSV_OP_READ) {
+            return PROFILE_INDEX_READ;
+        }
+        if (r->type == FFSV_OP_PROGRAM) {
+            return PROFILE_INDEX_PROGRAM;
+        }
+    }
+
+    size_t md_tail_size = FFFS_MD_SIZE + FFFS_SECTOR_FOOTER_SIZE;
+    size_t md_tail_pos = fs->sector_size - md_tail_size;
+    size_t footer_pos = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+    size_t tombstone_pos = footer_pos + 4u;
+
+    if (r->type == FFSV_OP_READ &&
+            op_is_at_sector_offset(fs, r, md_tail_pos, md_tail_size)) {
+        return PROFILE_MD_TAIL_READ;
+    }
+    if (r->type == FFSV_OP_PROGRAM &&
+            op_is_at_sector_offset(fs, r, md_tail_pos, md_tail_size)) {
+        return PROFILE_MD_TAIL_PROGRAM;
+    }
+    if (r->type == FFSV_OP_READ &&
+            op_is_at_sector_offset(fs, r, footer_pos,
+                    FFFS_SECTOR_FOOTER_SIZE)) {
+        return PROFILE_FOOTER_READ;
+    }
+    if (r->type == FFSV_OP_PROGRAM &&
+            op_is_at_sector_offset(fs, r, footer_pos,
+                    FFFS_SECTOR_FOOTER_SIZE)) {
+        return PROFILE_FOOTER_PROGRAM;
+    }
+    if (r->type == FFSV_OP_PROGRAM &&
+            op_is_at_sector_offset(fs, r, tombstone_pos, 4u)) {
+        return PROFILE_FOOTER_TOMBSTONE;
+    }
+    if (r->type == FFSV_OP_READ && r->sector >= fs->index_sectors &&
+            r->offset % fs->sector_size == 0 && r->size == fs->sector_size) {
+        return PROFILE_SECTOR_SCAN_READ;
+    }
+    if (r->type == FFSV_OP_READ) {
+        return PROFILE_DATA_READ;
+    }
+    if (r->type == FFSV_OP_PROGRAM) {
+        return PROFILE_DATA_PROGRAM;
+    }
+    return PROFILE_OTHER;
+}
+
+static void summarize_profile(struct ffsv_flash *flash,
+        const struct fffs *fs, uint64_t before_seq, uint64_t after_seq,
+        struct profile_stats out[PROFILE_COUNT]) {
+    memset(out, 0, sizeof(out[0]) * PROFILE_COUNT);
+    size_t count = 0;
+    const struct ffsv_op_record *log = ffsv_flash_log(flash, &count);
+    for (size_t i = 0; i < count; i++) {
+        const struct ffsv_op_record *r = &log[i];
+        if (r->sequence < before_seq || r->sequence >= after_seq) {
+            continue;
+        }
+        enum profile_bucket bucket = classify_profile_op(fs, r);
+        out[bucket].calls += 1;
+        out[bucket].bytes += r->committed_bytes != 0 ?
+            r->committed_bytes : r->size;
+        out[bucket].ns += r->time_after_ns - r->time_before_ns;
+    }
+}
+
+static void add_profile(struct profile_stats dst[PROFILE_COUNT],
+        const struct profile_stats src[PROFILE_COUNT]) {
+    for (size_t i = 0; i < PROFILE_COUNT; i++) {
+        dst[i].calls += src[i].calls;
+        dst[i].bytes += src[i].bytes;
+        dst[i].ns += src[i].ns;
+    }
+}
+
+static void print_profile(const char *label,
+        const struct profile_stats stats[PROFILE_COUNT]) {
+    uint64_t total_ns = 0;
+    for (size_t i = 0; i < PROFILE_COUNT; i++) {
+        total_ns += stats[i].ns;
+    }
+    printf("%s flash profile\n", label);
+    for (size_t i = 0; i < PROFILE_COUNT; i++) {
+        if (stats[i].calls == 0) {
+            continue;
+        }
+        double ms = (double)stats[i].ns / 1000000.0;
+        double pct = total_ns == 0 ? 0.0 :
+            ((double)stats[i].ns * 100.0) / (double)total_ns;
+        printf("  %-21s calls=%6llu bytes=%9llu time=%9.3f ms %5.1f%%\n",
+               profile_bucket_name((enum profile_bucket)i),
+               (unsigned long long)stats[i].calls,
+               (unsigned long long)stats[i].bytes,
+               ms, pct);
+    }
+}
+
 static const char *class_name(bench_churn_class_t cls) {
     return bench_churn_class_name(cls);
 }
@@ -293,9 +597,15 @@ static uint32_t count_live_slots(const bench_churn_model_t *model) {
 }
 
 static int run_gc_steps(struct fffs *fs, size_t steps, uint64_t *out_ns,
-        size_t *out_erased) {
+        size_t *out_erased, struct profile_stats profile[PROFILE_COUNT]
+#if FFFS_PROFILE_TRACE
+        , struct trace_capture *scope_trace
+#endif
+        ) {
     uint64_t before = 0;
     uint64_t after = 0;
+    uint64_t before_seq = 0;
+    uint64_t after_seq = 0;
     size_t erased = 0;
     if (steps == 0) {
         if (out_ns) {
@@ -306,14 +616,31 @@ static int run_gc_steps(struct fffs *fs, size_t steps, uint64_t *out_ns,
         }
         return FFFS_OK;
     }
+#if FFFS_PROFILE_TRACE
+    struct trace_capture *previous_extra = active_extra_trace;
+    if (scope_trace) {
+        scope_trace->last_ns = ffsv_flash_time_ns(fs->backend.ctx);
+        active_extra_trace = scope_trace;
+    }
+#endif
+    before_seq = ffsv_flash_next_sequence(fs->backend.ctx);
     before = ffsv_flash_time_ns(fs->backend.ctx);
     int err = fffs_gc(fs, steps, &erased);
     after = ffsv_flash_time_ns(fs->backend.ctx);
+    after_seq = ffsv_flash_next_sequence(fs->backend.ctx);
+#if FFFS_PROFILE_TRACE
+    active_extra_trace = previous_extra;
+#endif
     if (out_ns) {
         *out_ns = after - before;
     }
     if (out_erased) {
         *out_erased = erased;
+    }
+    if (profile) {
+        struct profile_stats local[PROFILE_COUNT];
+        summarize_profile(fs->backend.ctx, fs, before_seq, after_seq, local);
+        add_profile(profile, local);
     }
     return err;
 }
@@ -342,8 +669,18 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     struct class_stats read_stats[BENCH_CHURN_CLASS_COUNT] = {0};
     uint64_t gc_ns = 0;
     size_t gc_erased = 0;
+    struct profile_stats gc_profile[PROFILE_COUNT] = {0};
+#if FFFS_PROFILE_TRACE
+    struct trace_capture churn_scope_profile;
+    struct trace_capture gc_scope_profile;
+    struct trace_capture forced_gc_scope_profile;
+    struct trace_capture list_scope_profile;
+    struct trace_capture mount_scope_profile;
+    struct trace_capture read_scope_profile;
+#endif
     uint64_t forced_gc_ns = 0;
     size_t forced_gc_erased = 0;
+    struct profile_stats forced_gc_profile[PROFILE_COUNT] = {0};
     uint32_t write_ops = 0;
     uint32_t delete_ops = 0;
     uint32_t no_space_retries = 0;
@@ -384,7 +721,14 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
         ffsv_flash_destroy(flash);
         return 1;
     }
+#if FFFS_PROFILE_TRACE
+    trace_reset(&mount_scope_profile, flash);
+    active_trace = &mount_scope_profile;
+#endif
     err = mount_fs(&fs, &backend, index_cache);
+#if FFFS_PROFILE_TRACE
+    active_trace = NULL;
+#endif
     if (err != FFFS_OK) {
         fprintf(stderr, "mount failed: %s\n", fffs_status_name(err));
         dump_final_image(flash, profile_name);
@@ -398,6 +742,12 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
             FFFS_HOST_CHURN_TARGET_SLACK_BYTES,
             FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES);
 
+#if FFFS_PROFILE_TRACE
+    trace_reset(&churn_scope_profile, flash);
+    trace_reset(&gc_scope_profile, flash);
+    trace_reset(&forced_gc_scope_profile, flash);
+    active_trace = &churn_scope_profile;
+#endif
     uint64_t churn_before_seq = ffsv_flash_next_sequence(flash);
     uint64_t churn_before = ffsv_flash_time_ns(flash);
     while (true) {
@@ -439,7 +789,11 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
                 uint64_t local_gc_ns = 0;
                 size_t local_erased = 0;
                 int gc_err = run_gc_steps(&fs, FFFS_HOST_CHURN_FORCED_GC_STEPS,
-                        &local_gc_ns, &local_erased);
+                        &local_gc_ns, &local_erased, forced_gc_profile
+#if FFFS_PROFILE_TRACE
+                        , &forced_gc_scope_profile
+#endif
+                        );
                 forced_gc_ns += local_gc_ns;
                 forced_gc_erased += local_erased;
                 if (gc_err == FFFS_OK) {
@@ -471,7 +825,11 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
         uint64_t local_gc_ns = 0;
         size_t local_erased = 0;
         int gc_err = run_gc_steps(&fs, FFFS_HOST_CHURN_GC_STEPS_PER_OP,
-                &local_gc_ns, &local_erased);
+                &local_gc_ns, &local_erased, gc_profile
+#if FFFS_PROFILE_TRACE
+                , &gc_scope_profile
+#endif
+                );
         gc_ns += local_gc_ns;
         gc_erased += local_erased;
         if (gc_err != FFFS_OK) {
@@ -482,6 +840,9 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
     uint64_t churn_after = ffsv_flash_time_ns(flash);
     uint64_t churn_after_seq = ffsv_flash_next_sequence(flash);
+#if FFFS_PROFILE_TRACE
+    active_trace = NULL;
+#endif
 
     if (err != FFFS_OK) {
         fffs_unmount(&fs);
@@ -491,11 +852,18 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
 
     size_t listed = 0;
+#if FFFS_PROFILE_TRACE
+    trace_reset(&list_scope_profile, flash);
+    active_trace = &list_scope_profile;
+#endif
     uint64_t list_before_seq = ffsv_flash_next_sequence(flash);
     uint64_t list_before = ffsv_flash_time_ns(flash);
     err = list_all(&fs, &listed);
     uint64_t list_after = ffsv_flash_time_ns(flash);
     uint64_t list_after_seq = ffsv_flash_next_sequence(flash);
+#if FFFS_PROFILE_TRACE
+    active_trace = NULL;
+#endif
     if (err != FFFS_OK) {
         fprintf(stderr, "list failed: %s\n", fffs_status_name(err));
         fffs_unmount(&fs);
@@ -512,11 +880,18 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
     fffs_unmount(&fs);
 
+#if FFFS_PROFILE_TRACE
+    trace_reset(&mount_scope_profile, flash);
+    active_trace = &mount_scope_profile;
+#endif
     uint64_t mount_before_seq = ffsv_flash_next_sequence(flash);
     uint64_t mount_before = ffsv_flash_time_ns(flash);
     err = mount_fs(&remounted, &backend, remount_cache);
     uint64_t mount_after = ffsv_flash_time_ns(flash);
     uint64_t mount_after_seq = ffsv_flash_next_sequence(flash);
+#if FFFS_PROFILE_TRACE
+    active_trace = NULL;
+#endif
     if (err != FFFS_OK) {
         fprintf(stderr, "cold mount failed: %s\n", fffs_status_name(err));
         dump_final_image(flash, profile_name);
@@ -531,6 +906,10 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
         return 1;
     }
 
+#if FFFS_PROFILE_TRACE
+    trace_reset(&read_scope_profile, flash);
+    active_trace = &read_scope_profile;
+#endif
     uint64_t read_before_seq = ffsv_flash_next_sequence(flash);
     uint64_t read_before = ffsv_flash_time_ns(flash);
     size_t read_files = 0;
@@ -564,15 +943,30 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
     uint64_t read_after = ffsv_flash_time_ns(flash);
     uint64_t read_after_seq = ffsv_flash_next_sequence(flash);
+#if FFFS_PROFILE_TRACE
+    active_trace = NULL;
+#endif
 
     struct op_summary churn_ops[FFSV_OP_COUNT];
     struct op_summary list_ops[FFSV_OP_COUNT];
     struct op_summary mount_ops[FFSV_OP_COUNT];
     struct op_summary read_ops[FFSV_OP_COUNT];
+    struct profile_stats churn_profile[PROFILE_COUNT];
+    struct profile_stats list_profile[PROFILE_COUNT];
+    struct profile_stats mount_profile[PROFILE_COUNT];
+    struct profile_stats read_profile[PROFILE_COUNT];
     summarize_ops(flash, churn_before_seq, churn_after_seq, churn_ops);
     summarize_ops(flash, list_before_seq, list_after_seq, list_ops);
     summarize_ops(flash, mount_before_seq, mount_after_seq, mount_ops);
     summarize_ops(flash, read_before_seq, read_after_seq, read_ops);
+    summarize_profile(flash, &fs, churn_before_seq, churn_after_seq,
+            churn_profile);
+    summarize_profile(flash, &fs, list_before_seq, list_after_seq,
+            list_profile);
+    summarize_profile(flash, &remounted, mount_before_seq, mount_after_seq,
+            mount_profile);
+    summarize_profile(flash, &remounted, read_before_seq, read_after_seq,
+            read_profile);
 
     printf("format                  time=%9.3f ms\n",
            (double)(format_after - format_before) / 1000000.0);
@@ -593,6 +987,14 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     printf("gc forced               steps=%u time=%9.3f ms erased=%zu\n",
            FFFS_HOST_CHURN_FORCED_GC_STEPS,
            (double)forced_gc_ns / 1000000.0, forced_gc_erased);
+    print_profile("churn total", churn_profile);
+    print_profile("gc idle", gc_profile);
+    print_profile("gc forced", forced_gc_profile);
+#if FFFS_PROFILE_TRACE
+    print_scope_profile("churn total", &churn_scope_profile);
+    print_scope_profile("gc idle", &gc_scope_profile);
+    print_scope_profile("gc forced", &forced_gc_scope_profile);
+#endif
     print_class_stats("write", write_stats);
     print_class_stats("delete", delete_stats);
     printf("warm list               files=%zu time=%9.3f ms flash_ops=r%llu/p%llu/e%llu/bc%llu\n",
@@ -601,18 +1003,30 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
            (unsigned long long)list_ops[FFSV_OP_PROGRAM].calls,
            (unsigned long long)list_ops[FFSV_OP_ERASE].calls,
            (unsigned long long)list_ops[FFSV_OP_BLANK_CHECK].calls);
+    print_profile("warm list", list_profile);
+#if FFFS_PROFILE_TRACE
+    print_scope_profile("warm list", &list_scope_profile);
+#endif
     printf("cold mount              time=%9.3f ms flash_ops=r%llu/p%llu/e%llu/bc%llu\n",
            (double)(mount_after - mount_before) / 1000000.0,
            (unsigned long long)mount_ops[FFSV_OP_READ].calls,
            (unsigned long long)mount_ops[FFSV_OP_PROGRAM].calls,
            (unsigned long long)mount_ops[FFSV_OP_ERASE].calls,
            (unsigned long long)mount_ops[FFSV_OP_BLANK_CHECK].calls);
+    print_profile("cold mount", mount_profile);
+#if FFFS_PROFILE_TRACE
+    print_scope_profile("cold mount", &mount_scope_profile);
+#endif
     printf("cold read summary       files=%zu time=%9.3f ms flash_ops=r%llu/p%llu/e%llu/bc%llu\n",
            read_files, (double)(read_after - read_before) / 1000000.0,
            (unsigned long long)read_ops[FFSV_OP_READ].calls,
            (unsigned long long)read_ops[FFSV_OP_PROGRAM].calls,
            (unsigned long long)read_ops[FFSV_OP_ERASE].calls,
            (unsigned long long)read_ops[FFSV_OP_BLANK_CHECK].calls);
+    print_profile("cold read", read_profile);
+#if FFFS_PROFILE_TRACE
+    print_scope_profile("cold read", &read_scope_profile);
+#endif
     print_class_stats("cold read", read_stats);
 
     fffs_unmount(&remounted);

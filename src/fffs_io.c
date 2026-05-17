@@ -45,6 +45,40 @@ bool fffs_valid_backend(const struct fffs_backend *backend) {
         backend->read && backend->program && backend->erase;
 }
 
+#if FFFS_PROFILE_TRACE
+void fffs_profile_push(struct fffs *fs, enum fffs_profile_scope scope) {
+    if (!fs || fs->profile_depth >=
+            sizeof(fs->profile_stack) / sizeof(fs->profile_stack[0])) {
+        return;
+    }
+    fs->profile_stack[fs->profile_depth++] = scope;
+}
+
+void fffs_profile_pop(struct fffs *fs, enum fffs_profile_scope scope) {
+    if (!fs || fs->profile_depth == 0) {
+        return;
+    }
+    if (fs->profile_stack[fs->profile_depth - 1u] == scope) {
+        fs->profile_depth--;
+        return;
+    }
+    fs->profile_depth = 0;
+}
+
+void fffs_profile_flash(struct fffs *fs, enum fffs_profile_flash_op op,
+        size_t offset, size_t size) {
+    if (!fs || !fs->profile_trace) {
+        return;
+    }
+    enum fffs_profile_scope unscoped = FFFS_PROFILE_UNSCOPED;
+    const enum fffs_profile_scope *stack = fs->profile_depth == 0 ?
+        &unscoped : fs->profile_stack;
+    size_t depth = fs->profile_depth == 0 ? 1u : fs->profile_depth;
+    fs->profile_trace(fs, stack, depth, op, offset, size,
+            fs->profile_trace_user);
+}
+#endif
+
 uint16_t fffs_hash16(const char *name) {
     uint32_t h = 2166136261u;
     for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
@@ -74,14 +108,22 @@ uint16_t fffs_next_slot(uint16_t slot) {
 
 int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size) {
-    return fffs_map_backend_status(fs->backend.read(fs->backend.ctx,
+    int err = fffs_map_backend_status(fs->backend.read(fs->backend.ctx,
                 offset, buffer, size));
+#if FFFS_PROFILE_TRACE
+    fffs_profile_flash(fs, FFFS_PROFILE_FLASH_READ, offset, size);
+#endif
+    return err;
 }
 
 int fffs_flash_program(struct fffs *fs, size_t offset,
         const void *buffer, size_t size) {
-    return fffs_map_backend_status(fs->backend.program(fs->backend.ctx,
+    int err = fffs_map_backend_status(fs->backend.program(fs->backend.ctx,
                 offset, buffer, size));
+#if FFFS_PROFILE_TRACE
+    fffs_profile_flash(fs, FFFS_PROFILE_FLASH_PROGRAM, offset, size);
+#endif
+    return err;
 }
 
 static int backend_program_aligned(const struct fffs_backend *backend,
@@ -121,7 +163,11 @@ static int backend_program_aligned(const struct fffs_backend *backend,
 
 int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size) {
-    return backend_program_aligned(&fs->backend, offset, buffer, size);
+    int err = backend_program_aligned(&fs->backend, offset, buffer, size);
+#if FFFS_PROFILE_TRACE
+    fffs_profile_flash(fs, FFFS_PROFILE_FLASH_PROGRAM, offset, size);
+#endif
+    return err;
 }
 
 void fffs_scratch_bump(struct fffs *fs) {
@@ -655,6 +701,10 @@ static int rotate_index_begin(struct fffs *fs) {
     size_t new_base = new_active * fs->sector_size;
     int err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
                 new_base, fs->sector_size));
+#if FFFS_PROFILE_TRACE
+    fffs_profile_flash(fs, FFFS_PROFILE_FLASH_ERASE, new_base,
+            fs->sector_size);
+#endif
     if (err != FFFS_OK) {
         return err;
     }
@@ -745,7 +795,9 @@ int fffs_replay_index(struct fffs *fs) {
             size_t remaining = end - off;
             size_t nread = remaining < chunk_size ? remaining : chunk_size;
             nread -= nread % 4;
+            FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_INDEX_REPLAY);
             int err = fffs_flash_read(fs, off, chunk, nread);
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_INDEX_REPLAY);
             if (err != FFFS_OK) {
                 return err;
             }
@@ -875,8 +927,10 @@ int fffs_read_metadata(struct fffs *fs, uint16_t sector,
     }
 
     uint8_t tail[FFFS_MD_SIZE + FFFS_SECTOR_FOOTER_SIZE];
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_READ_METADATA);
     int err = fffs_flash_read(fs, fffs_sector_metadata_offset(fs, sector),
             tail, sizeof(tail));
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_READ_METADATA);
     if (err != FFFS_OK) {
         return err;
     }
