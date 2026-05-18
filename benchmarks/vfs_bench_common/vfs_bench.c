@@ -14,7 +14,6 @@
 #include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include "churn_model.h"
 
@@ -139,12 +138,12 @@ static int64_t now_us(void)
     return esp_timer_get_time();
 }
 
-static uint32_t kib_per_s(uint32_t bytes, int64_t elapsed_us)
+static uint64_t bytes_per_s(uint32_t bytes, int64_t elapsed_us)
 {
     if (elapsed_us <= 0) {
         return 0;
     }
-    return (uint32_t)(((uint64_t)bytes * 1000000ULL) / ((uint64_t)elapsed_us * 1024ULL));
+    return ((uint64_t)bytes * 1000000ULL) / (uint64_t)elapsed_us;
 }
 
 static int permuted_index(int i, int count, int stride, int offset)
@@ -217,19 +216,19 @@ static int erase_partition_for_phase(const char *label)
 
 static void log_raw_result(const char *op, uint32_t bytes, int64_t elapsed_us)
 {
-    ESP_LOGI(TAG, "raw partition %s bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "raw partition %s bytes=%lu time_us=%lld bytes_per_s=%llu",
              op, (unsigned long)bytes, (long long)elapsed_us,
-             (unsigned long)kib_per_s(bytes, elapsed_us));
+             (unsigned long long)bytes_per_s(bytes, elapsed_us));
 }
 
 static void log_raw_sample_result(const char *op, uint32_t bytes, uint32_t samples,
                                   int64_t min_us, int64_t avg_us, int64_t max_us)
 {
     ESP_LOGI(TAG,
-             "raw partition %s bytes=%lu samples=%lu min_us=%lld avg_us=%lld max_us=%lld avg_kib_s=%lu",
+             "raw partition %s bytes=%lu samples=%lu min_us=%lld avg_us=%lld max_us=%lld avg_bytes_per_s=%llu",
              op, (unsigned long)bytes, (unsigned long)samples, (long long)min_us,
              (long long)avg_us, (long long)max_us,
-             (unsigned long)kib_per_s(bytes, avg_us));
+             (unsigned long long)bytes_per_s(bytes, avg_us));
 }
 
 static void run_raw_partition_bench(void)
@@ -654,20 +653,20 @@ static void read_named_range(const char *label, char prefix, int start, int coun
     }
 
     int64_t elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "%s files=%d size=%lu bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "%s files=%d size=%lu bytes=%lu time_us=%lld bytes_per_s=%llu",
              label, count, (unsigned long)size, (unsigned long)bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(bytes, elapsed));
+             (unsigned long long)bytes_per_s(bytes, elapsed));
 }
 
 static void log_read_stats(const char *label, const read_stats_t *stats)
 {
     ESP_LOGI(TAG,
-             "%s files=%lu bytes=%lu total_us=%lld total_kib_s=%lu open_us=%lld read_us=%lld read_kib_s=%lu close_us=%lld",
+             "%s files=%lu bytes=%lu total_us=%lld total_bytes_per_s=%llu open_us=%lld read_us=%lld read_bytes_per_s=%llu close_us=%lld",
              label, (unsigned long)stats->files, (unsigned long)stats->bytes,
              (long long)stats->total_us,
-             (unsigned long)kib_per_s(stats->bytes, stats->total_us),
+             (unsigned long long)bytes_per_s(stats->bytes, stats->total_us),
              (long long)stats->open_us, (long long)stats->read_us,
-             (unsigned long)kib_per_s(stats->bytes, stats->read_us),
+             (unsigned long long)bytes_per_s(stats->bytes, stats->read_us),
              (long long)stats->close_us);
 }
 
@@ -683,12 +682,21 @@ static void log_read_class_stats(const char *label, read_stats_t stats[SIZE_CLAS
 static void log_class_stats(const char *label, class_stats_t stats[SIZE_CLASS_COUNT])
 {
     for (int i = 0; i < SIZE_CLASS_COUNT; ++i) {
-        ESP_LOGI(TAG, "%s class=%s ops=%lu files=%lu bytes=%lu time_us=%lld kib_s=%lu",
+        ESP_LOGI(TAG, "%s class=%s ops=%lu files=%lu bytes=%lu time_us=%lld bytes_per_s=%llu",
                  label, class_name((size_class_t)i), (unsigned long)stats[i].ops,
                  (unsigned long)stats[i].files, (unsigned long)stats[i].bytes,
                  (long long)stats[i].time_us,
-                 (unsigned long)kib_per_s(stats[i].bytes, stats[i].time_us));
+                 (unsigned long long)bytes_per_s(stats[i].bytes, stats[i].time_us));
     }
+}
+
+static int64_t class_stats_time_total(const class_stats_t stats[SIZE_CLASS_COUNT])
+{
+    int64_t total = 0;
+    for (int i = 0; i < SIZE_CLASS_COUNT; ++i) {
+        total += stats[i].time_us;
+    }
+    return total;
 }
 
 static void record_class_stats(class_stats_t stats[SIZE_CLASS_COUNT],
@@ -866,9 +874,9 @@ static void bench_cold_start_phase(void)
         bytes += bench_read_file_timed(name, &tiny_stats);
     }
     int64_t elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "cold read tiny files=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "cold read tiny files=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              BENCH_COLD_TINY_READS, (unsigned long)bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(bytes, elapsed));
+             (unsigned long long)bytes_per_s(bytes, elapsed));
     log_read_stats("cold read tiny split", &tiny_stats);
 
     bytes = 0;
@@ -880,9 +888,9 @@ static void bench_cold_start_phase(void)
         bytes += bench_read_file_timed(name, &med_stats);
     }
     elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "cold read medium files=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "cold read medium files=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              BENCH_COLD_MED_READS, (unsigned long)bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(bytes, elapsed));
+             (unsigned long long)bytes_per_s(bytes, elapsed));
     log_read_stats("cold read medium split", &med_stats);
 }
 
@@ -1021,6 +1029,7 @@ static void run_churn_workload(void)
              (unsigned long)CHURN_TARGET_SLACK_BYTES,
              (unsigned long)CHURN_TARGET_WRITTEN_BYTES);
 
+    int64_t churn_wall_start_us = now_us();
     while (1) {
         bench_churn_event_t event;
         bench_churn_event_type_t type = bench_churn_model_next(&model, &event);
@@ -1083,10 +1092,10 @@ static void run_churn_workload(void)
                            elapsed);
         op++;
 
-        ESP_LOGI(TAG, "churn op=%lu name=%s class=%s size=%lu write_us=%lld write_kib_s=%lu total_written=%lu live=%lu",
+        ESP_LOGI(TAG, "churn op=%lu name=%s class=%s size=%lu write_us=%lld write_bytes_per_s=%llu total_written=%lu live=%lu",
                  (unsigned long)op, event.name, class_name((size_class_t)event.cls),
                  (unsigned long)event.size, (long long)elapsed,
-                 (unsigned long)kib_per_s(event.size, elapsed),
+                 (unsigned long long)bytes_per_s(event.size, elapsed),
                  (unsigned long)model.total_written, (unsigned long)model.live_bytes);
 
         if ((op % 25u) == 0u || model.total_written >= CHURN_TARGET_WRITTEN_BYTES) {
@@ -1099,22 +1108,31 @@ static void run_churn_workload(void)
                      (unsigned long)model.live_bytes,
                      (unsigned long)create_ops, (unsigned long)replace_ops,
                      (unsigned long)delete_ops);
-            ESP_LOGI(TAG, "churn progress interval_bytes=%lu interval_us=%lld interval_kib_s=%lu live_files=%lu forced_large=%lu",
+            ESP_LOGI(TAG, "churn progress interval_bytes=%lu interval_us=%lld interval_bytes_per_s=%llu live_files=%lu forced_large=%lu",
                      (unsigned long)interval_bytes, (long long)interval_us,
-                     (unsigned long)kib_per_s(interval_bytes, interval_us),
+                     (unsigned long long)bytes_per_s(interval_bytes, interval_us),
                      (unsigned long)live_files, (unsigned long)model.forced_large_written);
             log_fs_info("churn progress");
             log_write_health("churn progress");
             last_progress_written = model.total_written;
             last_progress_us = now;
         }
-        vTaskDelay(1);
     }
 
+    int64_t churn_wall_us = now_us() - churn_wall_start_us;
+    int64_t churn_write_us = class_stats_time_total(write_stats);
+    int64_t churn_delete_us = churn_delete_latency.total_us;
+    int64_t churn_accounted_us = churn_write_us + churn_delete_us;
+    int64_t churn_benchmark_overhead_us = churn_wall_us - churn_accounted_us;
     ESP_LOGI(TAG, "churn summary ops=%lu written=%lu live=%lu creates=%lu replaces=%lu deletes=%lu",
              (unsigned long)op, (unsigned long)model.total_written,
              (unsigned long)model.live_bytes,
              (unsigned long)create_ops, (unsigned long)replace_ops, (unsigned long)delete_ops);
+    ESP_LOGI(TAG, "churn accounting wall_us=%lld accounted_us=%lld write_us=%lld delete_us=%lld gc_step_us=0 benchmark_overhead_us=%lld unaccounted_us=%lld",
+             (long long)churn_wall_us, (long long)churn_accounted_us,
+             (long long)churn_write_us, (long long)churn_delete_us,
+             (long long)churn_benchmark_overhead_us,
+             (long long)churn_benchmark_overhead_us);
     ESP_LOGI(TAG, "churn live files avg=%lu samples=%lu",
              (unsigned long)(model.live_file_samples ?
                  model.live_file_sum / model.live_file_samples : 0),
@@ -1180,10 +1198,10 @@ void run_vfs_benchmarks(void)
         }
     }
     elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "write tiny files=%lu attempted=%d errors=%lu size=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "write tiny files=%lu attempted=%d errors=%lu size=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              (unsigned long)ok_files, BENCH_TINY_FILES, (unsigned long)errors,
              BENCH_TINY_SIZE, (unsigned long)ok_bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(ok_bytes, elapsed));
+             (unsigned long long)bytes_per_s(ok_bytes, elapsed));
     size_t after_tiny_used = log_fs_info("after tiny");
     log_storage_overhead("after tiny", ok_files, ok_bytes, baseline_used, after_tiny_used);
     log_write_health("after tiny");
@@ -1199,9 +1217,9 @@ void run_vfs_benchmarks(void)
         bytes += bench_read_file_timed(name, &tiny_read_stats);
     }
     elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "read tiny files=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "read tiny files=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              BENCH_TINY_FILES, (unsigned long)bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(bytes, elapsed));
+             (unsigned long long)bytes_per_s(bytes, elapsed));
     log_read_stats("read tiny split", &tiny_read_stats);
 
     ok_files = 0;
@@ -1220,10 +1238,10 @@ void run_vfs_benchmarks(void)
         }
     }
     elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "write medium files=%lu attempted=%d errors=%lu size=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "write medium files=%lu attempted=%d errors=%lu size=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              (unsigned long)ok_files, BENCH_MED_FILES, (unsigned long)errors,
              BENCH_MED_SIZE, (unsigned long)ok_bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(ok_bytes, elapsed));
+             (unsigned long long)bytes_per_s(ok_bytes, elapsed));
     size_t after_medium_used = log_fs_info("after medium");
     log_storage_overhead("after medium", BENCH_TINY_FILES + ok_files,
                          BENCH_TINY_FILES * BENCH_TINY_SIZE + ok_bytes,
@@ -1239,9 +1257,9 @@ void run_vfs_benchmarks(void)
         bytes += bench_read_file_timed(name, &med_read_stats);
     }
     elapsed = now_us() - t0;
-    ESP_LOGI(TAG, "read medium files=%d bytes=%lu time_us=%lld kib_s=%lu",
+    ESP_LOGI(TAG, "read medium files=%d bytes=%lu time_us=%lld bytes_per_s=%llu",
              BENCH_MED_FILES, (unsigned long)bytes, (long long)elapsed,
-             (unsigned long)kib_per_s(bytes, elapsed));
+             (unsigned long long)bytes_per_s(bytes, elapsed));
     log_read_stats("read medium split", &med_read_stats);
 
     bench_list();

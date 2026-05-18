@@ -62,23 +62,41 @@ The churn mix is mostly 10-20 KiB files, some 20-60 KiB files, and one forced
 
 ## Build And Run
 
-From the repo root, after activating ESP-IDF:
+Use `benchidf.sh` from the repo root. It activates ESP-IDF, owns the project and
+build-directory arguments, keeps build trees under each benchmark project, and
+captures monitor output under `benchmarks/results/`.
 
 ```sh
-idf.py -C benchmarks/esp32s3_jesfs build
-idf.py -C benchmarks/esp32s3_littlefs build
-idf.py -C benchmarks/esp32s3_spiffs build
+benchmarks/benchidf.sh --list
+benchmarks/benchidf.sh fastffs-default build
+benchmarks/benchidf.sh jesfs build
+benchmarks/benchidf.sh littlefs build
+benchmarks/benchidf.sh spiffs build
 ```
 
 Flash and monitor one project at a time:
 
 ```sh
-idf.py -C benchmarks/esp32s3_jesfs -p /dev/cu.usbserial-10 flash monitor
-idf.py -C benchmarks/esp32s3_littlefs -p /dev/cu.usbserial-10 flash monitor
-idf.py -C benchmarks/esp32s3_spiffs -p /dev/cu.usbserial-10 flash monitor
+benchmarks/benchidf.sh fastffs-default flash monitor
+benchmarks/benchidf.sh jesfs flash monitor
+benchmarks/benchidf.sh littlefs flash monitor
+benchmarks/benchidf.sh spiffs flash monitor
 ```
 
-Use the serial port that matches the attached board.
+Use `--port` or `ESPPORT` for a different attached board:
+
+```sh
+benchmarks/benchidf.sh fastffs-debt --port /dev/cu.usbserial-10 flash monitor
+```
+
+The wrapper adds monitor exits for crashes and the benchmark completion line
+unless those specific monitor options are already supplied. Timestamped logs are
+named like `benchmarks/results/20260518_143210_fastffs_default.log`.
+
+Build directories are named `build-<variant>` and are always placed under the
+selected benchmark project, for example
+`benchmarks/esp32s3_fastffs/build-fastffs-default`. Do not pass `idf.py -B` or
+`idf.py -C` directly for benchmark runs.
 
 ## Output Files
 
