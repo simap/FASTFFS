@@ -549,41 +549,25 @@ static void log_delete_class_stats(const char *prefix,
     }
 }
 
-static uint32_t estimated_used_bytes(uint32_t payload_bytes, uint32_t files)
+static void log_fsinfo(const char *label)
 {
-    (void)payload_bytes;
-    uint32_t sectors = 0;
-    size_t max_data = FASTFFS_SECTOR_DATA_BYTES;
-    if (max_data == 0) {
-        return 0;
+    struct fffs_fsinfo info;
+    int rc = fffs_fsinfo(&s_fs, &info,
+                         FFFS_FSINFO_REFRESH_IF_NEEDED |
+                         FFFS_FSINFO_ESTIMATE_METADATA);
+    if (rc != FFFS_OK) {
+        ESP_LOGI(TAG, "%s fsinfo rc=%s", label, fffs_status_name(rc));
+        return;
     }
-    for (uint32_t i = 0; i < BENCH_TINY_FILES && i < files; ++i) {
-        sectors += (BENCH_TINY_SIZE + max_data - 1) / max_data;
-    }
-    if (files > BENCH_TINY_FILES) {
-        uint32_t med = files - BENCH_TINY_FILES;
-        for (uint32_t i = 0; i < med; ++i) {
-            sectors += (BENCH_MED_SIZE + max_data - 1) / max_data;
-        }
-    }
-    return sectors * (uint32_t)s_fs.sector_size +
-           (uint32_t)(s_fs.index_sectors * s_fs.sector_size);
-}
-
-static void log_storage_estimate(const char *label, uint32_t files,
-                                 uint32_t payload_bytes)
-{
-    uint32_t used = estimated_used_bytes(payload_bytes, files);
-    uint32_t overhead = used > payload_bytes ? used - payload_bytes : 0;
     ESP_LOGI(TAG,
-             "%s storage_estimate files=%lu payload_bytes=%lu estimated_used=%lu bytes_per_file=%lu overhead_per_file=%lu overhead_pct=%lu",
-             label, (unsigned long)files, (unsigned long)payload_bytes,
-             (unsigned long)used,
-             (unsigned long)(files ? used / files : 0),
-             (unsigned long)(files ? overhead / files : 0),
-             (unsigned long)(payload_bytes ?
-                             ((uint64_t)overhead * 100ULL) / payload_bytes :
-                             0ULL));
+             "%s fsinfo valid=0x%lx total=%lu committed_files=%lu committed_bytes=%lu inflight_files=%lu inflight_bytes=%lu estimated_metadata=%lu",
+             label, (unsigned long)info.valid_flags,
+             (unsigned long)info.total_bytes,
+             (unsigned long)info.committed_file_count,
+             (unsigned long)info.committed_data_bytes,
+             (unsigned long)info.inflight_file_count,
+             (unsigned long)info.inflight_data_bytes,
+             (unsigned long)info.estimated_metadata_bytes);
 }
 
 static int bench_write_file_once(const char *name, uint32_t size,
@@ -1089,12 +1073,12 @@ static void run_baseline(void)
     if (rc != FFFS_OK) {
         return;
     }
-    ESP_LOGI(TAG, "baseline info total=%lu estimated_used=%lu sector_size=%lu index_sectors=%u max_file_data=%lu",
+    ESP_LOGI(TAG, "baseline info partition_bytes=%lu index_reserved=%lu sector_size=%lu index_sectors=%u max_file_data=%lu",
              (unsigned long)s_part->size,
              (unsigned long)(s_fs.index_sectors * s_fs.sector_size),
              (unsigned long)s_fs.sector_size, s_fs.index_sectors,
              (unsigned long)FASTFFS_SECTOR_DATA_BYTES);
-    log_storage_estimate("baseline overhead_base", 0, 0);
+    log_fsinfo("baseline empty");
 
 retry_after_bootstrap:
     {
@@ -1121,7 +1105,7 @@ retry_after_bootstrap:
                  BENCH_TINY_FILES, BENCH_TINY_SIZE, (unsigned long)bytes,
                  (long long)(now_us() - t0),
                  (unsigned long)kib_per_s(bytes, now_us() - t0));
-        log_storage_estimate("after tiny", BENCH_TINY_FILES, bytes);
+        log_fsinfo("after tiny");
     }
 
     bench_list();
@@ -1160,8 +1144,7 @@ retry_after_bootstrap:
                  BENCH_MED_FILES, BENCH_MED_SIZE, (unsigned long)bytes,
                  (long long)(now_us() - t0),
                  (unsigned long)kib_per_s(bytes, now_us() - t0));
-        log_storage_estimate("after medium", BENCH_TINY_FILES + BENCH_MED_FILES,
-                             BENCH_TINY_FILES * BENCH_TINY_SIZE + bytes);
+        log_fsinfo("after medium");
     }
 
     {
