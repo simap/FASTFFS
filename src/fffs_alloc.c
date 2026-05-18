@@ -211,10 +211,11 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
         }
         uint16_t data_off;
         uint16_t record_off;
+        uint16_t md_records;
         bool needs_footer;
         int err = fffs_find_sector_free_window(fs, (uint16_t)s,
                 FFFS_ALLOC_MIN_USABLE_FREE, file->slot, &data_off, &record_off,
-                &needs_footer);
+                &needs_footer, &md_records);
         if (err == FFFS_OK) {
             *sector = (uint16_t)s;
             file->data_offset = data_off;
@@ -224,6 +225,9 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
             fffs_alloc_map_mark_used(fs, *sector);
             if (needs_footer) {
                 reserve_after(file, *sector);
+            }
+            if (md_records >= FFFS_ALLOC_TARGET_DENSITY) {
+                fs->alloc_cursor = fffs_next_data_sector(fs, s);
             }
             return FFFS_OK;
         }

@@ -463,7 +463,16 @@ A coarse bitmap could compress this down significiantly, while still having some
 Coarse map variants should use conservative "proven full bucket" semantics,
 not "some live sector was full" semantics. Since allocation attempts to fill sequentially, there should be many contiguous, completely full blocks of sectors that can be skipped over. There would still be some partially full buckets, but it would still be less scanning that scanning every sector.
 
-The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector densely until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space. The allocator does not try to hunt for sparse holes before filling the current usable sector.
+The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space, or until a soft metadata-density target suggests moving on. The allocator does not try to hunt for sparse holes before filling the current usable sector.
+
+The hard metadata-record cap provides an upper limit to file search time: allocation must not append past
+it. A lower target density is only a post-allocation cursor policy, and a target
+density of `0` advances after every allocation. Allocation
+does not reject a sector merely because it is already at or above the target; if
+the sector is otherwise usable and below the hard cap, allocation may append
+one more record and then advance `alloc_cursor`. This lets small files spread
+metadata lookup cost across more sectors while later alloc visits to those sectors still consumes
+available space.
 
 GC keeps a separate `gc_cursor`, the next sector to inspect for reclaim. Keeping these cursors separate lets foreground allocation, background reclaim, and wear distribution progress independently.
 

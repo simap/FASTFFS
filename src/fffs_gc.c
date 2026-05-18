@@ -105,8 +105,7 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
 
 static int gc_classify_record(struct fffs *fs, size_t sector,
         const struct fffs_md_record *record, bool *live) {
-    if (fffs_lifecycle_decode_md(record->state) !=
-            FFFS_LIFECYCLE_OBJECT_LIVE) {
+    if (record->lifecycle != FFFS_MD_RECORD_LIVE) {
         return FFFS_OK;
     }
     if (fffs_slot_is_inflight(fs, record->slot)) {
@@ -153,13 +152,13 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
 
     size_t s = normalized_data_cursor(fs, fs->gc_cursor);
     if (s != fs->gc_cursor) {
-        fs->gc_live = false;
-        fs->gc_md_active = false;
+        fs->gc_md.live_seen = false;
+        fs->gc_md.active = false;
     }
     if (use_map && fffs_alloc_map_maybe_used(fs, (uint16_t)s)) {
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_live = false;
-        fs->gc_md_active = false;
+        fs->gc_md.live_seen = false;
+        fs->gc_md.active = false;
         if (out_action) {
             *out_action = FFFS_GC_SCANNED;
         }
@@ -173,7 +172,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     if (state == GC_SECTOR_BLANK) {
         fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_live = false;
+        fs->gc_md.live_seen = false;
         if (out_action) {
             *out_action = FFFS_GC_SCANNED;
         }
@@ -183,8 +182,8 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
             fffs_sector_is_inflight(fs, (uint16_t)s)) {
         fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_live = true;
-        fs->gc_md_active = false;
+        fs->gc_md.live_seen = true;
+        fs->gc_md.active = false;
         if (out_action) {
             *out_action = FFFS_GC_SCANNED;
         }
@@ -203,32 +202,32 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_live = false;
-        fs->gc_md_active = false;
+        fs->gc_md.live_seen = false;
+        fs->gc_md.active = false;
         if (out_action) {
             *out_action = FFFS_GC_ERASED;
         }
         return FFFS_OK;
     }
 
-    if (!fs->gc_md_active || fs->gc_md_sector != s) {
-        fs->gc_md_active = true;
-        fs->gc_md_sector = (uint16_t)s;
-        fs->gc_md_cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-        fs->gc_md_claimed_data_end = 0;
-        fs->gc_live = false;
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+        .sector = (uint16_t)s,
+    };
+    if (!fs->gc_md.active || fs->gc_md.sector != s) {
+        err = fffs_md_walk_init(fs, &fs->gc_md, (uint16_t)s, &window);
+        if (err != FFFS_OK) {
+            return err;
+        }
     }
 
     struct fffs_md_record record;
-    size_t next_cursor = 0;
-    bool erased = false;
-    bool invalid = false;
-    bool done = false;
-    err = fffs_read_metadata_record_at(fs, (uint16_t)s, fs->gc_md_cursor,
-            &fs->gc_md_claimed_data_end, &record, &next_cursor, &erased,
-            &invalid, &done);
+    enum fffs_md_walk_result walk_result;
+    err = fffs_md_walk_next(fs, &fs->gc_md, &window, &record, &walk_result);
     if (err == FFFS_ERR_CORRUPT) {
-        fs->gc_md_active = false;
+        fs->gc_md.active = false;
         err = fffs_tombstone_sector(fs, (uint16_t)s);
         if (err != FFFS_OK) {
             return err;
@@ -240,15 +239,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         return FFFS_OK;
     }
     if (err != FFFS_OK) {
-        fs->gc_md_active = false;
+        fs->gc_md.active = false;
         return err;
     }
-    if (invalid) {
+    if (walk_result == FFFS_MD_WALK_END_INVALID) {
         uint8_t tombstone = FFFS_MD_FLAGS_TOMBSTONED;
         err = fffs_flash_program_aligned(fs,
                 s * fs->sector_size + record.record_start,
                 &tombstone, sizeof(tombstone));
-        fs->gc_md_active = false;
+        fs->gc_md.active = false;
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fffs_alloc_map_mark_used(fs, (uint16_t)s);
         if (err != FFFS_OK) {
@@ -259,32 +258,30 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    if (!erased) {
+    if (walk_result == FFFS_MD_WALK_RECORD) {
         bool record_live = false;
         err = gc_classify_record(fs, s, &record, &record_live);
         if (err != FFFS_OK) {
-            fs->gc_md_active = false;
+            fs->gc_md.active = false;
             return err;
         }
         if (record_live) {
-            fs->gc_live = true;
+            fs->gc_md.live_seen = true;
         }
-        fs->gc_md_cursor = next_cursor;
     }
 
-    if (!erased && !done) {
+    if (walk_result == FFFS_MD_WALK_RECORD && fs->gc_md.active) {
         if (out_action) {
-            *out_action = fffs_lifecycle_decode_md(record.state) ==
-                FFFS_LIFECYCLE_OBJECT_LIVE &&
-                !fs->gc_live ? FFFS_GC_TOMBSTONED : FFFS_GC_SCANNED;
+            *out_action = record.lifecycle == FFFS_MD_RECORD_LIVE &&
+                !fs->gc_md.live_seen ? FFFS_GC_TOMBSTONED : FFFS_GC_SCANNED;
         }
         return FFFS_OK;
     }
 
-    if (fs->gc_live) {
+    if (fs->gc_md.live_seen) {
         fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_md_active = false;
+        fs->gc_md.active = false;
         if (out_action) {
             *out_action = FFFS_GC_SCANNED;
         }
@@ -296,7 +293,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         return err;
     }
     fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
-    fs->gc_md_active = false;
+    fs->gc_md.active = false;
     if (out_action) {
         *out_action = FFFS_GC_TOMBSTONED;
     }

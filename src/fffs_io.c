@@ -1027,27 +1027,19 @@ static int read_root_prefix(struct fffs *fs, uint16_t sector,
     return FFFS_OK;
 }
 
-#if FFFS_MD_READ_WINDOW_SIZE < FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE
-#error "FFFS_MD_READ_WINDOW_SIZE must fit at least one metadata record and footer"
-#endif
-
-struct file_md_reader {
-    uint8_t window[FFFS_MD_READ_WINDOW_SIZE];
-    uint16_t sector;
-    size_t window_start;
-    size_t window_len;
-};
-
 static int file_md_reader_load(struct fffs *fs,
-        struct file_md_reader *reader, size_t offset, size_t size) {
-    if (offset >= reader->window_start &&
-            offset + size <= reader->window_start + reader->window_len) {
+        struct fffs_md_read_window *reader, size_t offset, size_t size) {
+    if (offset >= reader->start &&
+            offset + size <= reader->start + reader->len) {
         return FFFS_OK;
     }
 
     size_t sector_base = (size_t)reader->sector * fs->sector_size;
     size_t sector_end = sector_base + fs->sector_size;
-    size_t capacity = sizeof(reader->window);
+    size_t capacity = reader->capacity;
+    if (capacity > FFFS_MD_PRELOAD_MAX) {
+        capacity = FFFS_MD_PRELOAD_MAX;
+    }
     if (size > capacity || offset < sector_base || offset + size > sector_end) {
         return FFFS_ERR_CORRUPT;
     }
@@ -1061,33 +1053,34 @@ static int file_md_reader_load(struct fffs *fs,
     if (nread > capacity) {
         nread = capacity;
     }
-    int err = fffs_flash_read(fs, base, reader->window, nread);
+    int err = fffs_flash_read(fs, base, reader->data, nread);
     if (err != FFFS_OK) {
         return err;
     }
-    reader->window_start = base;
-    reader->window_len = nread;
+    reader->start = base;
+    reader->len = nread;
     return FFFS_OK;
 }
 
 static int file_md_reader_read(struct fffs *fs,
-        struct file_md_reader *reader, size_t offset, void *out, size_t size) {
+        struct fffs_md_read_window *reader, size_t offset, void *out,
+        size_t size) {
     int err = file_md_reader_load(fs, reader, offset, size);
     if (err != FFFS_OK) {
         return err;
     }
-    memcpy(out, reader->window + (offset - reader->window_start), size);
+    memcpy(out, reader->data + (offset - reader->start), size);
     return FFFS_OK;
 }
 
 static int file_md_reader_view(struct fffs *fs,
-        struct file_md_reader *reader, size_t offset, size_t size,
+        struct fffs_md_read_window *reader, size_t offset, size_t size,
         const uint8_t **out) {
     int err = file_md_reader_load(fs, reader, offset, size);
     if (err != FFFS_OK) {
         return err;
     }
-    *out = reader->window + (offset - reader->window_start);
+    *out = reader->data + (offset - reader->start);
     return FFFS_OK;
 }
 
@@ -1101,7 +1094,7 @@ static bool validate_live_file_footer(const uint8_t *footer) {
 }
 
 static int decode_file_md_record(struct fffs *fs,
-        struct file_md_reader *reader, size_t cursor,
+        struct fffs_md_read_window *reader, size_t cursor,
         struct decoded_file_md *out, enum decoded_file_md_state *state) {
     *state = FFFS_DECODED_MD_INVALID;
     uint8_t type;
@@ -1174,6 +1167,125 @@ static int decode_file_md_record(struct fffs *fs,
     return FFFS_OK;
 }
 
+static void md_record_from_decoded(const struct decoded_file_md *md,
+        enum decoded_file_md_state state, struct fffs_md_record *record) {
+    enum fffs_md_record_lifecycle lifecycle = FFFS_MD_RECORD_LIVE;
+    if (state == FFFS_DECODED_MD_TOMBSTONED) {
+        lifecycle = FFFS_MD_RECORD_TOMBSTONED;
+    } else if (state == FFFS_DECODED_MD_PARTIAL_TOMBSTONE) {
+        lifecycle = FFFS_MD_RECORD_PARTIAL_TOMBSTONE;
+    }
+    *record = (struct fffs_md_record){
+        .type = md->type,
+        .state = md->state,
+        .lifecycle = lifecycle,
+        .slot = md->slot,
+        .next = md->next,
+        .span_len = md->span_len,
+        .data_off = md->data_off,
+        .data_len = md->data_len,
+        .size_or_offset = md->type == FFFS_MD_TYPE_FILE_ROOT_V1 ?
+            md->size : md->file_offset,
+        .record_start = md->record_start,
+        .record_len = md->record_len,
+    };
+}
+
+int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
+        uint16_t sector, struct fffs_md_read_window *window) {
+    if (!fs || !walk || !window || !window->data ||
+            window->capacity < FFFS_MD_FILE_RECORD_SIZE +
+                FFFS_SECTOR_FOOTER_SIZE ||
+            sector < fs->index_sectors || sector >= fs->sector_count) {
+        return FFFS_ERR_INVALID;
+    }
+
+    if (window->sector != sector) {
+        window->start = 0;
+        window->len = 0;
+    }
+    window->sector = sector;
+
+    const uint8_t *footer;
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_READ_METADATA);
+    int err = file_md_reader_view(fs, window,
+            fffs_sector_footer_offset(fs, sector), FFFS_SECTOR_FOOTER_SIZE,
+            &footer);
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_READ_METADATA);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (!validate_live_file_footer(footer)) {
+        enum fffs_lifecycle_object_state footer_state =
+            fffs_lifecycle_decode_footer(footer[5]);
+        if (footer[4] == FFFS_SECTOR_TYPE_FILE &&
+                footer[6] == 0xff && footer[7] == 0xff &&
+                memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) == 0 &&
+                footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
+            walk->cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+            walk->claimed_data_end = 0;
+            walk->sector = sector;
+            walk->live_seen = false;
+            walk->active = false;
+            return FFFS_OK;
+        }
+        return FFFS_ERR_CORRUPT;
+    }
+
+    walk->cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+    walk->claimed_data_end = 0;
+    walk->sector = sector;
+    walk->live_seen = false;
+    walk->active = true;
+    return FFFS_OK;
+}
+
+int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
+        struct fffs_md_read_window *window, struct fffs_md_record *record,
+        enum fffs_md_walk_result *result) {
+    if (!fs || !walk || !window || !record || !result ||
+            !walk->active || walk->sector != window->sector) {
+        return FFFS_ERR_INVALID;
+    }
+
+    if (walk->cursor <= FFFS_SECTOR_FOOTER_SIZE) {
+        *result = FFFS_MD_WALK_END_CLAIMED_DATA;
+        walk->active = false;
+        return FFFS_OK;
+    }
+
+    struct decoded_file_md md;
+    enum decoded_file_md_state md_state;
+    int err = decode_file_md_record(fs, window, walk->cursor, &md, &md_state);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (md_state == FFFS_DECODED_MD_ERASED) {
+        *result = FFFS_MD_WALK_END_ERASED;
+        walk->active = false;
+        memset(record, 0, sizeof(*record));
+        return FFFS_OK;
+    }
+    md_record_from_decoded(&md, md_state, record);
+    if (md_state == FFFS_DECODED_MD_INVALID) {
+        *result = FFFS_MD_WALK_END_INVALID;
+        walk->active = false;
+        return FFFS_OK;
+    }
+
+    walk->cursor = md.record_start;
+    size_t data_end = (size_t)md.data_off + md.data_len;
+    if (data_end > walk->claimed_data_end) {
+        walk->claimed_data_end = data_end;
+    }
+
+    *result = FFFS_MD_WALK_RECORD;
+    if (walk->cursor <= walk->claimed_data_end) {
+        walk->active = false;
+    }
+    return FFFS_OK;
+}
+
 static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st,
         uint16_t *data_off, uint16_t *data_len,
@@ -1182,60 +1294,55 @@ static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
         return FFFS_ERR_CORRUPT;
     }
 
-    struct file_md_reader reader = {
-        .sector = sector,
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
     };
-    const uint8_t *footer;
-    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_READ_METADATA);
-    int err = file_md_reader_view(fs, &reader,
-            fffs_sector_footer_offset(fs, sector), FFFS_SECTOR_FOOTER_SIZE,
-            &footer);
-    FFFS_PROFILE_POP(fs, FFFS_PROFILE_READ_METADATA);
+    struct fffs_md_walk walk;
+    int err = fffs_md_walk_init(fs, &walk, sector, &window);
     if (err != FFFS_OK) {
         return err;
     }
-    if (!validate_live_file_footer(footer)) {
-        return FFFS_ERR_CORRUPT;
-    }
 
-    size_t claimed_data_end = 0;
-    size_t cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
-        struct decoded_file_md md;
-        enum decoded_file_md_state md_state;
-        err = decode_file_md_record(fs, &reader, cursor, &md, &md_state);
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
         if (err != FFFS_OK) {
             return err;
         }
-        if (md_state == FFFS_DECODED_MD_ERASED) {
+        if (result != FFFS_MD_WALK_RECORD) {
             break;
-        }
-        if (md_state == FFFS_DECODED_MD_INVALID) {
-            break;
-        }
-        cursor = md.record_start;
-        size_t data_end = (size_t)md.data_off + md.data_len;
-        if (data_end > claimed_data_end) {
-            claimed_data_end = data_end;
         }
 
-        if (md_state == FFFS_DECODED_MD_TOMBSTONED ||
-                md_state == FFFS_DECODED_MD_PARTIAL_TOMBSTONE) {
-            if (cursor <= claimed_data_end) {
-                break;
-            }
+        if (record.lifecycle != FFFS_MD_RECORD_LIVE) {
             continue;
         }
-        if (md.slot != want_slot) {
-            if (cursor <= claimed_data_end) {
-                break;
-            }
+        if (record.slot != want_slot) {
             continue;
         }
 
-        uint16_t payload_data_off = md.data_off;
-        uint16_t payload_data_len = md.data_len;
-        if (md.type == FFFS_MD_TYPE_FILE_ROOT_V1 &&
+        struct decoded_file_md md = {
+            .type = record.type,
+            .state = record.state,
+            .slot = record.slot,
+            .next = record.next,
+            .span_len = record.span_len,
+            .data_off = record.data_off,
+            .data_len = record.data_len,
+            .record_start = record.record_start,
+            .record_len = record.record_len,
+        };
+        if (record.type == FFFS_MD_TYPE_FILE_ROOT_V1) {
+            md.size = record.size_or_offset;
+        } else {
+            md.file_offset = record.size_or_offset;
+        }
+
+        uint16_t payload_data_off = record.data_off;
+        uint16_t payload_data_len = record.data_len;
+        if (record.type == FFFS_MD_TYPE_FILE_ROOT_V1 &&
                 (st || data_off || data_len || cache)) {
             err = read_root_prefix(fs, sector, &md, st,
                     &payload_data_off, &payload_data_len, cache);
@@ -1253,7 +1360,7 @@ static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
             *data_len = payload_data_len;
         }
         if (next) {
-            *next = md.next;
+            *next = record.next;
         }
         return FFFS_OK;
     }
@@ -1266,54 +1373,41 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
         return FFFS_ERR_CORRUPT;
     }
 
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, sector),
-            footer, sizeof(footer));
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+    };
+    struct fffs_md_walk walk;
+    int err = fffs_md_walk_init(fs, &walk, sector, &window);
     if (err != FFFS_OK) {
         return err;
     }
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
-            footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
-        return FFFS_ERR_CORRUPT;
-    }
 
-    size_t claimed_data_end = 0;
-    size_t cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-    struct file_md_reader reader = {
-        .sector = sector,
-    };
-    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
-        struct decoded_file_md md;
-        enum decoded_file_md_state md_state;
-        err = decode_file_md_record(fs, &reader, cursor, &md, &md_state);
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
         if (err != FFFS_OK) {
             return err;
         }
-        if (md_state == FFFS_DECODED_MD_ERASED) {
+        if (result == FFFS_MD_WALK_END_ERASED) {
             return FFFS_OK;
         }
-        if (md_state == FFFS_DECODED_MD_INVALID) {
+        if (result == FFFS_MD_WALK_END_INVALID) {
             return FFFS_ERR_CORRUPT;
         }
-        cursor = md.record_start;
-        size_t data_end = (size_t)md.data_off + md.data_len;
-        if (data_end > claimed_data_end) {
-            claimed_data_end = data_end;
+        if (result != FFFS_MD_WALK_RECORD) {
+            break;
         }
-        if (md_state != FFFS_DECODED_MD_LIVE || md.slot != want_slot) {
-            if (cursor <= claimed_data_end) {
-                break;
-            }
+        if (record.lifecycle != FFFS_MD_RECORD_LIVE ||
+                record.slot != want_slot) {
             continue;
         }
 
         uint8_t tombstone = FFFS_MD_FLAGS_TOMBSTONED;
         return fffs_flash_program_aligned(fs,
-                (size_t)sector * fs->sector_size + md.record_start,
+                (size_t)sector * fs->sector_size + record.record_start,
                 &tombstone, sizeof(tombstone));
     }
     return FFFS_OK;
@@ -1325,112 +1419,33 @@ int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
         return FFFS_ERR_INVALID;
     }
 
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, sector),
-            footer, sizeof(footer));
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+    };
+    struct fffs_md_walk walk;
+    int err = fffs_md_walk_init(fs, &walk, sector, &window);
     if (err != FFFS_OK) {
         return err;
     }
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
-            footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
-        return FFFS_ERR_CORRUPT;
-    }
 
-    size_t cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-    size_t claimed_data_end = 0;
-    struct file_md_reader reader = {
-        .sector = sector,
-    };
-    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
-        struct decoded_file_md md;
-        enum decoded_file_md_state md_state;
-        err = decode_file_md_record(fs, &reader, cursor, &md, &md_state);
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
         if (err != FFFS_OK) {
             return err;
         }
-        if (md_state == FFFS_DECODED_MD_ERASED ||
-                md_state == FFFS_DECODED_MD_INVALID) {
+        if (result != FFFS_MD_WALK_RECORD) {
             return FFFS_OK;
         }
-        cursor = md.record_start;
-        size_t data_end = (size_t)md.data_off + md.data_len;
-        if (data_end > claimed_data_end) {
-            claimed_data_end = data_end;
-        }
 
-        struct fffs_md_record record = {
-            .type = md.type,
-            .state = md.state,
-            .slot = md.slot,
-            .next = md.next,
-            .data_off = md.data_off,
-            .data_len = md.data_len,
-            .record_start = md.record_start,
-            .record_len = md.record_len,
-        };
         err = visitor(fs, &record, ctx);
         if (err != FFFS_OK) {
             return err;
         }
-        if (cursor <= claimed_data_end) {
-            break;
-        }
     }
-    return FFFS_OK;
-}
-
-int fffs_read_metadata_record_at(struct fffs *fs, uint16_t sector,
-        size_t cursor, size_t *claimed_data_end,
-        struct fffs_md_record *record, size_t *next_cursor,
-        bool *erased, bool *invalid, bool *done) {
-    if (sector < fs->index_sectors || sector >= fs->sector_count ||
-            !claimed_data_end || !record || !next_cursor ||
-            !erased || !invalid || !done) {
-        return FFFS_ERR_INVALID;
-    }
-
-    struct decoded_file_md md;
-    enum decoded_file_md_state md_state;
-    struct file_md_reader reader = {
-        .sector = sector,
-    };
-    int err = decode_file_md_record(fs, &reader, cursor, &md, &md_state);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    *erased = md_state == FFFS_DECODED_MD_ERASED;
-    *invalid = md_state == FFFS_DECODED_MD_INVALID;
-    *done = *erased || *invalid;
-    if (*erased) {
-        *next_cursor = cursor;
-        memset(record, 0, sizeof(*record));
-        return FFFS_OK;
-    }
-    *next_cursor = md.record_start;
-    *record = (struct fffs_md_record){
-        .type = md.type,
-        .state = md.state,
-        .slot = md.slot,
-        .next = md.next,
-        .data_off = md.data_off,
-        .data_len = md.data_len,
-        .record_start = md.record_start,
-        .record_len = md.record_len,
-    };
-    if (*invalid) {
-        return FFFS_OK;
-    }
-
-    size_t data_end = (size_t)md.data_off + md.data_len;
-    if (data_end > *claimed_data_end) {
-        *claimed_data_end = data_end;
-    }
-    *next_cursor = md.record_start;
-    *done = md.record_start <= *claimed_data_end;
     return FFFS_OK;
 }
 
@@ -1444,15 +1459,22 @@ int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
 
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
-        uint16_t *record_off, bool *needs_footer) {
+        uint16_t *record_off, bool *needs_footer, uint16_t *md_records) {
     if (sector < fs->index_sectors || sector >= fs->sector_count ||
-            !data_off || !record_off || !needs_footer) {
+            !data_off || !record_off || !needs_footer || !md_records) {
         return FFFS_ERR_INVALID;
     }
 
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, sector),
-            footer, sizeof(footer));
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+        .sector = sector,
+    };
+    const uint8_t *footer;
+    int err = file_md_reader_view(fs, &window,
+            fffs_sector_footer_offset(fs, sector), FFFS_SECTOR_FOOTER_SIZE,
+            &footer);
     if (err != FFFS_OK) {
         return err;
     }
@@ -1471,6 +1493,7 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         *data_off = 0;
         *record_off = (uint16_t)(footer_off - FFFS_MD_FILE_RECORD_SIZE);
         *needs_footer = true;
+        *md_records = 0;
         return FFFS_OK;
     }
 
@@ -1487,39 +1510,40 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         return FFFS_ERR_NO_SPACE;
     }
 
-    size_t cursor = footer_off;
     size_t max_data_end = 0;
     size_t metadata_start = footer_off;
     size_t record_count = 0;
-    struct file_md_reader reader = {
-        .sector = sector,
-    };
-    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
-        struct decoded_file_md md;
-        enum decoded_file_md_state md_state;
-        err = decode_file_md_record(fs, &reader, cursor, &md, &md_state);
+    struct fffs_md_walk walk;
+    err = fffs_md_walk_init(fs, &walk, sector, &window);
+    if (err != FFFS_OK) {
+        return err == FFFS_ERR_CORRUPT ? FFFS_ERR_NO_SPACE : err;
+    }
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
         if (err != FFFS_OK) {
             return err;
         }
-        if (md_state == FFFS_DECODED_MD_ERASED) {
+        if (result == FFFS_MD_WALK_END_ERASED) {
             break;
         }
-        if (md_state == FFFS_DECODED_MD_INVALID) {
+        if (result == FFFS_MD_WALK_END_INVALID) {
             return FFFS_ERR_NO_SPACE;
+        }
+        if (result != FFFS_MD_WALK_RECORD) {
+            break;
         }
         record_count++;
-        if (md_state == FFFS_DECODED_MD_LIVE && md.slot == reject_slot) {
+        if (record.lifecycle == FFFS_MD_RECORD_LIVE &&
+                record.slot == reject_slot) {
             return FFFS_ERR_NO_SPACE;
         }
-        size_t data_end = (size_t)md.data_off + md.data_len;
+        size_t data_end = (size_t)record.data_off + record.data_len;
         if (data_end > max_data_end) {
             max_data_end = data_end;
         }
-        cursor = md.record_start;
-        metadata_start = md.record_start;
-        if (cursor <= max_data_end) {
-            break;
-        }
+        metadata_start = record.record_start;
     }
 
     if (record_count >= FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR) {
@@ -1542,6 +1566,7 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     *data_off = (uint16_t)max_data_end;
     *record_off = (uint16_t)new_record_off;
     *needs_footer = false;
+    *md_records = (uint16_t)record_count;
     return FFFS_OK;
 }
 

@@ -56,6 +56,10 @@ struct fffs_read_cache_view {
 #define FFFS_SECTOR_FLAGS_FULL FFFS_LIFECYCLE_FULL
 #define FFFS_SECTOR_TYPE_FILE 0x01
 
+#if FFFS_MD_PRELOAD_MAX < FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE
+#error "FFFS_MD_PRELOAD_MAX must fit at least one metadata record and footer"
+#endif
+
 enum fffs_lifecycle_object_state {
     FFFS_LIFECYCLE_OBJECT_INVALID,
     FFFS_LIFECYCLE_OBJECT_ERASED,
@@ -203,25 +207,47 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint16_t next, uint32_t file_offset, bool commit_index);
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
-        uint16_t *record_off, bool *needs_footer);
+        uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
+enum fffs_md_walk_result {
+    FFFS_MD_WALK_RECORD,
+    FFFS_MD_WALK_END_ERASED,
+    FFFS_MD_WALK_END_CLAIMED_DATA,
+    FFFS_MD_WALK_END_INVALID,
+};
+enum fffs_md_record_lifecycle {
+    FFFS_MD_RECORD_LIVE,
+    FFFS_MD_RECORD_TOMBSTONED,
+    FFFS_MD_RECORD_PARTIAL_TOMBSTONE,
+};
 struct fffs_md_record {
     uint8_t type;
     uint8_t state;
+    enum fffs_md_record_lifecycle lifecycle;
     uint16_t slot;
     uint16_t next;
+    uint16_t span_len;
     uint16_t data_off;
     uint16_t data_len;
+    uint32_t size_or_offset;
     size_t record_start;
     size_t record_len;
+};
+struct fffs_md_read_window {
+    uint8_t *data;
+    size_t capacity;
+    uint16_t sector;
+    size_t start;
+    size_t len;
 };
 typedef int (*fffs_md_record_visitor)(struct fffs *fs,
         const struct fffs_md_record *record, void *ctx);
 int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
         fffs_md_record_visitor visitor, void *ctx);
-int fffs_read_metadata_record_at(struct fffs *fs, uint16_t sector,
-        size_t cursor, size_t *claimed_data_end,
-        struct fffs_md_record *record, size_t *next_cursor,
-        bool *erased, bool *invalid, bool *done);
+int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
+        uint16_t sector, struct fffs_md_read_window *window);
+int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
+        struct fffs_md_read_window *window, struct fffs_md_record *record,
+        enum fffs_md_walk_result *result);
 
 void fffs_bitset_clear(uint32_t *words, size_t word_count);
 bool fffs_bitset_get(const uint32_t *words, size_t bit);

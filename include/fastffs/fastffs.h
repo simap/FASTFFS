@@ -139,6 +139,14 @@ struct fffs_mount_options {
 #endif
 };
 
+struct fffs_md_walk {
+    size_t cursor;
+    size_t claimed_data_end;
+    uint16_t sector;
+    bool live_seen;
+    bool active;
+};
+
 struct fffs {
     struct fffs_backend backend;
     struct fffs_file *inflight_writers;
@@ -169,11 +177,7 @@ struct fffs {
     uint8_t active_index_serial;
     size_t alloc_cursor;
     size_t gc_cursor;
-    size_t gc_md_cursor;
-    size_t gc_md_claimed_data_end;
-    uint16_t gc_md_sector;
-    bool gc_live;
-    bool gc_md_active;
+    struct fffs_md_walk gc_md;
     uint32_t next_sector_serial;
 };
 
