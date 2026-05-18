@@ -226,6 +226,24 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
+bool fffs_index_iter_read(struct fffs_index_iter *iter, uint16_t *slot,
+        uint16_t *head) {
+    while (iter->pos < iter->fs->index_hash_table_size) {
+        struct fffs_index_bucket bucket =
+            buckets(iter->fs)[iter->pos++];
+        if (bucket.slot == 0) {
+            continue;
+        }
+
+        *slot = bucket.slot;
+        *head = bucket.head;
+        iter->status = FFFS_OK;
+        return true;
+    }
+    iter->status = FFFS_OK;
+    return false;
+}
+
 int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
         uint16_t *head, bool *found) {
     *head = 0;

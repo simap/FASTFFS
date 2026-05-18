@@ -133,7 +133,7 @@ static int gc_classify_record(struct fffs *fs, size_t sector,
         *live = true;
     } else {
         err = fffs_tombstone_metadata_for_slot(fs, (uint16_t)sector,
-                record->slot);
+                record->slot, FFFS_TOMBSTONE_NO_ACCOUNTING, NULL);
     }
     return err;
 }

@@ -1368,9 +1368,13 @@ static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
 }
 
 int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot) {
+        uint16_t want_slot, enum fffs_tombstone_accounting accounting,
+        bool *accounted) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
         return FFFS_ERR_CORRUPT;
+    }
+    if (accounted) {
+        *accounted = false;
     }
 
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
@@ -1406,11 +1410,61 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
         }
 
         uint8_t tombstone = FFFS_MD_FLAGS_TOMBSTONED;
-        return fffs_flash_program_aligned(fs,
+        err = fffs_flash_program_aligned(fs,
                 (size_t)sector * fs->sector_size + record.record_start,
                 &tombstone, sizeof(tombstone));
+        if (err == FFFS_OK &&
+                accounting == FFFS_TOMBSTONE_COMMITTED_DELETE &&
+                record.type == FFFS_MD_TYPE_FILE_ROOT_V1) {
+            fffs_fsinfo_note_committed_delete(fs, record.size_or_offset);
+            if (accounted) {
+                *accounted = true;
+            }
+        }
+        return err;
     }
     return FFFS_OK;
+}
+
+int fffs_read_root_size_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, uint32_t *size) {
+    if (!size || sector < fs->index_sectors || sector >= fs->sector_count) {
+        return FFFS_ERR_INVALID;
+    }
+
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+    };
+    struct fffs_md_walk walk;
+    int err = fffs_md_walk_init(fs, &walk, sector, &window);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (result != FFFS_MD_WALK_RECORD) {
+            break;
+        }
+        if (record.lifecycle != FFFS_MD_RECORD_LIVE ||
+                record.slot != want_slot) {
+            continue;
+        }
+        if (record.type != FFFS_MD_TYPE_FILE_ROOT_V1) {
+            return FFFS_ERR_CORRUPT;
+        }
+
+        *size = record.size_or_offset;
+        return FFFS_OK;
+    }
+    return FFFS_ERR_CORRUPT;
 }
 
 int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,

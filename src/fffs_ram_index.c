@@ -133,6 +133,23 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
     return false;
 }
 
+bool fffs_index_iter_read(struct fffs_index_iter *iter, uint16_t *slot,
+        uint16_t *head) {
+    while (iter->pos < FFFS_SLOT_COUNT) {
+        uint16_t current_head = iter->fs->index_heads[iter->pos++];
+        if (current_head == 0) {
+            continue;
+        }
+
+        *slot = (uint16_t)(iter->pos - 1u);
+        *head = current_head;
+        iter->status = FFFS_OK;
+        return true;
+    }
+    iter->status = FFFS_OK;
+    return false;
+}
+
 int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
         uint16_t *head, bool *found) {
     *head = fs->index_heads[slot];

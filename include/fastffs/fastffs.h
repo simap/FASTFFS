@@ -48,6 +48,21 @@ enum fffs_gc_action {
     FFFS_GC_ERASED = 3,
 };
 
+enum fffs_fsinfo_flags {
+    FFFS_FSINFO_FAST = 0,
+    FFFS_FSINFO_REFRESH_COMMITTED = 0x01,
+    FFFS_FSINFO_ESTIMATE_METADATA = 0x02,
+    FFFS_FSINFO_REFRESH_IF_NEEDED = 0x04,
+};
+
+enum fffs_fsinfo_valid_flags {
+    FFFS_FSINFO_TOTAL_VALID = 0x01,
+    FFFS_FSINFO_COMMITTED_FILES_VALID = 0x02,
+    FFFS_FSINFO_COMMITTED_BYTES_VALID = 0x04,
+    FFFS_FSINFO_INFLIGHT_VALID = 0x08,
+    FFFS_FSINFO_METADATA_ESTIMATE_VALID = 0x10,
+};
+
 enum fffs_sector_size {
     FFFS_SECTOR_DEFAULT = 0,
     FFFS_SECTOR_256 = 256,
@@ -139,6 +154,16 @@ struct fffs_mount_options {
 #endif
 };
 
+struct fffs_fsinfo {
+    uint32_t valid_flags;
+    uint32_t total_bytes;
+    uint32_t committed_file_count;
+    uint32_t committed_data_bytes;
+    uint32_t inflight_file_count;
+    uint32_t inflight_data_bytes;
+    uint32_t estimated_metadata_bytes;
+};
+
 struct fffs_md_walk {
     size_t cursor;
     size_t claimed_data_end;
@@ -179,6 +204,10 @@ struct fffs {
     size_t gc_cursor;
     struct fffs_md_walk gc_md;
     uint32_t next_sector_serial;
+    uint32_t fsinfo_valid_flags;
+    uint32_t committed_file_count;
+    uint32_t committed_data_bytes;
+    uint16_t avg_sectors_per_file_q8;
 };
 
 struct fffs_stat {
@@ -260,6 +289,7 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st);
 int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st);
 int fffs_exists(struct fffs *fs, const char *name, bool *exists);
 int fffs_delete_file(struct fffs *fs, const char *name);
+int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags);
 int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action);
 int fffs_gc(struct fffs *fs, size_t max_steps, size_t *out_erased);
 int fffs_dir_open(struct fffs *fs, struct fffs_dir *dir,

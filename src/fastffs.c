@@ -12,6 +12,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#define FFFS_SECTORS_PER_FILE_Q8_ONE 256u
+
 static int format_sector_shift(enum fffs_sector_size sector_size,
         uint8_t *sector_shift) {
     size_t size = sector_size == FFFS_SECTOR_DEFAULT ?
@@ -26,26 +28,75 @@ static int format_sector_shift(enum fffs_sector_size sector_size,
     return FFFS_ERR_INVALID;
 }
 
-static void invalidate_old_chain(struct fffs *fs, uint16_t slot,
-        uint16_t head, uint16_t next, bool tombstone) {
+static void fsinfo_invalidate_committed(struct fffs *fs) {
+    fs->fsinfo_valid_flags &= ~(uint32_t)(
+            FFFS_FSINFO_COMMITTED_FILES_VALID |
+            FFFS_FSINFO_COMMITTED_BYTES_VALID |
+            FFFS_FSINFO_METADATA_ESTIMATE_VALID);
+}
+
+static bool fsinfo_committed_valid(const struct fffs *fs) {
+    return (fs->fsinfo_valid_flags &
+            (FFFS_FSINFO_COMMITTED_FILES_VALID |
+             FFFS_FSINFO_COMMITTED_BYTES_VALID)) ==
+        (FFFS_FSINFO_COMMITTED_FILES_VALID |
+         FFFS_FSINFO_COMMITTED_BYTES_VALID);
+}
+
+static void fsinfo_note_committed_add(struct fffs *fs, uint32_t size) {
+    if (!fsinfo_committed_valid(fs)) {
+        return;
+    }
+    fs->committed_file_count += 1;
+    fs->committed_data_bytes += size;
+    fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
+}
+
+void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size) {
+    if (!fsinfo_committed_valid(fs)) {
+        return;
+    }
+    if (fs->committed_file_count == 0 || fs->committed_data_bytes < size) {
+        fsinfo_invalidate_committed(fs);
+        return;
+    }
+    fs->committed_file_count -= 1;
+    fs->committed_data_bytes -= size;
+    fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
+}
+
+static bool invalidate_old_chain(struct fffs *fs, uint16_t slot,
+        uint16_t head, uint16_t next, bool tombstone,
+        bool *root_accounted) {
     uint16_t current = head;
     uint16_t current_next = next;
     bool have_next = true;
+    size_t visited = 0;
+    if (root_accounted) {
+        *root_accounted = false;
+    }
 
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
         if (!have_next) {
             int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
                     NULL, NULL, &current_next, NULL);
             if (err != FFFS_OK) {
-                return;
+                return false;
             }
         }
         fffs_alloc_map_mark_unknown(fs, current);
+        visited += 1;
 #if !FFFS_LAZY_DELETE_TOMBSTONES
         if (tombstone) {
-            int err = fffs_tombstone_metadata_for_slot(fs, current, slot);
+            bool accounted = false;
+            int err = fffs_tombstone_metadata_for_slot(fs, current, slot,
+                    FFFS_TOMBSTONE_COMMITTED_DELETE,
+                    depth == 0 ? &accounted : NULL);
             if (err != FFFS_OK) {
-                return;
+                return false;
+            }
+            if (depth == 0 && root_accounted) {
+                *root_accounted = accounted;
             }
         }
 #else
@@ -54,6 +105,17 @@ static void invalidate_old_chain(struct fffs *fs, uint16_t slot,
         current = current_next;
         have_next = false;
     }
+    if (current != 0) {
+        return false;
+    }
+    if (visited > 0) {
+        uint32_t sample = (uint32_t)(visited * FFFS_SECTORS_PER_FILE_Q8_ONE);
+        fs->avg_sectors_per_file_q8 =
+            (uint16_t)(((uint32_t)fs->avg_sectors_per_file_q8 * 7u +
+                    sample) / 8u);
+        fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
+    }
+    return true;
 }
 
 static uint32_t claim_sector_serial(struct fffs *fs) {
@@ -249,6 +311,7 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     fs->alloc_cursor = fs->index_sectors;
     fs->gc_cursor = fs->index_sectors;
     fs->next_sector_serial = 1;
+    fs->avg_sectors_per_file_q8 = FFFS_SECTORS_PER_FILE_Q8_ONE;
 
     err = fffs_index_finish_interrupted_compaction(fs);
     if (err != FFFS_OK) {
@@ -639,9 +702,17 @@ int fffs_close(struct fffs_file *file) {
             err = fffs_write_extent_metadata(file, file->head, root_serial,
                     root_data_off, root_record_off, root_needs_footer,
                     root_len, file->size, root_next, 0, true);
+            if (err == FFFS_OK) {
+                fsinfo_note_committed_add(file->fs, file->size);
+            }
             if (err == FFFS_OK && file->old_head != 0) {
-                invalidate_old_chain(file->fs, file->slot, file->old_head,
-                        file->old_next, true);
+                bool root_accounted = false;
+                (void)invalidate_old_chain(file->fs, file->slot,
+                        file->old_head, file->old_next, true,
+                        &root_accounted);
+                if (fsinfo_committed_valid(file->fs) && !root_accounted) {
+                    fsinfo_invalidate_committed(file->fs);
+                }
             }
         }
         fffs_alloc_release_reservation(file);
@@ -715,8 +786,87 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
         FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
         return err;
     }
-    invalidate_old_chain(fs, slot, head, next, true);
+    bool root_accounted = false;
+    (void)invalidate_old_chain(fs, slot, head, next, true, &root_accounted);
+    if (fsinfo_committed_valid(fs) && !root_accounted) {
+        fsinfo_invalidate_committed(fs);
+    }
     FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
+    return FFFS_OK;
+}
+
+int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
+    const uint32_t known_flags = FFFS_FSINFO_REFRESH_COMMITTED |
+        FFFS_FSINFO_ESTIMATE_METADATA | FFFS_FSINFO_REFRESH_IF_NEEDED;
+    if (!fs || !info || (flags & ~known_flags) != 0) {
+        return FFFS_ERR_INVALID;
+    }
+
+    bool refresh_committed =
+        (flags & FFFS_FSINFO_REFRESH_COMMITTED) != 0 ||
+        ((flags & FFFS_FSINFO_REFRESH_IF_NEEDED) != 0 &&
+         !fsinfo_committed_valid(fs));
+    if (refresh_committed) {
+        uint32_t file_count = 0;
+        uint32_t byte_count = 0;
+        struct fffs_index_iter iter = {
+            .fs = fs,
+        };
+        uint16_t slot;
+        uint16_t head;
+        while (fffs_index_iter_read(&iter, &slot, &head)) {
+            uint32_t size;
+            int err = fffs_read_root_size_for_slot(fs, head, slot, &size);
+            if (err != FFFS_OK) {
+                fsinfo_invalidate_committed(fs);
+                return err;
+            }
+            file_count += 1;
+            byte_count += size;
+        }
+        if (iter.status != FFFS_OK) {
+            fsinfo_invalidate_committed(fs);
+            return iter.status;
+        }
+
+        fs->committed_file_count = file_count;
+        fs->committed_data_bytes = byte_count;
+        fs->fsinfo_valid_flags |= FFFS_FSINFO_COMMITTED_FILES_VALID |
+            FFFS_FSINFO_COMMITTED_BYTES_VALID;
+        fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
+    }
+
+    *info = (struct fffs_fsinfo){0};
+    size_t data_sectors = fs->sector_count > fs->index_sectors ?
+        fs->sector_count - fs->index_sectors : 0;
+    info->total_bytes = (uint32_t)(data_sectors *
+            (fs->sector_size - FFFS_SECTOR_FOOTER_SIZE));
+    info->valid_flags |= FFFS_FSINFO_TOTAL_VALID;
+
+    for (struct fffs_file *file = fs->inflight_writers; file;
+            file = file->inflight_next) {
+        info->inflight_file_count += 1;
+        info->inflight_data_bytes += file->size;
+    }
+    info->valid_flags |= FFFS_FSINFO_INFLIGHT_VALID;
+
+    if (fsinfo_committed_valid(fs)) {
+        info->committed_file_count = fs->committed_file_count;
+        info->committed_data_bytes = fs->committed_data_bytes;
+        info->valid_flags |= FFFS_FSINFO_COMMITTED_FILES_VALID |
+            FFFS_FSINFO_COMMITTED_BYTES_VALID;
+    }
+
+    if ((flags & FFFS_FSINFO_ESTIMATE_METADATA) != 0 &&
+            fsinfo_committed_valid(fs)) {
+        uint32_t estimated = (fs->committed_file_count *
+                (uint32_t)FFFS_MD_FILE_RECORD_SIZE *
+                (uint32_t)fs->avg_sectors_per_file_q8) /
+            FFFS_SECTORS_PER_FILE_Q8_ONE;
+        info->estimated_metadata_bytes = estimated;
+        info->valid_flags |= FFFS_FSINFO_METADATA_ESTIMATE_VALID;
+    }
+
     return FFFS_OK;
 }
 

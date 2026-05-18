@@ -22,6 +22,14 @@ struct fffs_index_bucket {
     uint16_t head;
 };
 
+struct fffs_index_iter {
+    struct fffs *fs;
+    size_t pos;
+    size_t cursor_seq_pos;
+    size_t cursor_offset;
+    int status;
+};
+
 struct fffs_read_cache_view {
     uint8_t *data;
     size_t capacity;
@@ -199,8 +207,16 @@ int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
         uint16_t *data_len, uint16_t *next,
         struct fffs_read_cache_view *cache);
+int fffs_read_root_size_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, uint32_t *size);
+enum fffs_tombstone_accounting {
+    FFFS_TOMBSTONE_NO_ACCOUNTING,
+    FFFS_TOMBSTONE_COMMITTED_DELETE,
+};
 int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot);
+        uint16_t want_slot, enum fffs_tombstone_accounting accounting,
+        bool *accounted);
+void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size);
 int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint32_t serial, uint16_t data_off, uint16_t record_off,
         bool write_footer, uint16_t data_len, uint32_t total_size,
@@ -306,6 +322,8 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
 int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
         uint16_t *head, bool *found);
 bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st);
+bool fffs_index_iter_read(struct fffs_index_iter *iter, uint16_t *slot,
+        uint16_t *head);
 
 /*
  * Test a historical index record during compaction:

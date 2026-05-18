@@ -58,8 +58,13 @@ int fffs_rotate_index(struct fffs *fs);
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
 int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
         uint16_t *head, bool *found);
+enum fffs_tombstone_accounting {
+    FFFS_TOMBSTONE_NO_ACCOUNTING,
+    FFFS_TOMBSTONE_COMMITTED_DELETE,
+};
 int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot);
+        uint16_t want_slot, enum fffs_tombstone_accounting accounting,
+        bool *accounted);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -411,6 +416,102 @@ static int test_overwrite_delete_and_remount(void) {
     ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&remounted, "config", &st));
 
     fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_fsinfo_refresh_and_cached_accounting(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    struct fffs_fsinfo info;
+    struct fffs_file writer;
+    size_t written = 0;
+    const char *alpha = "abc";
+    const char *beta = "12345";
+    const char *gamma = "payload";
+    const char *alpha_new = "wxyz";
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_TOTAL_VALID) != 0);
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_INFLIGHT_VALID) != 0);
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) == 0);
+    ASSERT_TRUE(info.total_bytes == (uint32_t)((fs.sector_count -
+                    fs.index_sectors) * (fs.sector_size - 12)));
+    ASSERT_TRUE(info.inflight_file_count == 0);
+    ASSERT_TRUE(info.inflight_data_bytes == 0);
+
+    ASSERT_OK(write_chunks(&fs, "alpha", (const uint8_t *)alpha,
+                strlen(alpha)));
+    ASSERT_OK(write_chunks(&fs, "beta", (const uint8_t *)beta,
+                strlen(beta)));
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) == 0);
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_REFRESH_IF_NEEDED));
+    ASSERT_TRUE(info.committed_file_count == 2);
+    ASSERT_TRUE(info.committed_data_bytes == strlen(alpha) + strlen(beta));
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_REFRESH_COMMITTED |
+                FFFS_FSINFO_ESTIMATE_METADATA));
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) != 0);
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_BYTES_VALID) != 0);
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_METADATA_ESTIMATE_VALID) != 0);
+    ASSERT_TRUE(info.committed_file_count == 2);
+    ASSERT_TRUE(info.committed_data_bytes == strlen(alpha) + strlen(beta));
+    ASSERT_TRUE(info.estimated_metadata_bytes > 0);
+
+    ASSERT_OK(fffs_open(&fs, &writer, "gamma",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&writer, gamma, strlen(gamma), &written));
+    ASSERT_TRUE(written == strlen(gamma));
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+    ASSERT_TRUE(info.committed_file_count == 2);
+    ASSERT_TRUE(info.committed_data_bytes == strlen(alpha) + strlen(beta));
+    ASSERT_TRUE(info.inflight_file_count == 1);
+    ASSERT_TRUE(info.inflight_data_bytes == strlen(gamma));
+    ASSERT_OK(fffs_close(&writer));
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+    ASSERT_TRUE(info.committed_file_count == 3);
+    ASSERT_TRUE(info.committed_data_bytes ==
+            strlen(alpha) + strlen(beta) + strlen(gamma));
+    ASSERT_TRUE(info.inflight_file_count == 0);
+    ASSERT_TRUE(info.inflight_data_bytes == 0);
+
+    ASSERT_OK(write_chunks(&fs, "alpha", (const uint8_t *)alpha_new,
+                strlen(alpha_new)));
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+#if FFFS_LAZY_DELETE_TOMBSTONES
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) == 0);
+#else
+    ASSERT_TRUE(info.committed_file_count == 3);
+    ASSERT_TRUE(info.committed_data_bytes ==
+            strlen(alpha_new) + strlen(beta) + strlen(gamma));
+#endif
+
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_REFRESH_COMMITTED));
+    ASSERT_TRUE(info.committed_file_count == 3);
+    ASSERT_TRUE(info.committed_data_bytes ==
+            strlen(alpha_new) + strlen(beta) + strlen(gamma));
+
+    ASSERT_OK(fffs_delete_file(&fs, "beta"));
+    ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
+#if FFFS_LAZY_DELETE_TOMBSTONES
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) == 0);
+#else
+    ASSERT_TRUE(info.committed_file_count == 2);
+    ASSERT_TRUE(info.committed_data_bytes ==
+            strlen(alpha_new) + strlen(gamma));
+#endif
+
+    fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
     return 0;
 }
@@ -1363,7 +1464,8 @@ static int test_replay_evicts_stale_hash_collision_head(void) {
     ASSERT_TRUE(stale_head >= fs.index_sectors);
     ASSERT_OK(write_chunks(&fs, live_name, (const uint8_t *)live_value,
                 strlen(live_value)));
-    ASSERT_OK(fffs_tombstone_metadata_for_slot(&fs, stale_head, stale_slot));
+    ASSERT_OK(fffs_tombstone_metadata_for_slot(&fs, stale_head, stale_slot,
+                FFFS_TOMBSTONE_NO_ACCOUNTING, NULL));
     fffs_unmount(&fs);
 
     ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
@@ -2334,6 +2436,7 @@ int main(void) {
     failures += test_format_mount_write_read_remount();
     failures += test_mount_requires_scratch();
     failures += test_overwrite_delete_and_remount();
+    failures += test_fsinfo_refresh_and_cached_accounting();
     failures += test_reserved_hash_slots_are_skipped();
     failures += test_replay_skips_reused_stale_index_heads();
     failures += test_gc_reclaims_unindexed_orphan_sector();

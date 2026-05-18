@@ -323,13 +323,14 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
     return FFFS_OK;
 }
 
-bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
-    struct fffs *fs = dir->fs;
+static bool current_index_entry_read(struct fffs *fs, size_t *cursor_seq_pos,
+        size_t *cursor_offset, struct fffs_dir *dir, uint16_t *slot,
+        uint16_t *head, int *status) {
     struct index_scan scan;
     index_scan_init(&scan, fs, dir, fs->scratch, fs->scratch_size, true);
     struct logical_pos cur = {
-        .seq_pos = dir->cursor_seq_pos,
-        .offset = dir->cursor_offset,
+        .seq_pos = *cursor_seq_pos,
+        .offset = *cursor_offset,
     };
     if (cur.seq_pos == 0 && cur.offset == 0) {
         cur.offset = logical_sector_begin(fs, 0);
@@ -339,59 +340,83 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
         size_t end = logical_sector_end(fs, cur.seq_pos);
         for (; cur.offset + 4 <= end; cur.offset += 4) {
             struct logical_pos rec_pos = cur;
-            dir->cursor_seq_pos = cur.seq_pos;
-            dir->cursor_offset = cur.offset + 4;
+            *cursor_seq_pos = cur.seq_pos;
+            *cursor_offset = cur.offset + 4;
 
-            uint16_t slot;
-            uint16_t head;
+            uint16_t rec_slot;
+            uint16_t rec_head;
             bool erased;
-            int err = read_index_at(&scan, cur.offset, &slot, &head,
+            int err = read_index_at(&scan, cur.offset, &rec_slot, &rec_head,
                     &erased);
             if (err != FFFS_OK) {
-                dir->status = err;
+                *status = err;
                 return false;
             }
             if (erased) {
                 break;
             }
-            if (head == 0) {
+            if (rec_head == 0) {
                 continue;
             }
 
             bool newer;
-            err = newer_record_for_slot(&scan, &rec_pos, slot, &newer);
+            err = newer_record_for_slot(&scan, &rec_pos, rec_slot, &newer);
             if (err != FFFS_OK) {
-                dir->status = err;
+                *status = err;
                 return false;
             }
             if (newer) {
                 continue;
             }
 
-            struct fffs_stat candidate;
-            err = fffs_read_metadata_for_slot(fs, head, slot, &candidate,
-                    NULL, NULL, NULL, NULL);
-            if (err != FFFS_OK) {
-                dir->status = err;
-                return false;
-            }
-            if (dir->prefix_len &&
-                    strncmp(candidate.name, dir->prefix,
-                        dir->prefix_len) != 0) {
-                continue;
-            }
-            *st = candidate;
-            dir->status = FFFS_OK;
+            *slot = rec_slot;
+            *head = rec_head;
+            *status = FFFS_OK;
             return true;
         }
         if (cur.seq_pos + 1 < fs->index_sequence_count) {
             cur.offset = logical_sector_begin(fs, cur.seq_pos + 1);
-            dir->cursor_seq_pos = cur.seq_pos + 1;
-            dir->cursor_offset = cur.offset;
+            *cursor_seq_pos = cur.seq_pos + 1;
+            *cursor_offset = cur.offset;
         }
+    }
+    *status = FFFS_OK;
+    return false;
+}
+
+bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
+    struct fffs *fs = dir->fs;
+    while (true) {
+        uint16_t slot;
+        uint16_t head;
+        if (!current_index_entry_read(fs, &dir->cursor_seq_pos,
+                    &dir->cursor_offset, dir, &slot, &head, &dir->status)) {
+            return false;
+        }
+
+        struct fffs_stat candidate;
+        int err = fffs_read_metadata_for_slot(fs, head, slot, &candidate,
+                NULL, NULL, NULL, NULL);
+        if (err != FFFS_OK) {
+            dir->status = err;
+            return false;
+        }
+        if (dir->prefix_len &&
+                strncmp(candidate.name, dir->prefix, dir->prefix_len) != 0) {
+            continue;
+        }
+        *st = candidate;
+        dir->status = FFFS_OK;
+        return true;
     }
     dir->status = FFFS_OK;
     return false;
+}
+
+bool fffs_index_iter_read(struct fffs_index_iter *iter, uint16_t *slot,
+        uint16_t *head) {
+    return current_index_entry_read(iter->fs, &iter->cursor_seq_pos,
+            &iter->cursor_offset, NULL, slot, head, &iter->status);
 }
 
 int fffs_index_head_for_slot(struct fffs *fs, uint16_t candidate_slot,

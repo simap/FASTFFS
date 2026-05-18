@@ -333,6 +333,51 @@ static int run_probe(enum ffsv_flash_preset preset, const char *profile_name) {
             after_seq);
     (void)listed;
 
+    struct fffs_fsinfo info;
+    before_seq = ffsv_flash_next_sequence(flash);
+    before = ffsv_flash_time_ns(flash);
+    err = fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST);
+    after = ffsv_flash_time_ns(flash);
+    after_seq = ffsv_flash_next_sequence(flash);
+    if (err != FFFS_OK) {
+        return 1;
+    }
+    print_delta(flash, "fsinfo fast", before, after, before_seq, after_seq);
+
+    before_seq = ffsv_flash_next_sequence(flash);
+    before = ffsv_flash_time_ns(flash);
+    err = fffs_fsinfo(&fs, &info, FFFS_FSINFO_REFRESH_COMMITTED |
+            FFFS_FSINFO_ESTIMATE_METADATA);
+    after = ffsv_flash_time_ns(flash);
+    after_seq = ffsv_flash_next_sequence(flash);
+    if (err != FFFS_OK || info.committed_file_count != 100) {
+        return 1;
+    }
+    print_delta(flash, "fsinfo refresh 100", before, after, before_seq,
+            after_seq);
+
+    before_seq = ffsv_flash_next_sequence(flash);
+    before = ffsv_flash_time_ns(flash);
+    err = fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST);
+    after = ffsv_flash_time_ns(flash);
+    after_seq = ffsv_flash_next_sequence(flash);
+    if (err != FFFS_OK) {
+        return 1;
+    }
+    print_delta(flash, "fsinfo fast cached", before, after, before_seq,
+            after_seq);
+
+    before_seq = ffsv_flash_next_sequence(flash);
+    before = ffsv_flash_time_ns(flash);
+    err = fffs_fsinfo(&fs, &info, FFFS_FSINFO_REFRESH_IF_NEEDED);
+    after = ffsv_flash_time_ns(flash);
+    after_seq = ffsv_flash_next_sequence(flash);
+    if (err != FFFS_OK) {
+        return 1;
+    }
+    print_delta(flash, "fsinfo refresh cached", before, after, before_seq,
+            after_seq);
+
     fffs_unmount(&fs);
     before_seq = ffsv_flash_next_sequence(flash);
     before = ffsv_flash_time_ns(flash);
