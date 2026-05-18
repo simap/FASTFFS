@@ -469,8 +469,4 @@ int fffs_index_record_is_current(struct fffs *fs,
     return FFFS_OK;
 }
 
-void fffs_index_mark_live_heads_used(struct fffs *fs) {
-    (void)fs;
-}
-
 #endif

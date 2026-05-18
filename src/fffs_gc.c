@@ -17,8 +17,9 @@ enum gc_sector_state {
 };
 
 static int sector_footer_state(struct fffs *fs, size_t sector,
-        enum gc_sector_state *state) {
+        enum gc_sector_state *state, bool *full_hint) {
     uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    *full_hint = false;
     FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_FOOTER_STATE);
     int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs,
                 (uint16_t)sector), footer, sizeof(footer));
@@ -65,6 +66,8 @@ static int sector_footer_state(struct fffs *fs, size_t sector,
     if (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
         return FFFS_ERR_CORRUPT;
     }
+    *full_hint = fffs_lifecycle_hint_pair(footer[5]) ==
+        FFFS_BITMIRROR_CLEARED;
     *state = GC_SECTOR_VALID;
     return FFFS_OK;
 }
@@ -165,7 +168,8 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         return FFFS_OK;
     }
     enum gc_sector_state state;
-    int err = sector_footer_state(fs, s, &state);
+    bool full_hint;
+    int err = sector_footer_state(fs, s, &state, &full_hint);
     if (err != FFFS_OK) {
         return err;
     }
@@ -180,7 +184,6 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     }
     if (state == GC_SECTOR_DIRTY_NO_FOOTER &&
             fffs_sector_is_inflight(fs, (uint16_t)s)) {
-        fffs_alloc_map_mark_used(fs, (uint16_t)s);
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.live_seen = true;
         fs->gc_md.active = false;
@@ -249,7 +252,6 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
                 &tombstone, sizeof(tombstone));
         fs->gc_md.active = false;
         fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fffs_alloc_map_mark_used(fs, (uint16_t)s);
         if (err != FFFS_OK) {
             return err;
         }
@@ -279,7 +281,9 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     }
 
     if (fs->gc_md.live_seen) {
-        fffs_alloc_map_mark_used(fs, (uint16_t)s);
+        if (full_hint) {
+            fffs_alloc_map_mark_used(fs, (uint16_t)s);
+        }
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.active = false;
         if (out_action) {

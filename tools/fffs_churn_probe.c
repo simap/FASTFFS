@@ -562,6 +562,33 @@ static void print_profile(const char *label,
     }
 }
 
+static void print_wear_stats(struct ffsv_flash *flash, const char *label,
+        size_t first_sector) {
+    const struct ffsv_flash_config *cfg = ffsv_flash_config(flash);
+    size_t sector_count = cfg->total_size / cfg->sector_size;
+    if (first_sector >= sector_count) {
+        return;
+    }
+
+    uint32_t min = UINT32_MAX;
+    uint32_t max = 0;
+    uint64_t total = 0;
+    for (size_t sector = first_sector; sector < sector_count; sector++) {
+        uint32_t wear = ffsv_flash_sector_wear(flash, sector);
+        if (wear < min) {
+            min = wear;
+        }
+        if (wear > max) {
+            max = wear;
+        }
+        total += wear;
+    }
+
+    size_t count = sector_count - first_sector;
+    printf("%-24s sectors=%zu min=%u max=%u avg=%.2f\n",
+            label, count, min, max, (double)total / (double)count);
+}
+
 static const char *class_name(bench_churn_class_t cls) {
     return bench_churn_class_name(cls);
 }
@@ -1028,6 +1055,8 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     print_scope_profile("cold read", &read_scope_profile);
 #endif
     print_class_stats("cold read", read_stats);
+    print_wear_stats(flash, "wear all sectors", 0);
+    print_wear_stats(flash, "wear data sectors", remounted.index_sectors);
 
     fffs_unmount(&remounted);
     dump_final_image(flash, profile_name);

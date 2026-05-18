@@ -330,7 +330,6 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
         fffs_unmount(fs);
         return err;
     }
-    fffs_index_mark_live_heads_used(fs);
     return FFFS_OK;
 }
 

@@ -1652,6 +1652,15 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
     if (err != FFFS_OK) {
         return err;
     }
+    size_t logical_data_len = commit_index ?
+        (size_t)file->root_payload_offset + data_len : data_len;
+    if ((size_t)data_off + logical_data_len >= record_off) {
+        err = fffs_mark_sector_full(fs, sector);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        fffs_alloc_map_mark_used(fs, sector);
+    }
     return commit_index ? fffs_append_index_record(fs, file->slot, file->head)
         : FFFS_OK;
 }

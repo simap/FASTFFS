@@ -445,14 +445,19 @@ The bitmap is an optimization, not the source of truth:
 - It can be stale after a crash.
 - Allocation checks candidate sectors for blank state before writing.
 - If stale, the allocator may skip usable space temporarily.
-- Successful writes can update the bitmap lazily.
+- GC classification can update the bitmap lazily.
 - Full truth can be reconstructed from the index and sector metadata.
 - A failed data-sector erase/program can be skipped without committing an index record pointing at it. Persistent bad-sector tracking can remain a later backend feature.
 
-The full bitmap uses strict known-used semantics: `1` means known used,
-live, or reserved; `0` means unknown or worth inspecting. A `0` bit is not
-proof of free space, and a stale `1` must not be allowed to starve pressure
-paths forever. Deletes clear the old file's known sector chain back to unknown
+The full bitmap uses strict pressure-skip semantics: `1` means known full and
+probably not erasable, or otherwise unavailable for allocation; `0` means
+unknown or worth inspecting. A `0` bit is not proof of free space, and a stale
+`1` must not be allowed to starve pressure paths forever. Allocation may use a
+full hint as a local cheap skip, but it does not refresh the bitmap because it
+does not perform liveness analysis. A writer that completely fills its current
+sector can program the full hint and set the bitmap because it owns that sector
+state. GC can also set the bit when the sector is full-hinted and still has
+live metadata. Deletes clear the old file's known sector chain back to unknown
 even in lazy tombstone mode, so GC can later reclassify those sectors without
 delete-time sector-local flash programs.
 
@@ -705,6 +710,12 @@ Allocation should consider the following:
 The allocator may temporarily reserve some sectors in a contiguous extent for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
 
 Reservations don't need to be blank checked or verified until allocated.
+
+Reservation state can be represented as temporary unavailable bits in the
+allocation bitmap. These bits must be cleared when a reservation is released,
+shrunk, consumed, or fails allocation. If allocation cannot find space while
+respecting the bitmap, it can cut reservations and then fall back to checking
+sectors directly without trusting bitmap state.
 
 The allocator can avoid allocating sectors potentially used by other files by
 using the open/in flight file data to see what sectors are not fully written,

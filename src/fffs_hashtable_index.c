@@ -279,14 +279,4 @@ int fffs_index_record_is_current(struct fffs *fs,
     return FFFS_OK;
 }
 
-void fffs_index_mark_live_heads_used(struct fffs *fs) {
-    for (size_t i = 0; i < fs->index_hash_table_size; i++) {
-        struct fffs_index_bucket bucket = buckets(fs)[i];
-        uint16_t head = bucket.head;
-        if (bucket.slot != 0 && head != 0) {
-            fffs_alloc_map_mark_used(fs, head);
-        }
-    }
-}
-
 #endif

@@ -172,13 +172,4 @@ int fffs_index_record_is_current(struct fffs *fs,
     return FFFS_OK;
 }
 
-void fffs_index_mark_live_heads_used(struct fffs *fs) {
-    for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
-        uint16_t head = fs->index_heads[slot];
-        if (head != 0) {
-            fffs_alloc_map_mark_used(fs, head);
-        }
-    }
-}
-
 #endif

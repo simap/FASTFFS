@@ -333,9 +333,6 @@ int fffs_index_record_is_current(struct fffs *fs,
         size_t seq_pos, size_t offset, uint16_t slot, uint16_t head,
         bool *current);
 
-/* Seed the allocation map with current live root heads after mount replay. */
-void fffs_index_mark_live_heads_used(struct fffs *fs);
-
 /* Inflight writer checks protect sectors for allocation and slots for GC. */
 bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector);
 bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot);

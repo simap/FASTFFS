@@ -151,7 +151,6 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
     if (fffs_sector_is_inflight(file->fs, candidate) ||
             sector_reserved_by_other(file, candidate)) {
         fffs_alloc_release_reservation(file);
-        fffs_alloc_map_mark_used(file->fs, candidate);
         *skip_sector = candidate;
         *have_skip = true;
         return FFFS_ERR_NO_SPACE;
@@ -160,6 +159,7 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
             (size_t)candidate * file->fs->sector_size,
             file->fs->sector_size);
     if (err == FFFS_OK) {
+        fffs_alloc_map_mark_unknown(file->fs, candidate);
         *sector = candidate;
         file->data_offset = 0;
         file->current_write_offset = 0;
@@ -171,14 +171,13 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
         if (file->reserve_count == 0) {
             file->reserve_first = 0;
         }
-        fffs_alloc_map_mark_used(file->fs, candidate);
         reserve_after(file, candidate);
         return FFFS_OK;
     }
+    fffs_alloc_release_reservation(file);
     if (err != FFFS_ERR_NO_SPACE) {
         return err;
     }
-    fffs_alloc_release_reservation(file);
     *skip_sector = candidate;
     *have_skip = true;
     return FFFS_ERR_NO_SPACE;
@@ -187,7 +186,6 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
 static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
         bool use_map, uint16_t skip_sector, bool have_skip) {
     struct fffs *fs = file->fs;
-    (void)use_map;
     if (fs->sector_count <= fs->index_sectors) {
         return FFFS_ERR_NO_SPACE;
     }
@@ -205,7 +203,10 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
         }
         if (fffs_sector_is_inflight(fs, (uint16_t)s) ||
                 sector_reserved_by_other(file, (uint16_t)s)) {
-            fffs_alloc_map_mark_used(fs, (uint16_t)s);
+            s = fffs_next_data_sector(fs, s);
+            continue;
+        }
+        if (use_map && fffs_alloc_map_maybe_used(fs, (uint16_t)s)) {
             s = fffs_next_data_sector(fs, s);
             continue;
         }
@@ -222,7 +223,6 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
             file->current_write_offset = data_off;
             file->current_metadata_offset = record_off;
             file->current_needs_footer = needs_footer;
-            fffs_alloc_map_mark_used(fs, *sector);
             if (needs_footer) {
                 reserve_after(file, *sector);
             }
@@ -258,7 +258,6 @@ static int allocate_erased_gc_sector(struct fffs_file *file,
     file->current_metadata_offset = (uint16_t)(fs->sector_size -
             FFFS_SECTOR_FOOTER_SIZE - FFFS_MD_FILE_RECORD_SIZE);
     file->current_needs_footer = true;
-    fffs_alloc_map_mark_used(fs, erased_sector);
     reserve_after(file, erased_sector);
     return FFFS_OK;
 }
@@ -288,6 +287,10 @@ int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector) {
             err = alloc_sector_once(file, sector, true,
                     skip_sector, have_skip);
         }
+    }
+    if (err == FFFS_ERR_NO_SPACE) {
+        err = alloc_sector_once(file, sector, false, skip_sector,
+                have_skip);
     }
 #if FFFS_GC_ON_ALLOC_FAILURE
     if (err == FFFS_ERR_NO_SPACE && fs->sector_count > fs->index_sectors) {

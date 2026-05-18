@@ -4,7 +4,8 @@
  * Copyright (c) 2026 Ben Hencke
  *
  * FASTFFS allocation map hints: optional RAM state used by allocation and GC to
- * skip sectors already known to be used without becoming namespace authority.
+ * skip sectors already known to be unavailable without becoming namespace
+ * authority.
  */
 
 #include "fffs_internal.h"
