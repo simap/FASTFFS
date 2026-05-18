@@ -1,14 +1,17 @@
 set(VFS_BENCH_COMMON "${CMAKE_CURRENT_LIST_DIR}/../../vfs_bench_common")
+set(BENCHFS "${CMAKE_CURRENT_LIST_DIR}/../../benchfs")
 set(CHURN_MODEL "${CMAKE_CURRENT_LIST_DIR}/../../churn_model")
 
 idf_component_register(
     SRCS
         "backend_spiffs.c"
         "${VFS_BENCH_COMMON}/vfs_bench.c"
+        "${BENCHFS}/benchfs.c"
         "${CHURN_MODEL}/churn_model.c"
     INCLUDE_DIRS
         "."
         "${VFS_BENCH_COMMON}"
+        "${BENCHFS}"
         "${CHURN_MODEL}"
     REQUIRES
         esp_partition

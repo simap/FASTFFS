@@ -133,6 +133,7 @@ class ParsedLog:
             self.set("File write buffer", d.get("file_write_buffer", ""))
             self.set("Allocation map mode", d.get("alloc_map_mode", ""))
             self.set("Allocation map words", d.get("alloc_map_words", ""))
+            self.set("Churn GC policy", d.get("gc_policy", ""))
             return
 
         if "baseline format rc=" in msg:

@@ -1,9 +1,11 @@
 set(FASTFFS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
+set(BENCHFS "${CMAKE_CURRENT_LIST_DIR}/../../benchfs")
 set(CHURN_MODEL "${CMAKE_CURRENT_LIST_DIR}/../../churn_model")
 
 idf_component_register(
     SRCS
         "main.c"
+        "${BENCHFS}/benchfs.c"
         "${CHURN_MODEL}/churn_model.c"
         "${FASTFFS_ROOT}/src/fastffs.c"
         "${FASTFFS_ROOT}/src/fffs_alloc.c"
@@ -16,6 +18,7 @@ idf_component_register(
         "${FASTFFS_ROOT}/src/fffs_ram_index.c"
     INCLUDE_DIRS
         "."
+        "${BENCHFS}"
         "${CHURN_MODEL}"
         "${FASTFFS_ROOT}/include"
         "${FASTFFS_ROOT}/src"

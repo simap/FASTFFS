@@ -1,4 +1,5 @@
 set(JESFS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../third_party/JesFs")
+set(BENCHFS "${CMAKE_CURRENT_LIST_DIR}/../../benchfs")
 set(CHURN_MODEL "${CMAKE_CURRENT_LIST_DIR}/../../churn_model")
 
 idf_component_register(
@@ -6,11 +7,13 @@ idf_component_register(
         "main.c"
         "jesfs_ll_esp_partition.c"
         "jesfs_platform_hooks.c"
+        "${BENCHFS}/benchfs.c"
         "${CHURN_MODEL}/churn_model.c"
         "${JESFS_ROOT}/jesfs_hl.c"
         "${JESFS_ROOT}/jesfs_ml.c"
     INCLUDE_DIRS
         "."
+        "${BENCHFS}"
         "${CHURN_MODEL}"
         "${JESFS_ROOT}"
 )
