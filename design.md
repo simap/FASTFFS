@@ -581,43 +581,52 @@ Metadata records do not need their own magic field.
 
 ## Sector Metadata
 
-Sector metadata is out-of-line from the global index. It describes file data, extents, continuations, sizes, names, and local placement.
+Sector metadata is out-of-line from the global index. It describes file data, spans, continuations, sizes, names, and local placement.
 
-Metadata has multiple fixed-size record variants with different storage costs. Each record type has a known size. The type byte is placed at the physical end of the record so a reverse scanner can read the type first, derive the size, then read and validate the full record. The default implementation can start with a "does everything" record that supports file heads, extents, continuations, tombstones, size, and the configured filename limit. Later variants can specialize for long filenames, tiny files with short inline names, compact continuation records, or lightweight key/value records. Some variants may be compile-time configuration; others can be selected at runtime based on the file shape.
+Metadata uses fixed-size record variants with different storage costs. Each record type has a known size. The type byte is placed at the physical end of the record so a reverse scanner can read the type first, derive the size, then read and validate the full record. The baseline file variants are compact root and continuation records. Names and other variable-length root fields live in the root record's data-side prefix rather than inline in the metadata record.
 
-All metadata records include:
+File metadata records include:
 
 - type
 - flags with valid/tombstone state
 - resolved slot
-- sector-local data offset/length for this extent
+- next non-contiguous span head sector, if any
+- contiguous span length
+- sector-local data offset/length for this record's data-side region
 - optional CRC when required by the index header
 
-The default file layout is linked single-extent metadata. Each metadata record describes one contiguous data extent. If a file continues into a non-contiguous sector, the current extent metadata links to the next extent's head sector.
+The default file layout is linked span metadata. Each file metadata record describes one contiguous physical span. If a file continues into a non-contiguous sector, the current span metadata links to the next span's head sector.
 
-The index-visible metadata record may represent either the beginning of a forward chain or the current tail of an append-optimized reverse chain. This does not change index replay or lookup; it only changes how open/read/write/seek enumerate extents.
+The index-visible metadata record may represent either the beginning of a forward chain or the current tail of an append-optimized reverse chain. This does not change index replay or lookup; it only changes how open/read/write/seek enumerate spans.
 
-Default root metadata should include:
+Root file metadata includes:
 
-- name length and filename, up to the default configured limit of 32 bytes
 - total file size for fast `stat`
-- next extent head sector, if any
+- root-sector data-side offset and length
+- span linkage and span length
 
-Continuation metadata can be smaller:
+The root data-side region starts with the length-prefixed filename, followed by
+any future length-prefixed root fields, then the root file bytes. File open by
+name already has to parse the filename and can keep the computed root file byte
+offset for later reads.
 
-- next extent head sector, if any
+Continuation metadata includes:
+
+- logical file offset for the continuation bytes
+- continuation-sector data offset and length
+- span linkage and span length
 - no filename
-- no total file size unless needed for validation
 
-Continuations do not need the full root metadata fields.
+Continuations do not need the full root metadata fields. Their data-side region
+contains file bytes, not a required metadata prefix.
 
-Later metadata variants can add reverse tail records for cheap append. A tail/root record would carry the filename, total size, this extent, and links needed to find the previous and/or first extent. Runtime can read both forward and reverse-chain files; writing reverse-chain records can be a configuration choice.
+Later metadata variants can add reverse tail records for cheap append. A tail/root record would carry the filename, total size, this span, and links needed to find the previous and/or first span. Runtime can read both forward and reverse-chain files; writing reverse-chain records can be a configuration choice.
 
-Amendment records are also a later metadata variant. They are small slot-scoped records that update logical fields such as `next_extent_sector` or `total_size`; newest valid non-tombstoned amendment for a slot and field wins. Amendments do not change identity fields such as slot, filename, or data offset/length, and they do not mutate another record's lifecycle flags.
+Amendment records are also a later metadata variant. They are small slot-scoped records that update logical fields such as `next_span_sector` or `total_size`; newest valid non-tombstoned amendment for a slot and field wins. Amendments do not change identity fields such as slot, filename, or data offset/length, and they do not mutate another record's lifecycle flags.
 
 Continuation metadata still carries the resolved slot so GC can check liveness against the global index. A continuation from an overwritten file must not look live merely because the same slot was reused by a newer root.
 
-Additional owner identity, such as root head, generation, or extent ordinal, is not part of the baseline. Liveness is validated by starting at the current index entry for the slot and walking the current root extent chain. A continuation with the same slot but not reachable from that chain is dead.
+Additional owner identity, such as root head, generation, or span ordinal, is not part of the baseline. Liveness is validated by starting at the current index entry for the slot and walking the current root span chain. A continuation with the same slot but not reachable from that chain is dead.
 
 Metadata CRC support is optional, but if enabled it is a format-level policy advertised in index sector headers. A CRC-required image must not accept metadata records without valid CRC coverage as non-CRC records. CRC is not part of the 4-byte index record because that would destroy the compact index density.
 
@@ -688,7 +697,10 @@ The allocator may temporarily reserve some sectors in a contiguous extent for a 
 
 Reservations don't need to be blank checked or verified until allocated.
 
-The allocator can avoid allocating sectors potentially used by other files by using the open/in flight file data to see what sectors are not fully written, and by skipping over sectors that appear to belong to any of the open/in flight files, identified by slot and/or name.
+The allocator can avoid allocating sectors potentially used by other files by
+using the open/in flight file data to see what sectors are not fully written,
+and by skipping over sectors that are reserved for or currently used by open
+writers.
 
 Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or there were none to free. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
 
