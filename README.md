@@ -45,6 +45,7 @@ GC, but is much faster with it.
 - A sector based flash format with index sectors, compact namespace records,
   file metadata, forward extent links, overwrite/delete commits, index
   rotation/compaction, small background GC steps, and inline GC under pressure.
+- Packed small-file storage so tiny files do not each consume a whole sector.
 - Configurable index cache modes, including no cache, hash table, and full table builds.
 - A host verification flash backend derived from the LittleFS emulator, with
   NOR programming rules, operation accounting, fake timing, failure injection,
@@ -56,7 +57,6 @@ GC, but is much faster with it.
 
 ## Near Future Goals
 
-- Compact small file storage.
 - Optional CRC32 protected file data + metadata.
 - Multi file atomic transactions.
 - Accelerated directory listing. FASTFFS already supports prefix filtering.
@@ -97,36 +97,42 @@ See `design.md` for the deeper design notes.
 
 This is a comparison of other permissively licensed filesystems that were reasonably easy to port/integrate. There are many others, but most appeared to be glued to a whole operating system.
 
-In this benchmark, FASTFFS writes tiny files 10x faster, writes 50 KB
-files about 2x faster, lists directories 5x faster, performs name lookups over
-160x faster, and can complete the churn workload about 1.5x faster than the
-tested flash filesystems.
+In this benchmark, the default FASTFFS debt-GC configuration writes tiny files
+about 7x faster than the fastest tested non-FASTFFS result, writes 50 KB files
+about 2x faster, performs name probes tens of times faster, and completes the
+churn workload about 1.5x faster than LittleFS and JesFS.
+
+Even a minimal RAM configuration stays faster than the other tested filesystems
+on the core 64 B-50 KiB file read/write and churn workloads, while remaining
+competitive in other aspects.
 
 Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
 
-FASTFFS inline-GC performs no scheduled GC steps during the workload; GC runs on demand inside foreground mutation operations when needed. 
-FASTFFS scheduled debt-GC uses the same filesystem configuration, but during churn runs measured GC steps between foreground operations; that GC time is included in total churn runtime. This roughly simulates spending some idle cycles on GC opportunistically.
+FASTFFS default debt-GC runs measured GC steps between foreground operations;
+that GC time is included in total churn runtime. This roughly simulates spending
+some idle cycles on GC opportunistically, instead of forcing foreground writes to
+pay the whole reclaim cost when free space is tight.
 
 The churn benchmark writes about 8 MiB of creates/replaces/deletes while keeping about 2.4 MiB live, measuring mutation throughput during the run and final 123-file read/list behavior.
 
-| Metric | FASTFFS inline-GC | FASTFFS scheduled debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
+| Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
 |---|---:|---:|---:|---:|---:|
-| FS RAM config | 2.8 KiB + 360 B/open | 2.8 KiB + 360 B/open | 1.4 KiB + 636 B/open | 164 B + 28 B/open | 532 B + 324 B/open slot |
-| Tiny-file storage, 192 x 64 B | 4,138 B/file | 4,138 B/file | 554 B/file | 4,096 B/file | 502 B/file |
-| Write 192 x 64 B | 20 KiB/s | 20 KiB/s | 0.6 KiB/s | 2 KiB/s | 0.2 KiB/s |
-| Read 192 x 64 B total | 279 KiB/s | 279 KiB/s | 3 KiB/s | 4 KiB/s | 68.8 KiB/s |
-| Read 192 x 64 B open/file | 78 us | 78 us | 9.61 ms | 12.6 ms | 509 us |
-| Write 16 x 50 KiB | 179 KiB/s | 177 KiB/s | 92 KiB/s | 73 KiB/s | 65.8 KiB/s |
-| Read 16 x 50 KiB total | 4,548 KiB/s | 4,547 KiB/s | 2,384 KiB/s | 1,237 KiB/s | 383 KiB/s |
-| List 208 files | 15.3 ms | 15.3 ms | 277 ms | 78.8 ms | 133 ms |
-| Existing-name probe | 76 us | 76 us | 17.6 ms | 12.2 ms | 51.1 ms |
-| Missing-name probe | 63 us | 63 us | 15.3 ms | 27.2 ms | 131 ms |
-| Churn total time | 153.4 s | 105.7 s | 173.4 s | 164.4 s | 826 s |
-| Churn 10-20 KiB write | 57 KiB/s | 178 KiB/s | 51 KiB/s | 52 KiB/s | 10.6 KiB/s |
-| Churn 20-60 KiB write | 57 KiB/s | 181 KiB/s | 60 KiB/s | 57 KiB/s | 11.5 KiB/s |
-| Churn 350 KiB write | 36 KiB/s | 183 KiB/s | 79 KiB/s | 48 KiB/s | 6.5 KiB/s |
-| Churn final cold list, 123 files | 9.15 ms | 9.14 ms | 400 ms | 74.3 ms | 126 ms |
-| Churn cold read 350 KiB total | 4,564 KiB/s | 4,565 KiB/s | 2,431 KiB/s | 2,996 KiB/s | 454 KiB/s |
+| FS memory, base + open + stack | 4,872 B + 376 B + 1,156 B | 256 B + 184 B + 1,156 B | 1,672 B + 756 B + 1,452 B | 164 B + 28 B + 1,164 B | 3,540 B + 344 B + 1,248 B |
+| Tiny-file overhead, 192 x 64 B | 16 B/file | 16 B/file | 448 B/file | 4,032 B/file | 438 B/file |
+| Write 192 x 64 B | 20.8 KiB/s | 10.1 KiB/s | 0.59 KiB/s | 2.93 KiB/s | 0.27 KiB/s |
+| Read 192 x 64 B total | 179.2 KiB/s | 35.6 KiB/s | 1.95 KiB/s | 5.21 KiB/s | 2.71 KiB/s |
+| Read 192 x 64 B open/file | 178 us | 1.52 ms | 11.1 ms | 11.9 ms | 22.9 ms |
+| Write 16 x 50 KiB | 174.6 KiB/s | 122.2 KiB/s | 91.8 KiB/s | 72.9 KiB/s | 65.8 KiB/s |
+| Read 16 x 50 KiB total | 4,404 KiB/s | 4,357 KiB/s | 2,116 KiB/s | 1,278 KiB/s | 322.6 KiB/s |
+| List 208 files | 33.3 ms | 111 ms | 306 ms | 26.4 ms | 123 ms |
+| Existing-name probe | 164 us | 1.50 ms | 20.0 ms | 12.0 ms | 24.5 ms |
+| Missing-name probe | 78 us | 2.36 ms | 16.6 ms | 26.4 ms | 121 ms |
+| Churn total wall time | 107.281 s | 152.385 s | 158.943 s | 161.230 s | 755.656 s |
+| Churn 10-20 KiB write | 139.8 KiB/s | 77.3 KiB/s | 51.2 KiB/s | 52.1 KiB/s | 11.5 KiB/s |
+| Churn 20-60 KiB write | 155.7 KiB/s | 97.0 KiB/s | 71.8 KiB/s | 56.9 KiB/s | 11.6 KiB/s |
+| Churn 350 KiB write | 159.3 KiB/s | 113.3 KiB/s | 78.7 KiB/s | 48.4 KiB/s | 7.32 KiB/s |
+| Churn final cold list, 123 files | 18.7 ms | 281 ms | 302 ms | 17.8 ms | 116 ms |
+| Churn cold read 350 KiB total | 4,532 KiB/s | 4,456 KiB/s | 2,380 KiB/s | 3,037 KiB/s | 509.6 KiB/s |
 
 ## Notes in no particular order
 
