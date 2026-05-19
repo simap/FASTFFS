@@ -65,6 +65,13 @@ typedef struct {
 } benchfs_gc_stats_t;
 
 typedef struct {
+    uint32_t base_bytes;
+    uint32_t open_file_bytes;
+    bool base_valid;
+    bool open_file_valid;
+} benchfs_memory_info_t;
+
+typedef struct {
     const char *name;
     uint32_t tiny_files;
     uint32_t tiny_size;
@@ -104,6 +111,10 @@ typedef struct {
     int (*fsinfo)(void *ctx, benchfs_info_t *info);
     int (*run_gc)(void *ctx, benchfs_churn_event_t event, uint32_t file_size,
                   benchfs_gc_stats_t *stats);
+    int (*memory_info)(void *ctx, benchfs_memory_info_t *info);
+    uint32_t (*stack_used_bytes)(void *ctx);
+    int (*run_noop_stack_baseline)(void *ctx, const benchfs_config_t *cfg,
+                                   uint32_t *used_bytes);
     void (*log_config)(void *ctx);
     void (*log_backend_info)(void *ctx, const char *label);
 } benchfs_ops_t;
@@ -111,6 +122,8 @@ typedef struct {
 void benchfs_default_config(benchfs_config_t *cfg, const char *name);
 int benchfs_run(const benchfs_config_t *cfg, const benchfs_ops_t *ops,
                 void *ctx);
+int benchfs_run_noop(const benchfs_config_t *cfg,
+                     int64_t (*now_us)(void *ctx), void *timer_ctx);
 
 #ifdef __cplusplus
 }

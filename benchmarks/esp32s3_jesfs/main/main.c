@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "benchfs.h"
+#include "benchfs_esp.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -12,6 +13,29 @@
 
 #define JESFS_PARTITION_LABEL "jesfs"
 #define JESFS_MAX_OPEN_FILES 2
+#define JESFS_START_MODE FS_START_NORMAL
+#define JESFS_FORMAT_MODE FS_FORMAT_SOFT
+
+#ifdef SF_RD_TRANSFER_LIMIT
+#define JESFS_RD_TRANSFER_LIMIT_TEXT "SF_RD_TRANSFER_LIMIT=" STR(SF_RD_TRANSFER_LIMIT)
+#else
+#define JESFS_RD_TRANSFER_LIMIT_TEXT "SF_RD_TRANSFER_LIMIT=unlimited"
+#endif
+
+#ifdef SF_TX_TRANSFER_LIMIT
+#define JESFS_TX_TRANSFER_LIMIT_TEXT "SF_TX_TRANSFER_LIMIT=" STR(SF_TX_TRANSFER_LIMIT)
+#else
+#define JESFS_TX_TRANSFER_LIMIT_TEXT "SF_TX_TRANSFER_LIMIT=unlimited"
+#endif
+
+#ifdef JSTAT
+#define JESFS_JSTAT_TEXT "JSTAT=1"
+#else
+#define JESFS_JSTAT_TEXT "JSTAT=0"
+#endif
+
+#define STR_INNER(x) #x
+#define STR(x) STR_INNER(x)
 
 static const char *TAG = "jesfs_bench";
 
@@ -20,6 +44,16 @@ typedef struct {
     bool file_used[JESFS_MAX_OPEN_FILES];
     FS_DESC files[JESFS_MAX_OPEN_FILES];
 } jesfs_adapter_t;
+
+static void adapter_release_file(jesfs_adapter_t *a, FS_DESC *file)
+{
+    for (size_t i = 0; i < JESFS_MAX_OPEN_FILES; ++i) {
+        if (file == &a->files[i]) {
+            a->file_used[i] = false;
+            break;
+        }
+    }
+}
 
 static int64_t adapter_now_us(void *ctx)
 {
@@ -79,20 +113,20 @@ static int adapter_erase_storage(void *ctx)
     if (err != ESP_OK) {
         return err;
     }
-    (void)fs_start(FS_START_NORMAL);
+    (void)fs_start(JESFS_START_MODE);
     return BENCHFS_OK;
 }
 
 static int adapter_format(void *ctx)
 {
     (void)ctx;
-    return fs_format(FS_FORMAT_SOFT);
+    return fs_format(JESFS_FORMAT_MODE);
 }
 
 static int adapter_mount(void *ctx)
 {
     (void)ctx;
-    return fs_start(FS_START_NORMAL);
+    return fs_start(JESFS_START_MODE);
 }
 
 static int adapter_unmount(void *ctx)
@@ -123,17 +157,13 @@ static int adapter_open(void *ctx, const char *name, uint32_t flags, void **file
     } else if (flags & BENCHFS_OPEN_READ) {
         jesfs_flags = SF_OPEN_READ;
     } else {
+        adapter_release_file(a, f);
         return -1;
     }
 
     int rc = fs_open(f, (char *)name, jesfs_flags);
     if (rc != 0) {
-        for (size_t i = 0; i < JESFS_MAX_OPEN_FILES; ++i) {
-            if (f == &a->files[i]) {
-                a->file_used[i] = false;
-                break;
-            }
-        }
+        adapter_release_file(a, f);
         return rc;
     }
     *file = f;
@@ -170,12 +200,7 @@ static int adapter_close(void *ctx, void *file)
 {
     jesfs_adapter_t *a = ctx;
     int rc = fs_close((FS_DESC *)file);
-    for (size_t i = 0; i < JESFS_MAX_OPEN_FILES; ++i) {
-        if (file == &a->files[i]) {
-            a->file_used[i] = false;
-            break;
-        }
-    }
+    adapter_release_file(a, (FS_DESC *)file);
     return rc == 0 ? BENCHFS_OK : rc;
 }
 
@@ -204,15 +229,17 @@ static int adapter_list_count(void *ctx, size_t *count)
     (void)ctx;
     FS_STAT st;
     size_t active = 0;
-    for (uint16_t i = 0; i < 1200; ++i) {
+    uint16_t limit = (uint16_t)(sflash_info.files_used + 1U);
+    for (uint16_t i = 0; i < limit; ++i) {
         int rc = fs_info(&st, i);
-        if (rc == FS_STAT_INDEX) {
+        if (rc <= 0 || rc == FS_STAT_INDEX) {
+            if (rc < 0) {
+                return rc;
+            }
             break;
         }
         if (rc & FS_STAT_ACTIVE) {
             active++;
-        } else if (rc < 0) {
-            return rc;
         }
     }
     *count = active;
@@ -232,17 +259,20 @@ static int adapter_fsinfo(void *ctx, benchfs_info_t *info)
     info->file_count_valid = true;
     info->total_bytes = sflash_info.total_flash_size;
     info->used_bytes = used;
-    size_t file_count = 0;
-    (void)adapter_list_count(ctx, &file_count);
-    info->file_count = (uint32_t)file_count;
+    info->file_count = sflash_info.files_active;
     return BENCHFS_OK;
 }
 
 static void adapter_log_config(void *ctx)
 {
     (void)ctx;
-    ESP_LOGI(TAG, "config backend=JesFS partition=%s max_open_files=%d",
-             JESFS_PARTITION_LABEL, JESFS_MAX_OPEN_FILES);
+    ESP_LOGI(TAG,
+             "config backend=JesFS SF_SECTOR_PH=%u SF_BUFFER_SIZE_B=%u FNAMELEN=%u start_mode=%u format_mode=%u %s %s %s",
+             (unsigned)SF_SECTOR_PH, (unsigned)SF_BUFFER_SIZE_B,
+             (unsigned)FNAMELEN, (unsigned)JESFS_START_MODE,
+             (unsigned)JESFS_FORMAT_MODE,
+             JESFS_JSTAT_TEXT, JESFS_RD_TRANSFER_LIMIT_TEXT,
+             JESFS_TX_TRANSFER_LIMIT_TEXT);
 }
 
 static void adapter_log_backend_info(void *ctx, const char *label)
@@ -252,6 +282,17 @@ static void adapter_log_backend_info(void *ctx, const char *label)
              label, (unsigned long)(a->part ? a->part->size : 0),
              (unsigned long)sflash_info.available_disk_size,
              (unsigned long)sflash_info.total_flash_size);
+}
+
+static int adapter_memory_info(void *ctx, benchfs_memory_info_t *info)
+{
+    (void)ctx;
+    memset(info, 0, sizeof(*info));
+    info->base_valid = true;
+    info->base_bytes = sizeof(SFLASH_INFO);
+    info->open_file_valid = true;
+    info->open_file_bytes = sizeof(FS_DESC);
+    return BENCHFS_OK;
 }
 
 void app_main(void)
@@ -280,6 +321,9 @@ void app_main(void)
         .exists = adapter_exists,
         .list_count = adapter_list_count,
         .fsinfo = adapter_fsinfo,
+        .memory_info = adapter_memory_info,
+        .stack_used_bytes = benchfs_esp_current_stack_used_bytes,
+        .run_noop_stack_baseline = benchfs_esp_run_noop_stack_baseline,
         .log_config = adapter_log_config,
         .log_backend_info = adapter_log_backend_info,
     };

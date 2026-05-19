@@ -8,6 +8,7 @@ idf_component_register(
         "jesfs_ll_esp_partition.c"
         "jesfs_platform_hooks.c"
         "${BENCHFS}/benchfs.c"
+        "${BENCHFS}/benchfs_esp.c"
         "${CHURN_MODEL}/churn_model.c"
         "${JESFS_ROOT}/jesfs_hl.c"
         "${JESFS_ROOT}/jesfs_ml.c"

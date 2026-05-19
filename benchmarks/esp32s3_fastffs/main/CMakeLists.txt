@@ -6,6 +6,7 @@ idf_component_register(
     SRCS
         "main.c"
         "${BENCHFS}/benchfs.c"
+        "${BENCHFS}/benchfs_esp.c"
         "${CHURN_MODEL}/churn_model.c"
         "${FASTFFS_ROOT}/src/fastffs.c"
         "${FASTFFS_ROOT}/src/fffs_alloc.c"

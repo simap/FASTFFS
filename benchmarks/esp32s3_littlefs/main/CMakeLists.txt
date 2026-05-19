@@ -7,6 +7,7 @@ idf_component_register(
         "backend_littlefs.c"
         "${VFS_BENCH_COMMON}/vfs_bench.c"
         "${BENCHFS}/benchfs.c"
+        "${BENCHFS}/benchfs_esp.c"
         "${CHURN_MODEL}/churn_model.c"
     INCLUDE_DIRS
         "."

@@ -10,3 +10,5 @@ benchmarks/results/*.log
 benchmarks/results/**/*.log
 
 crash_sweep_logs
+
+.DS_Store

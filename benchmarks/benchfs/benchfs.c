@@ -74,7 +74,26 @@ typedef struct {
     uint32_t churn_latency_sorted[BENCHFS_MAX_DELETE_LATENCY_SAMPLES];
     benchfs_gc_stats_t gc_total;
     overhead_stats_t churn_overhead;
+    uint32_t stack_used_bytes;
+    bool stack_valid;
+    uint32_t noop_stack_used_bytes;
+    bool noop_stack_valid;
 } benchfs_t;
+
+typedef struct {
+    char name[32];
+    uint32_t size;
+    bool exists;
+} noop_entry_t;
+
+typedef struct {
+    noop_entry_t entries[512];
+    char open_name[32];
+    uint32_t open_size;
+    uint32_t read_pos;
+    bool open;
+    bool writing;
+} noop_ctx_t;
 
 void benchfs_default_config(benchfs_config_t *cfg, const char *name)
 {
@@ -119,6 +138,38 @@ static const char *err_name(benchfs_t *b, int rc)
         return b->ops->error_name(b->ctx, rc);
     }
     return rc == BENCHFS_OK ? "OK" : "ERR";
+}
+
+static void log_memory(benchfs_t *b)
+{
+    benchfs_memory_info_t info = {0};
+    bool info_valid = false;
+    if (b->ops->memory_info) {
+        info_valid = b->ops->memory_info(b->ctx, &info) == BENCHFS_OK;
+    }
+
+    uint32_t stack_used = b->stack_used_bytes;
+    bool stack_valid = b->stack_valid;
+
+    uint32_t fs_stack = 0;
+    bool fs_stack_valid = false;
+    if (stack_valid && b->noop_stack_valid) {
+        fs_stack = stack_used > b->noop_stack_used_bytes ?
+            stack_used - b->noop_stack_used_bytes : 0;
+        fs_stack_valid = true;
+    }
+
+    if (info_valid || stack_valid || b->noop_stack_valid) {
+        blog(b, BENCHFS_LOG_INFO,
+             "memory base_valid=%d base_bytes=%lu open_file_valid=%d open_file_bytes=%lu stack_valid=%d stack_used_bytes=%lu noop_stack_valid=%d noop_stack_used_bytes=%lu fs_stack_valid=%d fs_stack_bytes=%lu",
+             info_valid && info.base_valid,
+             (unsigned long)(info_valid ? info.base_bytes : 0),
+             info_valid && info.open_file_valid,
+             (unsigned long)(info_valid ? info.open_file_bytes : 0),
+             stack_valid, (unsigned long)stack_used, b->noop_stack_valid,
+             (unsigned long)b->noop_stack_used_bytes, fs_stack_valid,
+             (unsigned long)fs_stack);
+    }
 }
 
 static uint64_t bytes_per_s(uint32_t bytes, int64_t elapsed_us)
@@ -708,7 +759,6 @@ static void run_churn_workload(benchfs_t *b)
     memset(b->churn_delete_class_max_us, 0,
            sizeof(b->churn_delete_class_max_us));
     memset(&b->churn_delete_latency, 0, sizeof(b->churn_delete_latency));
-    memset(&b->churn_overhead, 0, sizeof(b->churn_overhead));
     bench_churn_model_init(&b->churn_model, b->cfg->churn_seed,
                            b->cfg->churn_target_live_bytes,
                            b->cfg->churn_target_written_bytes,
@@ -723,6 +773,7 @@ static void run_churn_workload(benchfs_t *b)
          (unsigned long)b->cfg->churn_target_written_bytes,
          b->cfg->erase_before_churn_format);
 
+    memset(&b->churn_overhead, 0, sizeof(b->churn_overhead));
     int64_t churn_wall_start_us = now_us(b);
     while (1) {
         bench_churn_event_t event;
@@ -820,10 +871,15 @@ static void run_churn_workload(benchfs_t *b)
     int64_t churn_wall_us = now_us(b) - churn_wall_start_us;
     int64_t churn_write_us = class_stats_time_total(write_stats);
     int64_t churn_delete_us = b->churn_delete_latency.total_us;
+    int64_t measured_overhead_us =
+        b->churn_overhead.model_next_us + b->churn_overhead.model_apply_us +
+        b->churn_overhead.stats_us + b->churn_overhead.log_us;
     int64_t churn_accounted_us =
-        churn_write_us + churn_delete_us + b->gc_total.time_us;
+        churn_write_us + churn_delete_us + b->gc_total.time_us +
+        measured_overhead_us;
     int64_t churn_benchmark_overhead_us =
-        churn_wall_us - churn_accounted_us;
+        measured_overhead_us;
+    int64_t churn_unaccounted_us = churn_wall_us - churn_accounted_us;
     blog(b, BENCHFS_LOG_INFO,
          "churn summary ops=%lu written=%lu live=%lu creates=%lu replaces=%lu deletes=%lu",
          (unsigned long)op, (unsigned long)b->churn_model.total_written,
@@ -835,10 +891,7 @@ static void run_churn_workload(benchfs_t *b)
          (long long)churn_write_us, (long long)churn_delete_us,
          (long long)b->gc_total.time_us,
          (long long)churn_benchmark_overhead_us,
-         (long long)churn_benchmark_overhead_us);
-    int64_t measured_overhead_us =
-        b->churn_overhead.model_next_us + b->churn_overhead.model_apply_us +
-        b->churn_overhead.stats_us + b->churn_overhead.log_us;
+         (long long)churn_unaccounted_us);
     blog(b, BENCHFS_LOG_INFO,
          "churn overhead detail measured_us=%lld model_next_us=%lld model_apply_us=%lld stats_us=%lld log_us=%lld residual_us=%lld",
          (long long)measured_overhead_us,
@@ -846,7 +899,7 @@ static void run_churn_workload(benchfs_t *b)
          (long long)b->churn_overhead.model_apply_us,
          (long long)b->churn_overhead.stats_us,
          (long long)b->churn_overhead.log_us,
-         (long long)(churn_benchmark_overhead_us - measured_overhead_us));
+         (long long)churn_unaccounted_us);
     blog(b, BENCHFS_LOG_INFO, "churn live files avg=%lu samples=%lu",
          (unsigned long)(b->churn_model.live_file_samples ?
              b->churn_model.live_file_sum /
@@ -982,6 +1035,276 @@ static void run_baseline(benchfs_t *b)
     run_churn_workload(b);
 }
 
+static noop_entry_t *noop_find(noop_ctx_t *n, const char *name)
+{
+    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+        if (n->entries[i].exists && strcmp(n->entries[i].name, name) == 0) {
+            return &n->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static noop_entry_t *noop_find_or_alloc(noop_ctx_t *n, const char *name)
+{
+    noop_entry_t *entry = noop_find(n, name);
+    if (entry) {
+        return entry;
+    }
+    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+        if (!n->entries[i].exists) {
+            n->entries[i].exists = true;
+            snprintf(n->entries[i].name, sizeof(n->entries[i].name), "%s",
+                     name);
+            n->entries[i].size = 0;
+            return &n->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static int noop_setup(void *ctx)
+{
+    (void)ctx;
+    return BENCHFS_OK;
+}
+
+static int noop_format(void *ctx)
+{
+    noop_ctx_t *n = ctx;
+    memset(n->entries, 0, sizeof(n->entries));
+    n->open = false;
+    return BENCHFS_OK;
+}
+
+static int noop_mount(void *ctx)
+{
+    (void)ctx;
+    return BENCHFS_OK;
+}
+
+static int noop_unmount(void *ctx)
+{
+    noop_ctx_t *n = ctx;
+    n->open = false;
+    return BENCHFS_OK;
+}
+
+static int noop_open(void *ctx, const char *name, uint32_t flags, void **file)
+{
+    noop_ctx_t *n = ctx;
+    if (n->open) {
+        return -1;
+    }
+    noop_entry_t *entry = noop_find(n, name);
+    if (flags & BENCHFS_OPEN_WRITE_TRUNC) {
+        entry = noop_find_or_alloc(n, name);
+        if (!entry) {
+            return BENCHFS_ERR_NO_SPACE;
+        }
+        entry->size = 0;
+        n->writing = true;
+        n->open_size = 0;
+    } else if (flags & BENCHFS_OPEN_READ) {
+        if (!entry) {
+            return -1;
+        }
+        n->writing = false;
+        n->open_size = entry->size;
+    } else {
+        return -1;
+    }
+    snprintf(n->open_name, sizeof(n->open_name), "%s", name);
+    n->read_pos = 0;
+    n->open = true;
+    *file = n;
+    return BENCHFS_OK;
+}
+
+static int noop_write(void *ctx, void *file, const void *buf, size_t len)
+{
+    (void)file;
+    (void)buf;
+    noop_ctx_t *n = ctx;
+    if (!n->open || !n->writing) {
+        return -1;
+    }
+    noop_entry_t *entry = noop_find_or_alloc(n, n->open_name);
+    if (!entry) {
+        return BENCHFS_ERR_NO_SPACE;
+    }
+    entry->size += (uint32_t)len;
+    n->open_size = entry->size;
+    return BENCHFS_OK;
+}
+
+static int noop_read(void *ctx, void *file, void *buf, size_t len,
+                     size_t *read_len)
+{
+    (void)file;
+    (void)buf;
+    noop_ctx_t *n = ctx;
+    if (!n->open || n->writing) {
+        return -1;
+    }
+    uint32_t remaining = n->open_size > n->read_pos ?
+        n->open_size - n->read_pos : 0;
+    size_t got = len < remaining ? len : remaining;
+    n->read_pos += (uint32_t)got;
+    *read_len = got;
+    return BENCHFS_OK;
+}
+
+static int noop_fstat(void *ctx, void *file, uint32_t *size)
+{
+    (void)file;
+    noop_ctx_t *n = ctx;
+    if (!n->open) {
+        return -1;
+    }
+    *size = n->open_size;
+    return BENCHFS_OK;
+}
+
+static int noop_close(void *ctx, void *file)
+{
+    (void)file;
+    noop_ctx_t *n = ctx;
+    n->open = false;
+    return BENCHFS_OK;
+}
+
+static int noop_delete_file(void *ctx, const char *name)
+{
+    noop_entry_t *entry = noop_find((noop_ctx_t *)ctx, name);
+    if (entry) {
+        entry->exists = false;
+    }
+    return BENCHFS_OK;
+}
+
+static int noop_exists(void *ctx, const char *name, bool *exists)
+{
+    *exists = noop_find((noop_ctx_t *)ctx, name) != NULL;
+    return BENCHFS_OK;
+}
+
+static int noop_list_count(void *ctx, size_t *count)
+{
+    noop_ctx_t *n = ctx;
+    size_t nfiles = 0;
+    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+        if (n->entries[i].exists) {
+            nfiles++;
+        }
+    }
+    *count = nfiles;
+    return BENCHFS_OK;
+}
+
+static int noop_fsinfo(void *ctx, benchfs_info_t *info)
+{
+    noop_ctx_t *n = ctx;
+    uint32_t used = 0;
+    uint32_t files = 0;
+    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+        if (n->entries[i].exists) {
+            files++;
+            used += n->entries[i].size;
+        }
+    }
+    info->total_valid = true;
+    info->used_valid = true;
+    info->file_count_valid = true;
+    info->total_bytes = 4 * 1024 * 1024;
+    info->used_bytes = used;
+    info->file_count = files;
+    return BENCHFS_OK;
+}
+
+static void noop_vlog(void *ctx, benchfs_log_level_t level, const char *fmt,
+                      va_list ap)
+{
+    (void)ctx;
+    (void)level;
+    (void)fmt;
+    (void)ap;
+}
+
+static const char *noop_error_name(void *ctx, int rc)
+{
+    (void)ctx;
+    return rc == BENCHFS_OK ? "OK" : "ERR";
+}
+
+static int benchfs_run_with_state(benchfs_t *b, const benchfs_config_t *cfg,
+                                  const benchfs_ops_t *ops, void *ctx,
+                                  bool collect_memory)
+{
+    memset(b, 0, sizeof(*b));
+    b->cfg = cfg;
+    b->ops = ops;
+    b->ctx = ctx;
+
+    blog(b, BENCHFS_LOG_INFO, "%s benchmark starting",
+         cfg->name ? cfg->name : "filesystem");
+    if (ops->log_config) {
+        ops->log_config(ctx);
+    }
+    run_baseline(b);
+
+    if (collect_memory) {
+        if (ops->stack_used_bytes) {
+            b->stack_used_bytes = ops->stack_used_bytes(ctx);
+            b->stack_valid = true;
+        }
+        if (ops->run_noop_stack_baseline) {
+            uint32_t used = 0;
+            if (ops->run_noop_stack_baseline(ctx, cfg, &used) == BENCHFS_OK) {
+                b->noop_stack_used_bytes = used;
+                b->noop_stack_valid = true;
+            }
+        }
+        log_memory(b);
+    }
+
+    blog(b, BENCHFS_LOG_INFO, "%s benchmark done",
+         cfg->name ? cfg->name : "filesystem");
+    return BENCHFS_OK;
+}
+
+int benchfs_run_noop(const benchfs_config_t *cfg,
+                     int64_t (*now_us_fn)(void *ctx), void *timer_ctx)
+{
+    (void)timer_ctx;
+    if (!cfg || !now_us_fn) {
+        return -1;
+    }
+    static noop_ctx_t noop_ctx;
+    memset(&noop_ctx, 0, sizeof(noop_ctx));
+    const benchfs_ops_t ops = {
+        .now_us = now_us_fn,
+        .vlog = noop_vlog,
+        .error_name = noop_error_name,
+        .setup = noop_setup,
+        .erase_storage = noop_format,
+        .format = noop_format,
+        .mount = noop_mount,
+        .unmount = noop_unmount,
+        .open = noop_open,
+        .write = noop_write,
+        .read = noop_read,
+        .fstat = noop_fstat,
+        .close = noop_close,
+        .delete_file = noop_delete_file,
+        .exists = noop_exists,
+        .list_count = noop_list_count,
+        .fsinfo = noop_fsinfo,
+    };
+    static benchfs_t noop_b;
+    return benchfs_run_with_state(&noop_b, cfg, &ops, &noop_ctx, false);
+}
+
 int benchfs_run(const benchfs_config_t *cfg, const benchfs_ops_t *ops,
                 void *ctx)
 {
@@ -992,17 +1315,5 @@ int benchfs_run(const benchfs_config_t *cfg, const benchfs_ops_t *ops,
         return -1;
     }
     static benchfs_t b;
-    memset(&b, 0, sizeof(b));
-    b.cfg = cfg;
-    b.ops = ops;
-    b.ctx = ctx;
-    blog(&b, BENCHFS_LOG_INFO, "%s benchmark starting",
-         cfg->name ? cfg->name : "filesystem");
-    if (ops->log_config) {
-        ops->log_config(ctx);
-    }
-    run_baseline(&b);
-    blog(&b, BENCHFS_LOG_INFO, "%s benchmark done",
-         cfg->name ? cfg->name : "filesystem");
-    return BENCHFS_OK;
+    return benchfs_run_with_state(&b, cfg, ops, ctx, true);
 }

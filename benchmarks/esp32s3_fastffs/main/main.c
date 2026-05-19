@@ -8,8 +8,11 @@
 #include "esp_log_write.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "benchfs.h"
+#include "benchfs_esp.h"
 #include "fastffs/fastffs.h"
 
 #define FASTFFS_PARTITION_LABEL "storage"
@@ -46,6 +49,27 @@
 #endif
 
 static const char *TAG = "fastffs_benchfs";
+
+typedef enum {
+    RAW_STACK_BASELINE = 0,
+    RAW_STACK_READ_4,
+    RAW_STACK_READ_256,
+    RAW_STACK_READ_4096,
+    RAW_STACK_WRITE_256,
+    RAW_STACK_ERASE_4096,
+    RAW_STACK_ERASE_65536,
+} raw_stack_op_t;
+
+typedef struct {
+    const esp_partition_t *part;
+    TaskHandle_t waiter;
+    raw_stack_op_t op;
+    uint32_t used_bytes;
+    esp_err_t err;
+} raw_stack_task_t;
+
+static uint8_t s_raw_read_buf[4096];
+static uint8_t s_raw_write_buf[4096];
 
 typedef struct {
     const esp_partition_t *part;
@@ -326,7 +350,8 @@ static int adapter_fsinfo(void *ctx, benchfs_info_t *info)
     info->metadata_valid =
         (fi.valid_flags & FFFS_FSINFO_METADATA_ESTIMATE_VALID) != 0;
     info->total_bytes = fi.total_bytes;
-    info->used_bytes = fi.committed_data_bytes;
+    info->used_bytes = fi.committed_data_bytes +
+        (info->metadata_valid ? fi.estimated_metadata_bytes : 0u);
     info->file_count = fi.committed_file_count;
     info->metadata_bytes = fi.estimated_metadata_bytes;
     return FFFS_OK;
@@ -445,6 +470,144 @@ static void adapter_log_backend_info(void *ctx, const char *label)
              (unsigned long)FASTFFS_SECTOR_DATA_BYTES);
 }
 
+static int adapter_memory_info(void *ctx, benchfs_memory_info_t *info)
+{
+    (void)ctx;
+    memset(info, 0, sizeof(*info));
+    info->base_valid = true;
+    info->base_bytes = sizeof(struct fffs) +
+        FFFS_INDEX_CACHE_BYTES(FASTFFS_INDEX_HEADS) + FASTFFS_SCRATCH_SIZE;
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    info->base_bytes += sizeof(uint32_t) * FASTFFS_ALLOC_MAP_WORDS;
+#endif
+    info->open_file_valid = true;
+    info->open_file_bytes = sizeof(struct fffs_file);
+    return BENCHFS_OK;
+}
+
+static const char *raw_stack_op_name(raw_stack_op_t op)
+{
+    switch (op) {
+    case RAW_STACK_BASELINE:
+        return "baseline";
+    case RAW_STACK_READ_4:
+        return "read_4";
+    case RAW_STACK_READ_256:
+        return "read_256";
+    case RAW_STACK_READ_4096:
+        return "read_4096";
+    case RAW_STACK_WRITE_256:
+        return "write_256";
+    case RAW_STACK_ERASE_4096:
+        return "erase_4096";
+    case RAW_STACK_ERASE_65536:
+        return "erase_65536";
+    default:
+        return "unknown";
+    }
+}
+
+static void raw_stack_task(void *arg)
+{
+    raw_stack_task_t *task = arg;
+    const esp_partition_t *part = task->part;
+    task->err = ESP_OK;
+
+    switch (task->op) {
+    case RAW_STACK_BASELINE:
+        break;
+    case RAW_STACK_READ_4:
+        task->err = esp_partition_read(part, 0, s_raw_read_buf, 4);
+        break;
+    case RAW_STACK_READ_256:
+        task->err = esp_partition_read(part, 0, s_raw_read_buf, 256);
+        break;
+    case RAW_STACK_READ_4096:
+        task->err = esp_partition_read(part, 0, s_raw_read_buf,
+                                       sizeof(s_raw_read_buf));
+        break;
+    case RAW_STACK_WRITE_256:
+        memset(s_raw_write_buf, 0xa5, 256);
+        task->err = esp_partition_write(part, 0, s_raw_write_buf, 256);
+        break;
+    case RAW_STACK_ERASE_4096:
+        task->err = esp_partition_erase_range(part, 0, 4096);
+        break;
+    case RAW_STACK_ERASE_65536:
+        task->err = esp_partition_erase_range(part, 0, 65536);
+        break;
+    default:
+        task->err = ESP_ERR_INVALID_ARG;
+        break;
+    }
+
+    task->used_bytes = benchfs_esp_current_stack_used_bytes(NULL);
+    xTaskNotifyGive(task->waiter);
+    vTaskDelete(NULL);
+}
+
+static bool run_raw_stack_op(const esp_partition_t *part, raw_stack_op_t op,
+                             uint32_t *used_bytes, esp_err_t *err)
+{
+    raw_stack_task_t task = {
+        .part = part,
+        .waiter = xTaskGetCurrentTaskHandle(),
+        .op = op,
+        .err = ESP_FAIL,
+    };
+    BaseType_t ok = xTaskCreate(raw_stack_task, "raw_stack",
+                                CONFIG_ESP_MAIN_TASK_STACK_SIZE, &task,
+                                tskIDLE_PRIORITY + 1, NULL);
+    if (ok != pdPASS) {
+        return false;
+    }
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    *used_bytes = task.used_bytes;
+    *err = task.err;
+    return true;
+}
+
+static void run_raw_partition_stack_probe(const esp_partition_t *part)
+{
+    if (part == NULL) {
+        return;
+    }
+
+    uint32_t baseline = 0;
+    esp_err_t err = ESP_OK;
+    if (!run_raw_stack_op(part, RAW_STACK_BASELINE, &baseline, &err)) {
+        ESP_LOGW(TAG, "raw partition stack probe could not start baseline task");
+        return;
+    }
+
+    ESP_LOGI(TAG, "raw partition stack baseline used_bytes=%lu",
+             (unsigned long)baseline);
+
+    const raw_stack_op_t ops[] = {
+        RAW_STACK_READ_4,
+        RAW_STACK_READ_256,
+        RAW_STACK_READ_4096,
+        RAW_STACK_ERASE_4096,
+        RAW_STACK_WRITE_256,
+        RAW_STACK_ERASE_65536,
+    };
+
+    for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i) {
+        uint32_t used = 0;
+        err = ESP_OK;
+        if (!run_raw_stack_op(part, ops[i], &used, &err)) {
+            ESP_LOGW(TAG, "raw partition stack op=%s could not start task",
+                     raw_stack_op_name(ops[i]));
+            continue;
+        }
+        uint32_t over_baseline = used > baseline ? used - baseline : 0;
+        ESP_LOGI(TAG,
+                 "raw partition stack op=%s err=%s used_bytes=%lu over_baseline=%lu",
+                 raw_stack_op_name(ops[i]), esp_err_to_name(err),
+                 (unsigned long)used, (unsigned long)over_baseline);
+    }
+}
+
 void app_main(void)
 {
     static fastffs_adapter_t adapter;
@@ -472,9 +635,14 @@ void app_main(void)
         .list_count = adapter_list_count,
         .fsinfo = adapter_fsinfo,
         .run_gc = adapter_run_gc,
+        .memory_info = adapter_memory_info,
+        .stack_used_bytes = benchfs_esp_current_stack_used_bytes,
+        .run_noop_stack_baseline = benchfs_esp_run_noop_stack_baseline,
         .log_config = adapter_log_config,
         .log_backend_info = adapter_log_backend_info,
     };
 
     (void)benchfs_run(&cfg, &ops, &adapter);
+    (void)adapter_unmount(&adapter);
+    run_raw_partition_stack_probe(adapter.part);
 }

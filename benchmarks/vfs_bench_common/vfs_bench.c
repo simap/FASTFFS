@@ -16,7 +16,9 @@
 #include <unistd.h>
 
 #include "benchfs.h"
+#include "benchfs_esp.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
@@ -257,6 +259,56 @@ static void adapter_log_backend_info(void *ctx, const char *label)
              (unsigned long)(a->part ? a->part->size : 0));
 }
 
+static bool measure_fopen_delta(const char *path, const char *mode,
+                                uint32_t *delta_out)
+{
+    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    FILE *f = fopen(path, mode);
+    uint32_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (f == NULL) {
+        return false;
+    }
+    if (before > after && before - after > *delta_out) {
+        *delta_out = before - after;
+    }
+    fclose(f);
+    return true;
+}
+
+static int adapter_memory_info(void *ctx, benchfs_memory_info_t *info)
+{
+    (void)ctx;
+    memset(info, 0, sizeof(*info));
+    (void)bench_backend_unmount();
+
+    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    int rc = bench_backend_mount(false);
+    uint32_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (rc == BENCHFS_OK) {
+        info->base_valid = true;
+        info->base_bytes = before > after ? before - after : 0;
+    }
+
+    char path[64];
+    make_path(path, sizeof(path), "__bench_mem_probe.bin");
+    uint32_t open_delta = 0;
+    bool open_valid = false;
+    open_valid |= measure_fopen_delta(path, "wb", &open_delta);
+    FILE *seed = fopen(path, "wb");
+    if (seed != NULL) {
+        static const uint8_t byte = 0xa5;
+        (void)fwrite(&byte, 1, 1, seed);
+        (void)fclose(seed);
+    }
+    open_valid |= measure_fopen_delta(path, "rb", &open_delta);
+    (void)unlink(path);
+    if (open_valid) {
+        info->open_file_valid = true;
+        info->open_file_bytes = open_delta;
+    }
+    return BENCHFS_OK;
+}
+
 void run_vfs_benchmarks(void)
 {
     static vfs_adapter_t adapter;
@@ -285,6 +337,9 @@ void run_vfs_benchmarks(void)
         .exists = adapter_exists,
         .list_count = adapter_list_count,
         .fsinfo = adapter_fsinfo,
+        .memory_info = adapter_memory_info,
+        .stack_used_bytes = benchfs_esp_current_stack_used_bytes,
+        .run_noop_stack_baseline = benchfs_esp_run_noop_stack_baseline,
         .log_config = adapter_log_config,
         .log_backend_info = adapter_log_backend_info,
     };

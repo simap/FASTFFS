@@ -279,13 +279,13 @@ class ParsedLog:
         if "churn create write class=" in msg:
             d = kvs(msg)
             cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
-            self.set(f"Churn create {cls}",
+            self.set(f"Churn write new {cls}",
                      throughput_kib_s(d.get("bytes"), d.get("time_us")))
             return
         if "churn replace write class=" in msg:
             d = kvs(msg)
             cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
-            self.set(f"Churn replace {cls}",
+            self.set(f"Churn write replace {cls}",
                      throughput_kib_s(d.get("bytes"), d.get("time_us")))
             return
         if "churn delete latency " in msg:
@@ -333,6 +333,15 @@ class ParsedLog:
         if "exists churn cold missing" in msg:
             self.set("Churn cold exists missing avg",
                      time_us(kvs(msg).get("avg_us")))
+            return
+        if msg.startswith("memory "):
+            d = kvs(msg)
+            if d.get("base_valid") == "1":
+                self.set("FS base memory", integer(d.get("base_bytes")))
+            if d.get("open_file_valid") == "1":
+                self.set("FS open file memory", integer(d.get("open_file_bytes")))
+            if d.get("fs_stack_valid") == "1":
+                self.set("FS stack memory", integer(d.get("fs_stack_bytes")))
             return
 
     def finalize(self) -> None:
@@ -399,11 +408,11 @@ ROWS = [
     "Churn benchmark overhead",
     "Churn unaccounted time",
     "Churn write 10-20 KiB",
-    "Churn create 10-20 KiB",
-    "Churn replace 10-20 KiB",
+    "Churn write new 10-20 KiB",
+    "Churn write replace 10-20 KiB",
     "Churn write 20-60 KiB",
-    "Churn create 20-60 KiB",
-    "Churn replace 20-60 KiB",
+    "Churn write new 20-60 KiB",
+    "Churn write replace 20-60 KiB",
     "Churn write 350 KiB",
     "Churn delete avg",
     "Churn delete p50",
@@ -425,6 +434,9 @@ ROWS = [
     "Churn cold read 350 KiB after open",
     "Churn cold exists existing avg",
     "Churn cold exists missing avg",
+    "FS base memory",
+    "FS open file memory",
+    "FS stack memory",
 ]
 
 
@@ -444,10 +456,15 @@ def emit_markdown(logs: list[ParsedLog]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-o", "--output", help="Write Markdown table to this file")
     parser.add_argument("logs", nargs="+", help="Log path, optionally LOG:LABEL")
     args = parser.parse_args()
     parsed_logs = [parse_log(spec) for spec in args.logs]
-    print(emit_markdown(parsed_logs))
+    markdown = emit_markdown(parsed_logs)
+    if args.output:
+        Path(args.output).write_text(markdown + "\n", encoding="utf-8")
+    else:
+        print(markdown)
     return 0
 
 
