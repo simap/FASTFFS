@@ -64,6 +64,7 @@ Variants:
   fastffs-noalloc-debt
   fastffs-crippled-inline
   fastffs-crippled-debt
+  fastffs-raw-stack
   jesfs
   littlefs
   spiffs
@@ -170,7 +171,7 @@ resolve_variant() {
             CMAKE_ARGS+=("-DFASTFFS_BENCH_ALLOC_MAP_MODE=FFFS_ALLOC_MAP_NONE")
             CMAKE_ARGS+=("-DFASTFFS_BENCH_CHURN_GC_POLICY=FASTFFS_CHURN_GC_POLICY_NONE")
             CMAKE_ARGS+=("-DFASTFFS_BENCH_SCRATCH_SIZE=128")
-            CMAKE_ARGS+=("-DFASTFFS_BENCH_FILE_WRITE_BUFFER=64")
+            CMAKE_ARGS+=("-DFASTFFS_BENCH_FILE_CACHE_SIZE=64")
             ;;
         fastffs-crippled-debt)
             PROJECT="esp32s3_fastffs"
@@ -182,7 +183,15 @@ resolve_variant() {
             CMAKE_ARGS+=("-DFASTFFS_BENCH_ALLOC_MAP_MODE=FFFS_ALLOC_MAP_NONE")
             CMAKE_ARGS+=("-DFASTFFS_BENCH_CHURN_GC_POLICY=FASTFFS_CHURN_GC_POLICY_DEBT")
             CMAKE_ARGS+=("-DFASTFFS_BENCH_SCRATCH_SIZE=128")
-            CMAKE_ARGS+=("-DFASTFFS_BENCH_FILE_WRITE_BUFFER=64")
+            CMAKE_ARGS+=("-DFASTFFS_BENCH_FILE_CACHE_SIZE=64")
+            ;;
+        fastffs-raw-stack)
+            PROJECT="esp32s3_fastffs"
+            BUILD_SUFFIX="fastffs-raw-stack"
+            LOG_NAME="fastffs_raw_stack"
+            APP_NAME="esp32s3_fastffs_bench"
+            DONE_MATCH="FASTFFS raw partition stack done"
+            CMAKE_ARGS+=("-DFASTFFS_BENCH_RAW_PARTITION_STACK_ONLY=1")
             ;;
         jesfs)
             PROJECT="esp32s3_jesfs"

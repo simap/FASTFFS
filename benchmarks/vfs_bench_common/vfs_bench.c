@@ -22,12 +22,25 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "vfs_bench";
 
 typedef struct {
     const esp_partition_t *part;
+    bool base_memory_valid;
+    uint32_t base_memory_bytes;
 } vfs_adapter_t;
+
+typedef struct {
+    TaskHandle_t waiter;
+    int rc;
+} base_memory_probe_t;
+
+static StaticTask_t s_base_memory_probe_tcb;
+static StackType_t s_base_memory_probe_stack[CONFIG_ESP_MAIN_TASK_STACK_SIZE /
+                                             sizeof(StackType_t)];
 
 static int64_t adapter_now_us(void *ctx)
 {
@@ -259,6 +272,44 @@ static void adapter_log_backend_info(void *ctx, const char *label)
              (unsigned long)(a->part ? a->part->size : 0));
 }
 
+static void base_memory_probe_task(void *arg)
+{
+    base_memory_probe_t *probe = arg;
+    probe->rc = bench_backend_mount(true);
+    xTaskNotifyGive(probe->waiter);
+    vTaskDelete(NULL);
+}
+
+static void probe_base_memory_before_benchmark(vfs_adapter_t *adapter)
+{
+    if (adapter->base_memory_valid) {
+        return;
+    }
+    (void)bench_backend_unmount();
+
+    base_memory_probe_t probe = {
+        .waiter = xTaskGetCurrentTaskHandle(),
+        .rc = -1,
+    };
+    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    TaskHandle_t task = xTaskCreateStatic(base_memory_probe_task,
+                                          "vfs_mem_probe",
+                                          sizeof(s_base_memory_probe_stack) /
+                                              sizeof(s_base_memory_probe_stack[0]),
+                                          &probe, tskIDLE_PRIORITY + 1,
+                                          s_base_memory_probe_stack,
+                                          &s_base_memory_probe_tcb);
+    if (task == NULL) {
+        return;
+    }
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    uint32_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (probe.rc == BENCHFS_OK) {
+        adapter->base_memory_valid = true;
+        adapter->base_memory_bytes = before > after ? before - after : 0;
+    }
+}
+
 static bool measure_fopen_delta(const char *path, const char *mode,
                                 uint32_t *delta_out)
 {
@@ -277,16 +328,21 @@ static bool measure_fopen_delta(const char *path, const char *mode,
 
 static int adapter_memory_info(void *ctx, benchfs_memory_info_t *info)
 {
-    (void)ctx;
+    vfs_adapter_t *a = ctx;
     memset(info, 0, sizeof(*info));
-    (void)bench_backend_unmount();
 
-    uint32_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    int rc = bench_backend_mount(false);
-    uint32_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    if (rc == BENCHFS_OK) {
+    if (a->base_memory_valid) {
         info->base_valid = true;
-        info->base_bytes = before > after ? before - after : 0;
+        info->base_bytes = a->base_memory_bytes;
+    } else {
+        (void)bench_backend_unmount();
+        uint32_t before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        int rc = bench_backend_mount(false);
+        uint32_t after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        if (rc == BENCHFS_OK) {
+            info->base_valid = true;
+            info->base_bytes = before > after ? before - after : 0;
+        }
     }
 
     char path[64];
@@ -312,6 +368,10 @@ static int adapter_memory_info(void *ctx, benchfs_memory_info_t *info)
 void run_vfs_benchmarks(void)
 {
     static vfs_adapter_t adapter;
+    if (adapter_setup(&adapter) == BENCHFS_OK) {
+        probe_base_memory_before_benchmark(&adapter);
+    }
+
     benchfs_config_t cfg;
     char name[64];
     snprintf(name, sizeof(name), "%s ESP32-S3", bench_backend_name());

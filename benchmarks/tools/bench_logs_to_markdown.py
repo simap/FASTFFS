@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a benchmark comparison Markdown table from ESP-IDF log files.
+"""Generate a benchmark comparison table from ESP-IDF log files.
 
 Usage:
     bench_logs_to_markdown.py LOG[:LABEL] [LOG[:LABEL] ...]
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import html
+import math
 import re
 from pathlib import Path
 
@@ -91,6 +93,121 @@ def integer(value: str | int | None) -> str:
     return f"{int(value):,}"
 
 
+HTML_GREEN = "#d9ead3"
+HTML_YELLOW = "#fff2cc"
+HTML_RED = "#f4cccc"
+
+HTML_UNRANKED_ROWS = {
+    "Run timestamp",
+    "Index cache mode",
+    "Index entries",
+    "Allocation map mode",
+    "Allocation map words",
+    "Scratch bytes",
+    "File write buffer",
+    "Churn GC policy",
+    "Reported usable capacity",
+    "Churn ops",
+    "Churn bytes written",
+    "Churn final live bytes",
+    "Churn creates",
+    "Churn replaces",
+    "Churn deletes",
+    "Churn average live files",
+    "Churn accounted time",
+    "Churn delete time",
+    "Churn GC step time",
+    "Churn benchmark overhead",
+    "Churn unaccounted time",
+    "Churn GC steps",
+    "Churn GC erased sectors",
+    "FS base memory",
+    "FS open file memory",
+    "FS stack memory",
+    "Read 192 x 64 B after open",
+}
+
+HTML_LOWER_IS_BETTER_ROWS = {
+    "Baseline format",
+    "Baseline mount after format",
+    "Storage 192 x 64 B overhead/file",
+    "Read 192 x 64 B open/file",
+    "Storage 208 mixed files overhead/file",
+    "Read 16 x 50 KiB open/file",
+    "List 208 files",
+    "Baseline exists tiny existing avg",
+    "Baseline exists tiny missing avg",
+    "Baseline exists medium existing avg",
+    "Baseline exists medium missing avg",
+    "Churn total wall time",
+    "Churn delete avg",
+    "Churn delete p50",
+    "Churn delete p95",
+    "Churn delete max",
+    "Churn final list, 123 files",
+    "Churn cold mount",
+    "Churn final cold list, 123 files",
+    "Churn cold read 10-20 KiB open/file",
+    "Churn cold read 20-60 KiB open/file",
+    "Churn cold read 350 KiB open/file",
+    "Churn cold exists existing avg",
+    "Churn cold exists missing avg",
+}
+
+
+def parse_display_number(value: str) -> float | None:
+    text = value.replace(",", "").strip()
+    match = re.fullmatch(r"(-?\d+(?:\.\d+)?)(?:\s+([A-Za-z/]+))?", text)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2)
+    if unit == "us":
+        return number / 1_000_000
+    if unit == "ms":
+        return number / 1_000
+    return number
+
+
+def row_direction(row: str, values: list[str]) -> str | None:
+    if row in HTML_UNRANKED_ROWS:
+        return None
+    if row in HTML_LOWER_IS_BETTER_ROWS:
+        return "lower"
+    if any("KiB/s" in value for value in values):
+        return "higher"
+    return None
+
+
+def log_scale_colors(row: str, values: list[str]) -> list[str | None]:
+    direction = row_direction(row, values)
+    if direction is None:
+        return [None] * len(values)
+    parsed = [parse_display_number(value) for value in values]
+    positive = [value for value in parsed if value is not None and value > 0]
+    if len(positive) < 2:
+        return [None] * len(values)
+    best = max(positive) if direction == "higher" else min(positive)
+    worst = min(positive) if direction == "higher" else max(positive)
+    if best == worst:
+        return [HTML_GREEN if value is not None else None for value in parsed]
+
+    denominator = math.log(best / worst) if direction == "higher" else math.log(worst / best)
+    colors: list[str | None] = []
+    for value in parsed:
+        if value is None or value <= 0:
+            colors.append(None)
+            continue
+        score = math.log(best / value) / denominator if direction == "higher" else math.log(value / best) / denominator
+        if score <= 0.20:
+            colors.append(HTML_GREEN)
+        elif score <= 0.65:
+            colors.append(HTML_YELLOW)
+        else:
+            colors.append(HTML_RED)
+    return colors
+
+
 class ParsedLog:
     def __init__(self, path: Path, label: str) -> None:
         timestamp_match = RUN_TS_RE.search(path.name)
@@ -101,9 +218,7 @@ class ParsedLog:
             ).strftime("%Y-%m-%d %H:%M:%S")
         self.path = path
         self.label = label
-        self.data: dict[str, str] = {
-            "Log": path.name,
-        }
+        self.data: dict[str, str] = {}
         if timestamp:
             self.data["Run timestamp"] = timestamp
         self._churn_target_ms: int | None = None
@@ -363,7 +478,6 @@ def parse_log(spec: str) -> ParsedLog:
 
 
 ROWS = [
-    "Log",
     "Run timestamp",
     "Index cache mode",
     "Index entries",
@@ -448,23 +562,55 @@ def emit_markdown(logs: list[ParsedLog]) -> str:
     ]
     for row in ROWS:
         values = [log.data.get(row, "") for log in logs]
-        if row != "Log" and not any(values):
+        if not any(values):
             continue
         lines.append("| " + " | ".join([row] + values) + " |")
     return "\n".join(lines)
 
 
+def emit_html_color(logs: list[ParsedLog]) -> str:
+    header = ["Stat"] + [log.label for log in logs]
+    lines = ["<table>", "  <thead>", "    <tr>"]
+    for index, cell in enumerate(header):
+        align = "left" if index == 0 else "right"
+        lines.append(f'      <th align="{align}">{html.escape(cell)}</th>')
+    lines.extend(["    </tr>", "  </thead>", "  <tbody>"])
+
+    for row in ROWS:
+        values = [log.data.get(row, "") for log in logs]
+        if not any(values):
+            continue
+        colors = log_scale_colors(row, values)
+        lines.append("    <tr>")
+        lines.append(f'      <td align="left">{html.escape(row)}</td>')
+        for value, color in zip(values, colors):
+            attrs = ['align="right"']
+            if color:
+                attrs.append(f'bgcolor="{color}"')
+                attrs.append(f'style="background-color: {color};"')
+            lines.append(f'      <td {" ".join(attrs)}>{html.escape(value)}</td>')
+        lines.append("    </tr>")
+
+    lines.extend(["  </tbody>", "</table>"])
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-o", "--output", help="Write Markdown table to this file")
+    parser.add_argument("-o", "--output", help="Write generated table to this file")
+    parser.add_argument(
+        "--html-color",
+        action="store_true",
+        help="Emit an HTML table with log-scale green/yellow/red cell colors",
+    )
     parser.add_argument("logs", nargs="+", help="Log path, optionally LOG:LABEL")
     args = parser.parse_args()
     parsed_logs = [parse_log(spec) for spec in args.logs]
-    markdown = emit_markdown(parsed_logs)
+    output = emit_html_color(parsed_logs) if args.html_color else emit_markdown(parsed_logs)
     if args.output:
-        Path(args.output).write_text(markdown + "\n", encoding="utf-8")
+        Path(args.output).write_text(output + "\n", encoding="utf-8")
     else:
-        print(markdown)
+        print(output)
     return 0
 
 

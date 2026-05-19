@@ -35,6 +35,7 @@
 #define FASTFFS_CHURN_GC_POLICY_NONE 2
 #define FASTFFS_CHURN_GC_POLICY_DEBT 3
 #define FASTFFS_BENCHFS_MAX_OPEN_FILES 2
+#define RAW_PARTITION_STACK_RUNS 5
 #ifndef FASTFFS_CHURN_GC_POLICY
 #define FASTFFS_CHURN_GC_POLICY FASTFFS_CHURN_GC_POLICY_NONE
 #endif
@@ -55,9 +56,13 @@ typedef enum {
     RAW_STACK_READ_4,
     RAW_STACK_READ_256,
     RAW_STACK_READ_4096,
+    RAW_STACK_PROGRAM_256,
+    RAW_STACK_REPROGRAM_256,
     RAW_STACK_WRITE_256,
     RAW_STACK_ERASE_4096,
     RAW_STACK_ERASE_65536,
+    RAW_STACK_ERASE_PROGRAM_4096_256,
+    RAW_STACK_ERASE_PROGRAM_4096_1024,
 } raw_stack_op_t;
 
 typedef struct {
@@ -496,12 +501,20 @@ static const char *raw_stack_op_name(raw_stack_op_t op)
         return "read_256";
     case RAW_STACK_READ_4096:
         return "read_4096";
+    case RAW_STACK_PROGRAM_256:
+        return "program_256";
+    case RAW_STACK_REPROGRAM_256:
+        return "reprogram_256";
     case RAW_STACK_WRITE_256:
         return "write_256";
     case RAW_STACK_ERASE_4096:
         return "erase_4096";
     case RAW_STACK_ERASE_65536:
         return "erase_65536";
+    case RAW_STACK_ERASE_PROGRAM_4096_256:
+        return "erase_program_4096_256";
+    case RAW_STACK_ERASE_PROGRAM_4096_1024:
+        return "erase_program_4096_1024";
     default:
         return "unknown";
     }
@@ -526,8 +539,11 @@ static void raw_stack_task(void *arg)
         task->err = esp_partition_read(part, 0, s_raw_read_buf,
                                        sizeof(s_raw_read_buf));
         break;
+    case RAW_STACK_PROGRAM_256:
     case RAW_STACK_WRITE_256:
-        memset(s_raw_write_buf, 0xa5, 256);
+        task->err = esp_partition_write(part, 0, s_raw_write_buf, 256);
+        break;
+    case RAW_STACK_REPROGRAM_256:
         task->err = esp_partition_write(part, 0, s_raw_write_buf, 256);
         break;
     case RAW_STACK_ERASE_4096:
@@ -535,6 +551,18 @@ static void raw_stack_task(void *arg)
         break;
     case RAW_STACK_ERASE_65536:
         task->err = esp_partition_erase_range(part, 0, 65536);
+        break;
+    case RAW_STACK_ERASE_PROGRAM_4096_256:
+        task->err = esp_partition_erase_range(part, 0, 4096);
+        for (size_t off = 0; task->err == ESP_OK && off < 4096; off += 256) {
+            task->err = esp_partition_write(part, off, s_raw_write_buf, 256);
+        }
+        break;
+    case RAW_STACK_ERASE_PROGRAM_4096_1024:
+        task->err = esp_partition_erase_range(part, 0, 4096);
+        for (size_t off = 0; task->err == ESP_OK && off < 4096; off += 1024) {
+            task->err = esp_partition_write(part, off, s_raw_write_buf, 1024);
+        }
         break;
     default:
         task->err = ESP_ERR_INVALID_ARG;
@@ -580,31 +608,39 @@ static void run_raw_partition_stack_probe(const esp_partition_t *part)
         return;
     }
 
-    ESP_LOGI(TAG, "raw partition stack baseline used_bytes=%lu",
-             (unsigned long)baseline);
+    memset(s_raw_write_buf, 0xa5, sizeof(s_raw_write_buf));
 
     const raw_stack_op_t ops[] = {
         RAW_STACK_READ_4,
         RAW_STACK_READ_256,
         RAW_STACK_READ_4096,
         RAW_STACK_ERASE_4096,
-        RAW_STACK_WRITE_256,
+        RAW_STACK_PROGRAM_256,
+        RAW_STACK_REPROGRAM_256,
         RAW_STACK_ERASE_65536,
+        RAW_STACK_ERASE_PROGRAM_4096_256,
+        RAW_STACK_ERASE_PROGRAM_4096_1024,
     };
 
-    for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i) {
-        uint32_t used = 0;
-        err = ESP_OK;
-        if (!run_raw_stack_op(part, ops[i], &used, &err)) {
-            ESP_LOGW(TAG, "raw partition stack op=%s could not start task",
-                     raw_stack_op_name(ops[i]));
-            continue;
+    ESP_LOGI(TAG, "raw partition stack baseline used_bytes=%lu runs=%u",
+             (unsigned long)baseline, RAW_PARTITION_STACK_RUNS);
+
+    for (uint32_t run = 0; run < RAW_PARTITION_STACK_RUNS; ++run) {
+        for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); ++i) {
+            uint32_t used = 0;
+            err = ESP_OK;
+            if (!run_raw_stack_op(part, ops[i], &used, &err)) {
+                ESP_LOGW(TAG, "raw partition stack run=%lu op=%s could not start task",
+                         (unsigned long)run, raw_stack_op_name(ops[i]));
+                continue;
+            }
+            uint32_t over_baseline = used > baseline ? used - baseline : 0;
+            ESP_LOGI(TAG,
+                     "raw partition stack run=%lu op=%s err=%s used_bytes=%lu over_baseline=%lu",
+                     (unsigned long)run, raw_stack_op_name(ops[i]),
+                     esp_err_to_name(err), (unsigned long)used,
+                     (unsigned long)over_baseline);
         }
-        uint32_t over_baseline = used > baseline ? used - baseline : 0;
-        ESP_LOGI(TAG,
-                 "raw partition stack op=%s err=%s used_bytes=%lu over_baseline=%lu",
-                 raw_stack_op_name(ops[i]), esp_err_to_name(err),
-                 (unsigned long)used, (unsigned long)over_baseline);
     }
 }
 
@@ -615,6 +651,14 @@ void app_main(void)
     benchfs_default_config(&cfg, "FASTFFS ESP32-S3");
     cfg.erase_before_baseline_format = true;
     cfg.erase_before_churn_format = true;
+
+#if FASTFFS_RAW_PARTITION_STACK_ONLY
+    if (adapter_setup(&adapter) == BENCHFS_OK) {
+        run_raw_partition_stack_probe(adapter.part);
+    }
+    ESP_LOGI(TAG, "FASTFFS raw partition stack done");
+    return;
+#endif
 
     const benchfs_ops_t ops = {
         .now_us = adapter_now_us,
