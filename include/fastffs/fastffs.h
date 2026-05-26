@@ -144,6 +144,7 @@ struct fffs_mount_options {
     size_t index_hash_table_size;
     void *scratch;
     size_t scratch_size;
+    bool strict;
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     uint32_t *alloc_map;
     size_t alloc_map_words;
@@ -203,6 +204,7 @@ struct fffs {
     size_t alloc_cursor;
     size_t gc_cursor;
     struct fffs_md_walk gc_md;
+    bool strict;
     uint32_t next_sector_serial;
     uint32_t fsinfo_valid_flags;
     uint32_t committed_file_count;

@@ -206,8 +206,9 @@ static int new_backend_with_sector_size(struct ffsv_flash **flash,
     return fffs_host_backend_from_verify_flash(backend, *flash);
 }
 
-static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
-        test_index_cache_t *index_cache) {
+static int mount_fs_with_policy(struct fffs *fs,
+        const struct fffs_backend *backend, test_index_cache_t *index_cache,
+        bool strict) {
     static uint8_t scratch[TEST_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
     static uint32_t alloc_map[TEST_ALLOC_MAP_WORDS];
@@ -223,11 +224,17 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
 #endif
         .scratch = scratch,
         .scratch_size = sizeof(scratch),
+        .strict = strict,
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
         .alloc_map = alloc_map,
         .alloc_map_words = TEST_ALLOC_MAP_WORDS,
 #endif
     });
+}
+
+static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
+        test_index_cache_t *index_cache) {
+    return mount_fs_with_policy(fs, backend, index_cache, false);
 }
 
 static size_t test_max_file_data_size(const struct fffs *fs) {
@@ -583,6 +590,117 @@ static int test_replay_skips_reused_stale_index_heads(void) {
     ASSERT_TRUE(strcmp(entries[0].name, new_name) == 0);
 
     fffs_unmount(&remounted);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_non_strict_mount_skips_invalid_active_index_tail(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    struct fffs strict_fs;
+    struct fffs_file file;
+    struct fffs_file next_file;
+    struct fffs_stat st;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t strict_index_heads[TEST_INDEX_CACHE_WORDS];
+    const char *name = "tail";
+    const uint8_t data[] = "committed";
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, name,
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, NULL));
+    uint16_t head = file.head;
+    ASSERT_OK(fffs_close(&file));
+    size_t torn_offset = fs.next_index_offset;
+
+    uint16_t bad_slot = fffs_hash16(name) ^ 0x1111u;
+    if (bad_slot == 0 || bad_slot == UINT16_MAX) {
+        bad_slot ^= 0x2222u;
+    }
+    uint8_t torn_record[4] = {
+        (uint8_t)(bad_slot & 0xffu),
+        (uint8_t)(bad_slot >> 8),
+        (uint8_t)(head & 0xffu),
+        (uint8_t)(head >> 8),
+    };
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash, torn_offset,
+                    torn_record, sizeof(torn_record), FFSV_CALLSITE)));
+    fffs_unmount(&fs);
+
+    ASSERT_EQ_INT(FFFS_ERR_CORRUPT,
+            mount_fs_with_policy(&strict_fs, &backend, strict_index_heads,
+                true));
+    for (size_t i = 0; i < sizeof(torn_record); i++) {
+        ASSERT_TRUE(ffsv_flash_image_byte(flash, torn_offset + i) ==
+                torn_record[i]);
+    }
+
+    ASSERT_OK(mount_fs(&remounted, &backend, remount_index_heads));
+    for (size_t i = 0; i < sizeof(torn_record); i++) {
+        ASSERT_TRUE(ffsv_flash_image_byte(flash, torn_offset + i) == 0x00);
+    }
+    ASSERT_OK(fffs_stat(&remounted, name, &st));
+    ASSERT_TRUE(st.size == sizeof(data) - 1);
+    ASSERT_OK(fffs_open(&remounted, &next_file, "after-tail",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&next_file, data, sizeof(data) - 1, NULL));
+    ASSERT_OK(fffs_close(&next_file));
+    ASSERT_OK(fffs_stat(&remounted, "after-tail", &st));
+    ASSERT_TRUE(st.size == sizeof(data) - 1);
+    fffs_unmount(&remounted);
+
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_non_strict_mount_does_not_clobber_nonterminal_index_record(
+        void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs remounted;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
+    const char *name = "not-tail";
+    const uint8_t data[] = "committed";
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, name,
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, NULL));
+    ASSERT_OK(fffs_close(&file));
+    size_t bad_offset = fs.next_index_offset;
+
+    uint8_t bad_record[4] = {0x34, 0x12, 0x01, 0x00};
+    uint8_t following_record[4] = {0x35, 0x12, 0x00, 0x00};
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash, bad_offset,
+                    bad_record, sizeof(bad_record), FFSV_CALLSITE)));
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash, bad_offset + 4,
+                    following_record, sizeof(following_record),
+                    FFSV_CALLSITE)));
+    fffs_unmount(&fs);
+
+    ASSERT_EQ_INT(FFFS_ERR_CORRUPT,
+            mount_fs(&remounted, &backend, remount_index_heads));
+    for (size_t i = 0; i < sizeof(bad_record); i++) {
+        ASSERT_TRUE(ffsv_flash_image_byte(flash, bad_offset + i) ==
+                bad_record[i]);
+        ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                    bad_offset + sizeof(bad_record) + i) ==
+                following_record[i]);
+    }
+
     ffsv_flash_destroy(flash);
     return 0;
 }
@@ -2439,6 +2557,9 @@ int main(void) {
     failures += test_fsinfo_refresh_and_cached_accounting();
     failures += test_reserved_hash_slots_are_skipped();
     failures += test_replay_skips_reused_stale_index_heads();
+    failures += test_non_strict_mount_skips_invalid_active_index_tail();
+    failures +=
+        test_non_strict_mount_does_not_clobber_nonterminal_index_record();
     failures += test_gc_reclaims_unindexed_orphan_sector();
     failures += test_gc_erases_dirty_sector_with_erased_footer();
     failures += test_gc_skips_open_writer_dirty_root_sector();

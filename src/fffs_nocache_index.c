@@ -146,9 +146,6 @@ static int read_index_at(struct index_scan *scan, size_t offset,
     if (*erased) {
         return FFFS_OK;
     }
-    if (*slot == 0 && *head == 0) {
-        return FFFS_ERR_CORRUPT;
-    }
     return FFFS_OK;
 }
 
@@ -173,6 +170,9 @@ static int newer_record_for_slot(struct index_scan *scan,
             }
             if (erased) {
                 break;
+            }
+            if (rec_slot == 0 && head == 0) {
+                continue;
             }
             if (rec_slot == slot) {
                 *newer = true;
@@ -266,6 +266,9 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
             if (erased) {
                 continue;
             }
+            if (rec_slot == 0 && rec_head == 0) {
+                continue;
+            }
 
             size_t d;
             if (!candidate_offset(base, rec_slot, &d) ||
@@ -354,6 +357,9 @@ static bool current_index_entry_read(struct fffs *fs, size_t *cursor_seq_pos,
             }
             if (erased) {
                 break;
+            }
+            if (rec_slot == 0 && rec_head == 0) {
+                continue;
             }
             if (rec_head == 0) {
                 continue;

@@ -228,7 +228,7 @@ static int replay_active_index(const struct fffs_backend *backend,
             return FFFS_OK;
         }
         if (slot == 0 && head == 0) {
-            return FFFS_ERR_CORRUPT;
+            continue;
         }
         if (head == 0) {
             live_heads[slot] = 0;
@@ -261,8 +261,7 @@ static int inspect_index(const struct fffs_backend *backend,
             break;
         }
         if (slot == 0 && head == 0) {
-            summary->index_corrupt_records += 1;
-            break;
+            continue;
         }
         summary->index_records += 1;
         if (head == 0) {

@@ -131,7 +131,7 @@ The `slot` is not merely a raw hash. It is a resolved slot chosen by bounded pro
 
 The `head` points to a FASTFFS sector, not an arbitrary byte, page, or backend erase unit. File root metadata is found by scanning the metadata records at the end of the head sector. This allows one head sector to contain multiple small files, one large file beginning, or a mix of both.
 
-Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is invalid/clobbered. Any other record is presumed valid. File lookup/exists are a higher standard and would only show an existing file if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails, corruption has occurred.
+Index records do not carry per-record checksums. A record with all bits `1` is free space and marks the end of written records for that index sector. A record with all bits `0` is an invalid/clobbered record left by non-strict recovery of a terminal partial append, or invalid/clobbered state if it appears where recovery could not have produced it. Any other record is decoded and validated by context. File lookup/exists are a higher standard and would only show an existing file if its `head` points to a valid sector containing valid root metadata whose resolved slot matches the record. If that check fails for a committed record, corruption has occurred.
 
 Version 1 stores index record fields as little-endian integers. `head == 0` is a delete tombstone. Nonzero heads must point outside the index sector range and below the derived sector count. `slot == 0xffff` remains legal unless the whole record is erased.
 
@@ -255,8 +255,24 @@ On startup:
 
 Replay reads index records from the oldest selected sector through the active
 sector. It stops at erased index-record space in each sector and remembers the
-next append offset in the active sector. Clobbered all-zero records and live
-heads outside the data-sector range are rejected.
+next append offset in the active sector. All-zero invalid/clobbered records are
+skipped.
+Live heads outside the data-sector range are rejected unless the record is the
+terminal active-sector tail in non-strict mode.
+
+The final record in the active index sector needs special handling because the
+4-byte index append is the close commit point. A partial program can leave some
+intended zero bits as ones, producing the wrong slot and/or head. Mount still
+decodes and validates that record. If it is valid, replay accepts it. If it is
+invalid, non-strict mount may recover it only when there are no later records to
+replay: either it is physically the last record in the active index sector, or
+the next record is erased and the remaining bytes after that erased record are
+also erased. Replay should peek at the next record first; only if that record is
+erased does it need to verify the rest of the sector. Recovery clobbers the
+record to `00 00 00 00`, advances the next append offset past it, and stops
+replaying the active sector. If any written record follows it, this is not the
+terminal tail and mount reports corruption without modifying flash. Strict
+mount also reports corruption for the invalid tail without modifying flash.
 
 Index replay does not read file metadata. After replay reaches the end of the
 selected index sequence, the in-memory index is the authoritative view of which
@@ -782,8 +798,9 @@ applies index records in journal order:
 - replay does not read file metadata to prove that an index record is valid.
 
 After replay reaches the end of the selected index sequence, the in-memory
-cache represents the authoritative view of which resolved slots exist. If a
-later operation reads root metadata through an authoritative `(slot, head)`
+cache represents the authoritative view of which resolved slots exist. All-zero
+invalid/clobbered records are recovery markers and do not affect the namespace.
+If a later operation reads root metadata through an authoritative `(slot, head)`
 mapping and the metadata is missing, invalid, or belongs to a different slot,
 corruption has occurred.
 
@@ -996,3 +1013,15 @@ If corruption is detected at any point, a sticky corruption flag must be set.
 If corruption is detected that impacts the operation, the operation should fail with an error and not complete normally.
 
 In strict mode, any corruption detected must cause an operational failure, even if it does not directly impact the operation. In non-strict mode, corruption unrelated to the current operation only sets a sticky flag indicating some corruption has been detected, but may continue. A fsck/check could then be run later to find and possibly repair the corruption.
+
+The active index tail exception is deliberately narrow. Non-strict mount may
+repair one invalid terminal tail record by clobbering it to all zeros only when
+no later index records exist. If strict mode is enabled, or if any later written
+record exists, mount must fail without programming the index. Clobbering treats
+the interrupted close as uncommitted and makes the index appendable again. The
+exception is a gray area without index CRC32: it can hide a genuinely committed
+terminal entry whose slot/head bits were later lost. Strict mode rejects it, and
+CRC32-backed index entries should replace the heuristic with positive
+partial-entry detection. A fsck tool may be able to recover some non-strict
+cases by searching for orphaned roots whose slot/head bits are compatible with
+the partially programmed entry.

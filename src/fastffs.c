@@ -298,6 +298,7 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
 #endif
     fs->scratch = options->scratch;
     fs->scratch_size = options->scratch_size;
+    fs->strict = options->strict;
     fs->sector_size = sector_size;
     fs->sector_count = backend->size / fs->sector_size;
     fs->sector_shift = sequence.sector_shift;

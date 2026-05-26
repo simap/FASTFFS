@@ -426,6 +426,82 @@ static int program_index_record_at(struct fffs *fs, size_t offset,
     return fffs_flash_program_aligned(fs, offset, rec, sizeof(rec));
 }
 
+static int clobber_active_tail(struct fffs *fs, size_t rec_off) {
+    uint8_t rec[4] = {0};
+    int err = fffs_flash_program_aligned(fs, rec_off, rec, sizeof(rec));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    fs->next_index_offset = rec_off + 4;
+    return FFFS_OK;
+}
+
+static bool index_bytes_erased(const uint8_t *bytes, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        if (bytes[i] != 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int index_flash_span_erased(struct fffs *fs, size_t offset,
+        size_t size, bool *erased) {
+    uint8_t buf[32];
+    *erased = true;
+    while (size > 0) {
+        size_t n = size < sizeof(buf) ? size : sizeof(buf);
+        int err = fffs_flash_read(fs, offset, buf, n);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (!index_bytes_erased(buf, n)) {
+            *erased = false;
+            return FFFS_OK;
+        }
+        offset += n;
+        size -= n;
+    }
+    return FFFS_OK;
+}
+
+static int active_index_record_is_terminal(struct fffs *fs, size_t rec_off,
+        const uint8_t *chunk, size_t pos, size_t nread, size_t end,
+        bool *terminal) {
+    *terminal = rec_off + 4 == end;
+    if (*terminal) {
+        return FFFS_OK;
+    }
+
+    uint8_t next_rec[4];
+    if (pos + 8 <= nread) {
+        memcpy(next_rec, chunk + pos + 4, sizeof(next_rec));
+    } else {
+        int err = fffs_flash_read(fs, rec_off + 4, next_rec,
+                sizeof(next_rec));
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+    if (!index_bytes_erased(next_rec, sizeof(next_rec))) {
+        return FFFS_OK;
+    }
+
+    size_t rest_off = rec_off + 8;
+    size_t chunk_end = rec_off + (nread - pos);
+    if (rest_off < chunk_end) {
+        if (!index_bytes_erased(chunk + pos + 8, chunk_end - rest_off)) {
+            return FFFS_OK;
+        }
+        rest_off = chunk_end;
+    }
+    if (rest_off >= end) {
+        *terminal = true;
+        return FFFS_OK;
+    }
+    return index_flash_span_erased(fs, rest_off, end - rest_off, terminal);
+}
+
 static int tombstone_index_sector(struct fffs *fs, size_t sector) {
     uint8_t flags = (uint8_t)(FFFS_INDEX_FLAGS_VALID &
         (uint8_t)~FFFS_INDEX_FLAG_TOMBSTONED);
@@ -490,12 +566,6 @@ static int read_compact_source_record(struct fffs *fs,
     *slot = load16(rec);
     *head = load16(rec + 2);
     *erased = *slot == UINT16_MAX && *head == UINT16_MAX;
-    if (*erased) {
-        return FFFS_OK;
-    }
-    if (*slot == 0 && *head == 0) {
-        return FFFS_OK;
-    }
     return FFFS_OK;
 }
 
@@ -610,7 +680,7 @@ static int index_compact_oldest_copy(struct fffs *fs, size_t *source_out) {
             break; //basically EOF for the index sector
         }
         if ((slot == 0 && head == 0) || head == 0) {
-            continue; //clobbered / tombstoned
+            continue; //clobbered partial / tombstoned
         }
 
         bool current;
@@ -814,7 +884,10 @@ int fffs_replay_index(struct fffs *fs) {
                     goto next_sector;
                 }
                 if (slot == 0 && head == 0) {
-                    return FFFS_ERR_CORRUPT;
+                    if (active) {
+                        fs->next_index_offset = rec_off + 4;
+                    }
+                    continue;
                 }
                 if (head == 0) {
                     err = fffs_index_remove(fs, slot);
@@ -823,8 +896,42 @@ int fffs_replay_index(struct fffs *fs) {
                     }
                     continue;
                 }
+                bool terminal_active_tail = false;
+                /*
+                 * An interrupted final append can leave wrong slot/head bits.
+                 * Only a terminal active record is eligible for recovery.
+                 */
+                if (active) {
+                    err = active_index_record_is_terminal(fs, rec_off, chunk,
+                            pos, nread, end, &terminal_active_tail);
+                    if (err != FFFS_OK) {
+                        return err;
+                    }
+                }
                 if (head < fs->index_sectors || head >= fs->sector_count) {
-                    return FFFS_ERR_CORRUPT;
+                    if (fs->strict || !terminal_active_tail) {
+                        return FFFS_ERR_CORRUPT;
+                    }
+                    err = clobber_active_tail(fs, rec_off);
+                    if (err != FFFS_OK) {
+                        return err;
+                    }
+                    goto next_sector;
+                }
+                if (terminal_active_tail) {
+                    uint32_t root_size;
+                    err = fffs_read_root_size_for_slot(fs, head, slot,
+                            &root_size);
+                    if (err != FFFS_OK) {
+                        if (fs->strict) {
+                            return FFFS_ERR_CORRUPT;
+                        }
+                        err = clobber_active_tail(fs, rec_off);
+                        if (err != FFFS_OK) {
+                            return err;
+                        }
+                        goto next_sector;
+                    }
                 }
                 tail_head = head;
                 err = fffs_index_insert(fs, slot, head);
