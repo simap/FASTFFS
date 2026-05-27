@@ -101,7 +101,7 @@ The current benchmark runner is `benchfs`, a shared benchmark flow with filesyst
 
 Format timing measures the filesystem format call itself. The benchmark erases the partition before format for fairness, but that preformat erase is setup and is not included in filesystem format, mount, baseline, or churn totals.
 
-Churn is deterministic. It creates, replaces, and deletes files until it has written about 8 MiB of logical payload using seed `0x4f465346`. The fixed live target is 2,308,848 B with 128 KiB fill/free slack. Current churn writes 8,391,942 B through 346 creates, 114 replaces, and 223 explicit deletes. Average live file count is sampled at every mutation event and is 114 files over 683 samples. The final live set is 123 files and 2,434,361 B: 116 small 10-20 KiB files totaling 1,813,188 B, 6 medium 20-60 KiB files totaling 262,773 B, and 1 large 350 KiB file.
+Churn is deterministic. It creates, replaces, and deletes files until it has written about 8.6 MiB of logical payload using seed `0x4f465346`. The fixed live target is 2,308,848 B with 128 KiB fill/free slack. Current churn writes 8,576,418 B through 169 creates, 59 replaces, and 64 explicit deletes. Average live file count is sampled at every mutation event and is 74 files over 292 samples. The final live set is 105 files and 2,414,932 B: 96 small 10-20 KiB files totaling 1,436,988 B, 7 medium 20-60 KiB files totaling 261,144 B, and 2 large 350 KiB files totaling 716,800 B.
 
 Churn total wall time comes from an explicit wall-clock timer around the churn core. It includes foreground writes, deletes, any adapter-provided GC steps, benchmark model/stat work, and log printing. The accounting rows split that wall time into measured write/delete/GC/benchmark-overhead buckets plus a residual `Churn unaccounted time`. `Churn benchmark overhead` is mostly verbose log printing, not filesystem work.
 
@@ -153,11 +153,11 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
   <tbody>
     <tr>
       <td align="left">Run timestamp</td>
-      <td align="right">2026-05-18 18:03:27</td>
-      <td align="right">2026-05-18 19:56:33</td>
-      <td align="right">2026-05-18 17:49:20</td>
-      <td align="right">2026-05-18 16:37:44</td>
-      <td align="right">2026-05-18 16:41:19</td>
+      <td align="right">2026-05-26 22:00:02</td>
+      <td align="right">2026-05-26 22:20:15</td>
+      <td align="right">2026-05-26 22:23:31</td>
+      <td align="right">2026-05-26 22:26:59</td>
+      <td align="right">2026-05-26 22:30:39</td>
     </tr>
     <tr>
       <td align="left">Index cache mode</td>
@@ -217,24 +217,24 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
     </tr>
     <tr>
       <td align="left">Baseline format</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">65.3 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">48.5 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">42.8 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.892 s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">41.375 s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">49.5 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">66.5 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">69.2 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.903 s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">41.788 s</td>
     </tr>
     <tr>
       <td align="left">Baseline mount after format</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">348 us</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">278 us</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">529 us</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">63.9 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">350 us</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">276 us</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">530 us</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">64.1 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">230 ms</td>
     </tr>
     <tr>
       <td align="left">Reported usable capacity</td>
-      <td align="right">4,173,848</td>
-      <td align="right">4,173,848</td>
+      <td align="right">4,175,892</td>
+      <td align="right">4,175,892</td>
       <td align="right">4,194,304</td>
       <td align="right">4,194,304</td>
       <td align="right">3,848,081</td>
@@ -249,19 +249,19 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
     </tr>
     <tr>
       <td align="left">Write 192 x 64 B</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">20.8 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">10.1 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">18.7 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">9.66 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">0.59 KiB/s</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.93 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">0.27 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 192 x 64 B total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">179.2 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">35.6 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">179.5 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">35.7 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1.95 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">5.21 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2.71 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">5.20 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2.70 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 192 x 64 B open/file</td>
@@ -273,35 +273,35 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
     </tr>
     <tr>
       <td align="left">Read 192 x 64 B after open</td>
-      <td align="right">23,810 KiB/s</td>
-      <td align="right">963.9 KiB/s</td>
+      <td align="right">24,691 KiB/s</td>
+      <td align="right">967.6 KiB/s</td>
       <td align="right">5.99 KiB/s</td>
-      <td align="right">476.3 KiB/s</td>
-      <td align="right">416.9 KiB/s</td>
+      <td align="right">474.4 KiB/s</td>
+      <td align="right">430.1 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 32 early-index x 64 B total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">177.4 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">177.7 KiB/s</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">24.0 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">4.93 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">27.9 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">20.8 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">4.92 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">27.8 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">20.9 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 32 middle-index x 64 B total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">175.4 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">175.7 KiB/s</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">36.1 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2.00 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">5.05 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">99.2 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">5.03 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">101.9 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 32 late-index x 64 B total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">176.4 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">75.0 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">176.7 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">75.1 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1.07 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2.77 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">99.0 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">101.8 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Storage 208 mixed files overhead/file</td>
@@ -313,408 +313,408 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
     </tr>
     <tr>
       <td align="left">Write 16 x 50 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">174.6 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">122.2 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">91.8 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">72.9 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">173.9 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">122.4 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">90.2 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">73.0 KiB/s</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">65.8 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 16 x 50 KiB total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,404 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,357 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,427 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,378 KiB/s</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,116 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,278 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">322.6 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,274 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">322.3 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Read 16 x 50 KiB open/file</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">201 us</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">321 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.90 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">320 us</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.92 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">25.2 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">36.2 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">36.3 ms</td>
     </tr>
     <tr>
       <td align="left">Read 16 x 50 KiB after open</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,575 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,575 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,832 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,598 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">421.6 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,599 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,596 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,835 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,592 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">421.1 KiB/s</td>
     </tr>
     <tr>
       <td align="left">List 208 files</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">33.3 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">33.2 ms</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">111 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">306 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">26.4 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">26.5 ms</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">123 ms</td>
     </tr>
     <tr>
       <td align="left">Baseline exists tiny existing avg</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">164 us</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">163 us</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.50 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">20.0 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">12.0 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">24.5 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">24.6 ms</td>
     </tr>
     <tr>
       <td align="left">Baseline exists tiny missing avg</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">78 us</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.36 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">16.6 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">26.4 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">26.5 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">121 ms</td>
     </tr>
     <tr>
       <td align="left">Baseline exists medium existing avg</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">155 us</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">296 us</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">295 us</td>
       <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">4.50 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">25.4 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">25.5 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">32.9 ms</td>
     </tr>
     <tr>
       <td align="left">Baseline exists medium missing avg</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">61 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.35 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.34 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">16.6 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">26.4 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">26.5 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">121 ms</td>
     </tr>
     <tr>
       <td align="left">Churn ops</td>
-      <td align="right">460</td>
-      <td align="right">460</td>
-      <td align="right">460</td>
-      <td align="right">460</td>
-      <td align="right">460</td>
+      <td align="right">228</td>
+      <td align="right">228</td>
+      <td align="right">228</td>
+      <td align="right">228</td>
+      <td align="right">228</td>
     </tr>
     <tr>
       <td align="left">Churn bytes written</td>
-      <td align="right">8,391,942</td>
-      <td align="right">8,391,942</td>
-      <td align="right">8,391,942</td>
-      <td align="right">8,391,942</td>
-      <td align="right">8,391,942</td>
+      <td align="right">8,576,418</td>
+      <td align="right">8,576,418</td>
+      <td align="right">8,576,418</td>
+      <td align="right">8,576,418</td>
+      <td align="right">8,576,418</td>
     </tr>
     <tr>
       <td align="left">Churn final live bytes</td>
-      <td align="right">2,434,361</td>
-      <td align="right">2,434,361</td>
-      <td align="right">2,434,361</td>
-      <td align="right">2,434,361</td>
-      <td align="right">2,434,361</td>
+      <td align="right">2,414,932</td>
+      <td align="right">2,414,932</td>
+      <td align="right">2,414,932</td>
+      <td align="right">2,414,932</td>
+      <td align="right">2,414,932</td>
     </tr>
     <tr>
       <td align="left">Churn creates</td>
-      <td align="right">346</td>
-      <td align="right">346</td>
-      <td align="right">346</td>
-      <td align="right">346</td>
-      <td align="right">346</td>
+      <td align="right">169</td>
+      <td align="right">169</td>
+      <td align="right">169</td>
+      <td align="right">169</td>
+      <td align="right">169</td>
     </tr>
     <tr>
       <td align="left">Churn replaces</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
+      <td align="right">59</td>
+      <td align="right">59</td>
+      <td align="right">59</td>
+      <td align="right">59</td>
+      <td align="right">59</td>
     </tr>
     <tr>
       <td align="left">Churn deletes</td>
-      <td align="right">223</td>
-      <td align="right">223</td>
-      <td align="right">223</td>
-      <td align="right">223</td>
-      <td align="right">223</td>
+      <td align="right">64</td>
+      <td align="right">64</td>
+      <td align="right">64</td>
+      <td align="right">64</td>
+      <td align="right">64</td>
     </tr>
     <tr>
       <td align="left">Churn average live files</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
-      <td align="right">114</td>
+      <td align="right">74</td>
+      <td align="right">74</td>
+      <td align="right">74</td>
+      <td align="right">74</td>
+      <td align="right">74</td>
     </tr>
     <tr>
       <td align="left">Churn total wall time</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">107.281 s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">152.385 s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">158.943 s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">161.230 s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">755.656 s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">106.457 s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">148.656 s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">125.214 s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">152.325 s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">756.491 s</td>
     </tr>
     <tr>
       <td align="left">Churn accounted time</td>
-      <td align="right">106.723 s</td>
-      <td align="right">152.116 s</td>
-      <td align="right">158.933 s</td>
-      <td align="right">161.225 s</td>
-      <td align="right">755.644 s</td>
+      <td align="right">106.300 s</td>
+      <td align="right">148.630 s</td>
+      <td align="right">125.210 s</td>
+      <td align="right">152.322 s</td>
+      <td align="right">756.488 s</td>
     </tr>
     <tr>
       <td align="left">Churn write time</td>
-      <td align="right">57.225 s</td>
-      <td align="right">100.625 s</td>
-      <td align="right">149.279 s</td>
-      <td align="right">155.486 s</td>
-      <td align="right">729.449 s</td>
+      <td align="right">67.304 s</td>
+      <td align="right">109.634 s</td>
+      <td align="right">122.133 s</td>
+      <td align="right">148.934 s</td>
+      <td align="right">729.674 s</td>
     </tr>
     <tr>
       <td align="left">Churn delete time</td>
-      <td align="right">1.259 s</td>
-      <td align="right">1.821 s</td>
-      <td align="right">8.392 s</td>
-      <td align="right">4.448 s</td>
-      <td align="right">24.933 s</td>
+      <td align="right">0.751 s</td>
+      <td align="right">0.746 s</td>
+      <td align="right">2.472 s</td>
+      <td align="right">2.772 s</td>
+      <td align="right">26.208 s</td>
     </tr>
     <tr>
       <td align="left">Churn GC step time</td>
-      <td align="right">43.797 s</td>
-      <td align="right">45.626 s</td>
+      <td align="right">36.407 s</td>
+      <td align="right">36.557 s</td>
       <td align="right">0.000 s</td>
       <td align="right">0.000 s</td>
       <td align="right">0.000 s</td>
     </tr>
     <tr>
       <td align="left">Churn benchmark overhead</td>
-      <td align="right">4.442 s</td>
-      <td align="right">4.043 s</td>
-      <td align="right">1.262 s</td>
-      <td align="right">1.291 s</td>
-      <td align="right">1.262 s</td>
+      <td align="right">1.839 s</td>
+      <td align="right">1.692 s</td>
+      <td align="right">0.604 s</td>
+      <td align="right">0.617 s</td>
+      <td align="right">0.606 s</td>
     </tr>
     <tr>
       <td align="left">Churn unaccounted time</td>
-      <td align="right">0.558 s</td>
-      <td align="right">0.269 s</td>
-      <td align="right">0.010 s</td>
-      <td align="right">0.005 s</td>
-      <td align="right">0.012 s</td>
+      <td align="right">0.156 s</td>
+      <td align="right">0.026 s</td>
+      <td align="right">0.004 s</td>
+      <td align="right">0.002 s</td>
+      <td align="right">0.004 s</td>
     </tr>
     <tr>
       <td align="left">Churn write 10-20 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">139.8 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">77.3 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">51.2 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">52.1 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">11.5 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">139.4 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">79.4 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">53.7 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">54.8 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">14.4 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write new 10-20 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">140.4 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">77.1 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">50.3 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">52.4 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">10.9 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">140.0 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">80.1 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">52.7 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">56.0 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">14.8 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write replace 10-20 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">138.0 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">78.0 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">54.0 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">51.1 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">13.8 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">137.8 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">77.5 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">57.0 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">51.6 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">13.2 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write 20-60 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">155.7 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">97.0 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">71.8 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">56.9 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">11.6 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">160.3 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">104.9 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">70.8 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">62.2 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">19.5 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write new 20-60 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">155.8 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">95.5 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">69.7 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">57.6 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">10.4 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">160.0 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">104.2 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">68.3 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">62.7 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">19.7 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write replace 20-60 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">155.6 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">101.5 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">78.1 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">55.0 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">16.7 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">161.7 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">108.3 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">85.7 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">60.0 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">18.7 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn write 350 KiB</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">159.3 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">113.3 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">78.7 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">48.4 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">7.32 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">108.5 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">68.3 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">82.5 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">55.4 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">9.02 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn delete avg</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">5.64 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">8.17 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">37.6 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">19.9 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">112 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">11.7 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">11.7 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">38.6 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">43.3 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">409 ms</td>
     </tr>
     <tr>
       <td align="left">Churn delete p50</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">5.88 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">7.52 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">16.1 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">20.7 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">103 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">6.73 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">6.48 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">13.4 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">23.2 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">135 ms</td>
     </tr>
     <tr>
       <td align="left">Churn delete p95</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">11.3 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">15.2 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">26.4 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">31.7 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">235 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">42.8 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">41.2 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">24.7 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">170 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1.980 s</td>
     </tr>
     <tr>
       <td align="left">Churn delete max</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">15.1 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">18.4 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">742 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">38.4 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">427 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">48.8 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">46.5 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">699 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">175 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2.018 s</td>
     </tr>
     <tr>
       <td align="left">Churn GC steps</td>
-      <td align="right">4,816</td>
-      <td align="right">4,987</td>
+      <td align="right">3,312</td>
+      <td align="right">3,312</td>
       <td align="right">0</td>
       <td align="right">0</td>
       <td align="right">0</td>
     </tr>
     <tr>
       <td align="left">Churn GC erased sectors</td>
-      <td align="right">1,161</td>
-      <td align="right">1,154</td>
+      <td align="right">995</td>
+      <td align="right">952</td>
       <td align="right">0</td>
       <td align="right">0</td>
       <td align="right">0</td>
     </tr>
     <tr>
-      <td align="left">Churn final list, 123 files</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">18.7 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">281 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">302 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">17.8 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">116 ms</td>
+      <td align="left">Churn final list</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">16.0 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">97.0 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">173 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">13.6 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">115 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold mount</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">2.04 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">2.37 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">14.9 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">81.1 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">6.76 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">7.82 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">7.74 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">77.3 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">230 ms</td>
     </tr>
     <tr>
-      <td align="left">Churn final cold list, 123 files</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">18.7 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">281 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">302 ms</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">17.8 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">116 ms</td>
+      <td align="left">Churn final cold list</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">16.0 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">96.9 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">173 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">13.6 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">115 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 10-20 KiB total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,055 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,280 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">577.8 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,047 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">240.3 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,111 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,009 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">999.2 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,630 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">239.5 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 10-20 KiB open/file</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">202 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.98 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">6.99 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">9.79 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">54.0 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">201 us</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.59 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3.91 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">5.31 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">59.8 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 10-20 KiB after open</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,536 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,530 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1,338 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,610 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,357 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,556 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,508 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1,992 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3,579 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">2,361 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 20-60 KiB total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,354 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,050 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,562 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,819 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">323.6 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,335 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,692 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1,768 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,314 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">483.1 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 20-60 KiB open/file</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">202 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">886 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">4.68 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">11.5 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">45.8 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">200 us</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.68 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3.35 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">5.70 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">23.2 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 20-60 KiB after open</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,547 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,522 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,400 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,548 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,530 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,606 KiB/s</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,579 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">496.3 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">689.1 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 350 KiB total</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,532 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,456 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,380 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,037 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">509.6 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,508 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,501 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,560 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3,193 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">828.2 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 350 KiB open/file</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">201 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">933 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">4.77 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">17.1 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">79.4 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">202 us</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">231 us</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.25 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">11.3 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">110 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold read 350 KiB after open</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,582 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,546 KiB/s</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,555 KiB/s</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,584 KiB/s</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">576.8 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,556 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">4,551 KiB/s</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2,621 KiB/s</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">3,577 KiB/s</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">1,120 KiB/s</td>
     </tr>
     <tr>
       <td align="left">Churn cold exists existing avg</td>
       <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">155 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">2.11 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">8.66 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">9.91 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">49.7 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.90 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3.77 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">5.49 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">53.9 ms</td>
     </tr>
     <tr>
       <td align="left">Churn cold exists missing avg</td>
-      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">83 us</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">7.61 ms</td>
-      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.88 ms</td>
-      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">17.8 ms</td>
+      <td align="right" bgcolor="#d9ead3" style="background-color: #d9ead3;">74 us</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">3.31 ms</td>
+      <td align="right" bgcolor="#fff2cc" style="background-color: #fff2cc;">1.04 ms</td>
+      <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">13.6 ms</td>
       <td align="right" bgcolor="#f4cccc" style="background-color: #f4cccc;">115 ms</td>
     </tr>
     <tr>
       <td align="left">FS base memory</td>
-      <td align="right">4,872</td>
-      <td align="right">256</td>
+      <td align="right">4,876</td>
+      <td align="right">260</td>
       <td align="right">1,672</td>
       <td align="right">164</td>
       <td align="right">3,540</td>
@@ -725,15 +725,15 @@ The main comparison uses FASTFFS default debt-GC as the recommended/default oper
       <td align="right">184</td>
       <td align="right">756</td>
       <td align="right">28</td>
-      <td align="right">344</td>
+      <td align="right">80</td>
     </tr>
     <tr>
       <td align="left">FS stack memory</td>
+      <td align="right">1,116</td>
       <td align="right">1,156</td>
-      <td align="right">1,156</td>
-      <td align="right">1,452</td>
+      <td align="right">1,404</td>
       <td align="right">1,164</td>
-      <td align="right">1,248</td>
+      <td align="right">1,240</td>
     </tr>
   </tbody>
 </table>
@@ -744,7 +744,7 @@ FASTFFS preloads a small amount of file data during open, so the tiny-file after
 
 | Stat | default-inline-GC | default-debt-GC | inline-GC | noalloc-inline-GC | noalloc-debt-GC | minimal-inline-GC | minimal-debt-GC |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Run timestamp | 2026-05-18 17:59:17 | 2026-05-18 18:03:27 | 2026-05-18 18:05:51 | 2026-05-18 18:10:01 | 2026-05-18 18:15:11 | 2026-05-18 19:50:55 | 2026-05-18 19:56:33 |
+| Run timestamp | 2026-05-26 21:55:56 | 2026-05-26 22:00:02 | 2026-05-26 22:02:19 | 2026-05-26 22:06:37 | 2026-05-26 22:11:48 | 2026-05-26 22:14:42 | 2026-05-26 22:20:15 |
 | Index cache mode | 1 | 1 | 1 | 1 | 1 | 0 | 0 |
 | Index entries | 1024 | 1024 | 1024 | 1024 | 1024 | 0 | 0 |
 | Allocation map mode | 1 | 1 | 1 | 0 | 0 | 0 | 0 |
@@ -752,71 +752,71 @@ FASTFFS preloads a small amount of file data during open, so the tiny-file after
 | Scratch bytes | 512 | 512 | 512 | 512 | 512 | 128 | 128 |
 | File write buffer | 256 | 256 | 256 | 256 | 256 | 64 | 64 |
 | Churn GC policy | none | debt | none | none | debt | none | debt |
-| Baseline format | 66.5 ms | 65.3 ms | 60.3 ms | 46.5 ms | 47.0 ms | 69.3 ms | 48.5 ms |
-| Baseline mount after format | 353 us | 348 us | 353 us | 337 us | 338 us | 273 us | 278 us |
-| Reported usable capacity | 4,173,848 | 4,173,848 | 4,173,848 | 4,173,848 | 4,173,848 | 4,173,848 | 4,173,848 |
+| Baseline format | 58.1 ms | 49.5 ms | 49.6 ms | 49.3 ms | 48.8 ms | 48.8 ms | 66.5 ms |
+| Baseline mount after format | 364 us | 350 us | 357 us | 339 us | 337 us | 289 us | 276 us |
+| Reported usable capacity | 4,175,892 | 4,175,892 | 4,175,892 | 4,175,892 | 4,175,892 | 4,175,892 | 4,175,892 |
 | Storage 192 x 64 B overhead/file | 16 | 16 | 16 | 16 | 16 | 16 | 16 |
-| Write 192 x 64 B | 20.8 KiB/s | 20.8 KiB/s | 20.8 KiB/s | 20.8 KiB/s | 20.8 KiB/s | 10.1 KiB/s | 10.1 KiB/s |
-| Read 192 x 64 B total | 179.4 KiB/s | 179.2 KiB/s | 179.4 KiB/s | 179.1 KiB/s | 179.4 KiB/s | 35.7 KiB/s | 35.6 KiB/s |
-| Read 192 x 64 B open/file | 178 us | 178 us | 178 us | 179 us | 178 us | 1.52 ms | 1.52 ms |
-| Read 192 x 64 B after open | 22,222 KiB/s | 23,810 KiB/s | 22,727 KiB/s | 23,810 KiB/s | 23,810 KiB/s | 965.7 KiB/s | 963.9 KiB/s |
-| Read 32 early-index x 64 B total | 177.4 KiB/s | 177.4 KiB/s | 177.5 KiB/s | 177.1 KiB/s | 177.6 KiB/s | 24.0 KiB/s | 24.0 KiB/s |
-| Read 32 middle-index x 64 B total | 175.5 KiB/s | 175.4 KiB/s | 175.5 KiB/s | 175.4 KiB/s | 175.6 KiB/s | 36.1 KiB/s | 36.1 KiB/s |
-| Read 32 late-index x 64 B total | 176.5 KiB/s | 176.4 KiB/s | 176.6 KiB/s | 176.3 KiB/s | 176.6 KiB/s | 75.1 KiB/s | 75.0 KiB/s |
+| Write 192 x 64 B | 18.7 KiB/s | 18.7 KiB/s | 18.7 KiB/s | 18.7 KiB/s | 18.7 KiB/s | 9.66 KiB/s | 9.66 KiB/s |
+| Read 192 x 64 B total | 179.2 KiB/s | 179.5 KiB/s | 179.1 KiB/s | 179.7 KiB/s | 179.7 KiB/s | 35.7 KiB/s | 35.7 KiB/s |
+| Read 192 x 64 B open/file | 178 us | 178 us | 178 us | 178 us | 178 us | 1.52 ms | 1.52 ms |
+| Read 192 x 64 B after open | 23,529 KiB/s | 24,691 KiB/s | 24,096 KiB/s | 23,810 KiB/s | 22,989 KiB/s | 963.4 KiB/s | 967.6 KiB/s |
+| Read 32 early-index x 64 B total | 177.4 KiB/s | 177.7 KiB/s | 177.4 KiB/s | 177.5 KiB/s | 177.9 KiB/s | 24.0 KiB/s | 24.0 KiB/s |
+| Read 32 middle-index x 64 B total | 175.5 KiB/s | 175.7 KiB/s | 175.4 KiB/s | 175.6 KiB/s | 175.8 KiB/s | 36.1 KiB/s | 36.1 KiB/s |
+| Read 32 late-index x 64 B total | 176.3 KiB/s | 176.7 KiB/s | 176.3 KiB/s | 176.8 KiB/s | 176.8 KiB/s | 75.0 KiB/s | 75.1 KiB/s |
 | Storage 208 mixed files overhead/file | 16 | 16 | 16 | 16 | 16 | 16 | 16 |
-| Write 16 x 50 KiB | 174.6 KiB/s | 174.6 KiB/s | 174.4 KiB/s | 164.8 KiB/s | 164.8 KiB/s | 122.6 KiB/s | 122.2 KiB/s |
-| Read 16 x 50 KiB total | 4,406 KiB/s | 4,404 KiB/s | 4,404 KiB/s | 4,400 KiB/s | 4,405 KiB/s | 4,358 KiB/s | 4,357 KiB/s |
-| Read 16 x 50 KiB open/file | 201 us | 201 us | 204 us | 201 us | 201 us | 319 us | 321 us |
-| Read 16 x 50 KiB after open | 4,578 KiB/s | 4,575 KiB/s | 4,576 KiB/s | 4,572 KiB/s | 4,576 KiB/s | 4,575 KiB/s | 4,575 KiB/s |
-| List 208 files | 33.2 ms | 33.3 ms | 33.2 ms | 33.3 ms | 33.2 ms | 111 ms | 111 ms |
-| Baseline exists tiny existing avg | 164 us | 164 us | 164 us | 164 us | 163 us | 1.50 ms | 1.50 ms |
+| Write 16 x 50 KiB | 174.5 KiB/s | 173.9 KiB/s | 173.9 KiB/s | 164.5 KiB/s | 164.4 KiB/s | 122.4 KiB/s | 122.4 KiB/s |
+| Read 16 x 50 KiB total | 4,422 KiB/s | 4,427 KiB/s | 4,422 KiB/s | 4,427 KiB/s | 4,428 KiB/s | 4,376 KiB/s | 4,378 KiB/s |
+| Read 16 x 50 KiB open/file | 202 us | 201 us | 202 us | 201 us | 201 us | 320 us | 320 us |
+| Read 16 x 50 KiB after open | 4,594 KiB/s | 4,599 KiB/s | 4,595 KiB/s | 4,600 KiB/s | 4,601 KiB/s | 4,595 KiB/s | 4,596 KiB/s |
+| List 208 files | 33.3 ms | 33.2 ms | 33.3 ms | 33.2 ms | 33.2 ms | 111 ms | 111 ms |
+| Baseline exists tiny existing avg | 164 us | 163 us | 164 us | 164 us | 164 us | 1.50 ms | 1.50 ms |
 | Baseline exists tiny missing avg | 78 us | 78 us | 78 us | 78 us | 78 us | 2.36 ms | 2.36 ms |
-| Baseline exists medium existing avg | 156 us | 155 us | 155 us | 155 us | 155 us | 296 us | 296 us |
-| Baseline exists medium missing avg | 61 us | 61 us | 61 us | 61 us | 61 us | 2.34 ms | 2.35 ms |
-| Churn ops | 460 | 460 | 460 | 460 | 460 | 460 | 460 |
-| Churn bytes written | 8,391,942 | 8,391,942 | 8,391,942 | 8,391,942 | 8,391,942 | 8,391,942 | 8,391,942 |
-| Churn final live bytes | 2,434,361 | 2,434,361 | 2,434,361 | 2,434,361 | 2,434,361 | 2,434,361 | 2,434,361 |
-| Churn creates | 346 | 346 | 346 | 346 | 346 | 346 | 346 |
-| Churn replaces | 114 | 114 | 114 | 114 | 114 | 114 | 114 |
-| Churn deletes | 223 | 223 | 223 | 223 | 223 | 223 | 223 |
-| Churn average live files | 114 | 114 | 114 | 114 | 114 | 114 | 114 |
-| Churn total wall time | 213.562 s | 107.281 s | 213.692 s | 272.762 s | 132.995 s | 292.373 s | 152.385 s |
-| Churn accounted time | 213.556 s | 106.723 s | 213.686 s | 272.756 s | 132.623 s | 292.367 s | 152.116 s |
-| Churn write time | 210.394 s | 57.225 s | 210.525 s | 269.592 s | 82.882 s | 288.915 s | 100.625 s |
-| Churn delete time | 0.686 s | 1.259 s | 0.686 s | 0.685 s | 1.271 s | 1.525 s | 1.821 s |
-| Churn GC step time | 0.000 s | 43.797 s | 0.000 s | 0.000 s | 44.034 s | 0.000 s | 45.626 s |
-| Churn benchmark overhead | 2.475 s | 4.442 s | 2.476 s | 2.479 s | 4.436 s | 1.927 s | 4.043 s |
-| Churn unaccounted time | 0.006 s | 0.558 s | 0.006 s | 0.006 s | 0.372 s | 0.006 s | 0.269 s |
-| Churn write 10-20 KiB | 39.7 KiB/s | 139.8 KiB/s | 39.7 KiB/s | 30.7 KiB/s | 93.3 KiB/s | 28.6 KiB/s | 77.3 KiB/s |
-| Churn write new 10-20 KiB | 39.4 KiB/s | 140.4 KiB/s | 39.4 KiB/s | 30.5 KiB/s | 93.3 KiB/s | 28.4 KiB/s | 77.1 KiB/s |
-| Churn write replace 10-20 KiB | 40.9 KiB/s | 138.0 KiB/s | 40.8 KiB/s | 31.4 KiB/s | 93.3 KiB/s | 29.3 KiB/s | 78.0 KiB/s |
-| Churn write 20-60 KiB | 42.0 KiB/s | 155.7 KiB/s | 42.0 KiB/s | 33.8 KiB/s | 120.8 KiB/s | 31.4 KiB/s | 97.0 KiB/s |
-| Churn write new 20-60 KiB | 43.5 KiB/s | 155.8 KiB/s | 43.5 KiB/s | 35.1 KiB/s | 118.9 KiB/s | 32.5 KiB/s | 95.5 KiB/s |
-| Churn write replace 20-60 KiB | 38.3 KiB/s | 155.6 KiB/s | 38.3 KiB/s | 30.9 KiB/s | 126.2 KiB/s | 28.9 KiB/s | 101.5 KiB/s |
-| Churn write 350 KiB | 23.3 KiB/s | 159.3 KiB/s | 23.3 KiB/s | 18.9 KiB/s | 144.3 KiB/s | 18.0 KiB/s | 113.3 KiB/s |
-| Churn delete avg | 3.08 ms | 5.64 ms | 3.07 ms | 3.07 ms | 5.70 ms | 6.84 ms | 8.17 ms |
-| Churn delete p50 | 1.87 ms | 5.88 ms | 1.87 ms | 1.87 ms | 5.20 ms | 4.69 ms | 7.52 ms |
-| Churn delete p95 | 11.0 ms | 11.3 ms | 11.0 ms | 11.0 ms | 11.5 ms | 15.7 ms | 15.2 ms |
-| Churn delete max | 14.6 ms | 15.1 ms | 14.5 ms | 14.5 ms | 14.8 ms | 21.2 ms | 18.4 ms |
-| Churn GC steps | 0 | 4,816 | 0 | 0 | 4,987 | 0 | 4,987 |
-| Churn GC erased sectors | 0 | 1,161 | 0 | 0 | 1,154 | 0 | 1,154 |
-| Churn final list, 123 files | 18.8 ms | 18.7 ms | 18.8 ms | 18.8 ms | 18.7 ms | 281 ms | 281 ms |
-| Churn cold mount | 2.03 ms | 2.04 ms | 2.03 ms | 2.02 ms | 2.01 ms | 2.35 ms | 2.37 ms |
-| Churn final cold list, 123 files | 18.8 ms | 18.7 ms | 18.8 ms | 18.8 ms | 18.7 ms | 281 ms | 281 ms |
-| Churn cold read 10-20 KiB total | 4,061 KiB/s | 4,055 KiB/s | 4,061 KiB/s | 4,057 KiB/s | 4,074 KiB/s | 2,273 KiB/s | 2,280 KiB/s |
-| Churn cold read 10-20 KiB open/file | 200 us | 202 us | 200 us | 201 us | 201 us | 2.98 ms | 2.98 ms |
-| Churn cold read 10-20 KiB after open | 4,541 KiB/s | 4,536 KiB/s | 4,542 KiB/s | 4,536 KiB/s | 4,556 KiB/s | 4,501 KiB/s | 4,530 KiB/s |
-| Churn cold read 20-60 KiB total | 4,360 KiB/s | 4,354 KiB/s | 4,360 KiB/s | 4,354 KiB/s | 4,340 KiB/s | 4,072 KiB/s | 4,050 KiB/s |
-| Churn cold read 20-60 KiB open/file | 204 us | 202 us | 204 us | 205 us | 203 us | 886 us | 886 us |
-| Churn cold read 20-60 KiB after open | 4,555 KiB/s | 4,547 KiB/s | 4,555 KiB/s | 4,551 KiB/s | 4,534 KiB/s | 4,551 KiB/s | 4,522 KiB/s |
-| Churn cold read 350 KiB total | 4,493 KiB/s | 4,532 KiB/s | 4,493 KiB/s | 4,489 KiB/s | 4,493 KiB/s | 4,458 KiB/s | 4,456 KiB/s |
-| Churn cold read 350 KiB open/file | 201 us | 201 us | 201 us | 202 us | 201 us | 932 us | 933 us |
-| Churn cold read 350 KiB after open | 4,541 KiB/s | 4,582 KiB/s | 4,542 KiB/s | 4,537 KiB/s | 4,542 KiB/s | 4,548 KiB/s | 4,546 KiB/s |
-| Churn cold exists existing avg | 156 us | 155 us | 156 us | 156 us | 154 us | 2.11 ms | 2.11 ms |
-| Churn cold exists missing avg | 83 us | 83 us | 83 us | 84 us | 84 us | 7.61 ms | 7.61 ms |
-| FS base memory | 4,872 | 4,872 | 4,872 | 4,736 | 4,736 | 256 | 256 |
+| Baseline exists medium existing avg | 155 us | 155 us | 155 us | 155 us | 155 us | 295 us | 295 us |
+| Baseline exists medium missing avg | 61 us | 61 us | 61 us | 61 us | 61 us | 2.34 ms | 2.34 ms |
+| Churn ops | 228 | 228 | 228 | 228 | 228 | 228 | 228 |
+| Churn bytes written | 8,576,418 | 8,576,418 | 8,576,418 | 8,576,418 | 8,576,418 | 8,576,418 | 8,576,418 |
+| Churn final live bytes | 2,414,932 | 2,414,932 | 2,414,932 | 2,414,932 | 2,414,932 | 2,414,932 | 2,414,932 |
+| Churn creates | 169 | 169 | 169 | 169 | 169 | 169 | 169 |
+| Churn replaces | 59 | 59 | 59 | 59 | 59 | 59 | 59 |
+| Churn deletes | 64 | 64 | 64 | 64 | 64 | 64 | 64 |
+| Churn average live files | 74 | 74 | 74 | 74 | 74 | 74 | 74 |
+| Churn total wall time | 214.753 s | 106.457 s | 214.832 s | 267.163 s | 130.367 s | 286.297 s | 148.656 s |
+| Churn accounted time | 214.750 s | 106.300 s | 214.830 s | 267.160 s | 130.340 s | 286.295 s | 148.630 s |
+| Churn write time | 213.200 s | 67.304 s | 213.287 s | 265.607 s | 92.095 s | 284.747 s | 109.634 s |
+| Churn delete time | 0.675 s | 0.751 s | 0.668 s | 0.677 s | 0.700 s | 0.741 s | 0.746 s |
+| Churn GC step time | 0.000 s | 36.407 s | 0.000 s | 0.000 s | 35.752 s | 0.000 s | 36.557 s |
+| Churn benchmark overhead | 0.875 s | 1.839 s | 0.875 s | 0.876 s | 1.792 s | 0.807 s | 1.692 s |
+| Churn unaccounted time | 0.003 s | 0.156 s | 0.003 s | 0.003 s | 0.027 s | 0.003 s | 0.026 s |
+| Churn write 10-20 KiB | 43.2 KiB/s | 139.4 KiB/s | 43.2 KiB/s | 33.2 KiB/s | 95.8 KiB/s | 30.9 KiB/s | 79.4 KiB/s |
+| Churn write new 10-20 KiB | 43.6 KiB/s | 140.0 KiB/s | 43.5 KiB/s | 33.6 KiB/s | 96.9 KiB/s | 31.2 KiB/s | 80.1 KiB/s |
+| Churn write replace 10-20 KiB | 42.2 KiB/s | 137.8 KiB/s | 42.2 KiB/s | 32.3 KiB/s | 92.8 KiB/s | 30.0 KiB/s | 77.5 KiB/s |
+| Churn write 20-60 KiB | 56.4 KiB/s | 160.3 KiB/s | 56.3 KiB/s | 45.8 KiB/s | 132.6 KiB/s | 41.7 KiB/s | 104.9 KiB/s |
+| Churn write new 20-60 KiB | 57.1 KiB/s | 160.0 KiB/s | 57.0 KiB/s | 46.3 KiB/s | 131.6 KiB/s | 42.2 KiB/s | 104.2 KiB/s |
+| Churn write replace 20-60 KiB | 53.3 KiB/s | 161.7 KiB/s | 53.2 KiB/s | 43.3 KiB/s | 137.6 KiB/s | 39.7 KiB/s | 108.3 KiB/s |
+| Churn write 350 KiB | 33.8 KiB/s | 108.5 KiB/s | 33.8 KiB/s | 27.7 KiB/s | 79.7 KiB/s | 26.0 KiB/s | 68.3 KiB/s |
+| Churn delete avg | 10.6 ms | 11.7 ms | 10.4 ms | 10.6 ms | 10.9 ms | 11.6 ms | 11.7 ms |
+| Churn delete p50 | 4.28 ms | 6.73 ms | 4.29 ms | 4.24 ms | 5.10 ms | 5.93 ms | 6.48 ms |
+| Churn delete p95 | 39.0 ms | 42.8 ms | 39.0 ms | 39.0 ms | 41.3 ms | 39.1 ms | 41.2 ms |
+| Churn delete max | 46.5 ms | 48.8 ms | 46.8 ms | 48.9 ms | 48.8 ms | 42.8 ms | 46.5 ms |
+| Churn GC steps | 0 | 3,312 | 0 | 0 | 3,312 | 0 | 3,312 |
+| Churn GC erased sectors | 0 | 995 | 0 | 0 | 952 | 0 | 952 |
+| Churn final list | 16.1 ms | 16.0 ms | 16.1 ms | 16.0 ms | 16.0 ms | 97.0 ms | 97.0 ms |
+| Churn cold mount | 6.76 ms | 6.76 ms | 6.77 ms | 6.74 ms | 6.75 ms | 7.83 ms | 7.82 ms |
+| Churn final cold list | 16.0 ms | 16.0 ms | 16.0 ms | 16.0 ms | 16.0 ms | 96.9 ms | 96.9 ms |
+| Churn cold read 10-20 KiB total | 4,106 KiB/s | 4,111 KiB/s | 4,106 KiB/s | 4,110 KiB/s | 4,101 KiB/s | 3,019 KiB/s | 3,009 KiB/s |
+| Churn cold read 10-20 KiB open/file | 202 us | 201 us | 202 us | 203 us | 202 us | 1.59 ms | 1.59 ms |
+| Churn cold read 10-20 KiB after open | 4,551 KiB/s | 4,556 KiB/s | 4,551 KiB/s | 4,557 KiB/s | 4,545 KiB/s | 4,531 KiB/s | 4,508 KiB/s |
+| Churn cold read 20-60 KiB total | 4,342 KiB/s | 4,335 KiB/s | 4,342 KiB/s | 4,348 KiB/s | 4,326 KiB/s | 3,702 KiB/s | 3,692 KiB/s |
+| Churn cold read 20-60 KiB open/file | 199 us | 200 us | 199 us | 198 us | 198 us | 1.68 ms | 1.68 ms |
+| Churn cold read 20-60 KiB after open | 4,557 KiB/s | 4,548 KiB/s | 4,557 KiB/s | 4,562 KiB/s | 4,538 KiB/s | 4,545 KiB/s | 4,530 KiB/s |
+| Churn cold read 350 KiB total | 4,492 KiB/s | 4,508 KiB/s | 4,492 KiB/s | 4,497 KiB/s | 4,494 KiB/s | 4,500 KiB/s | 4,501 KiB/s |
+| Churn cold read 350 KiB open/file | 202 us | 202 us | 201 us | 201 us | 196 us | 236 us | 231 us |
+| Churn cold read 350 KiB after open | 4,540 KiB/s | 4,556 KiB/s | 4,540 KiB/s | 4,545 KiB/s | 4,542 KiB/s | 4,550 KiB/s | 4,551 KiB/s |
+| Churn cold exists existing avg | 155 us | 155 us | 155 us | 155 us | 155 us | 1.90 ms | 1.90 ms |
+| Churn cold exists missing avg | 74 us | 74 us | 74 us | 74 us | 74 us | 3.31 ms | 3.31 ms |
+| FS base memory | 4,876 | 4,876 | 4,876 | 4,740 | 4,740 | 260 | 260 |
 | FS open file memory | 376 | 376 | 376 | 376 | 376 | 184 | 184 |
-| FS stack memory | 1,156 | 1,156 | 1,156 | 1,164 | 1,116 | 1,156 | 1,156 |
+| FS stack memory | 1,164 | 1,116 | 1,164 | 1,156 | 1,108 | 1,156 | 1,156 |
 
 FASTFFS preloads a small amount of file data during open, so the tiny-file after-open read row is effectively served from RAM. Compare tiny reads primarily using total throughput and open/file time.
 

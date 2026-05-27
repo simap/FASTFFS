@@ -144,9 +144,9 @@ HTML_LOWER_IS_BETTER_ROWS = {
     "Churn delete p50",
     "Churn delete p95",
     "Churn delete max",
-    "Churn final list, 123 files",
+    "Churn final list",
     "Churn cold mount",
-    "Churn final cold list, 123 files",
+    "Churn final cold list",
     "Churn cold read 10-20 KiB open/file",
     "Churn cold read 20-60 KiB open/file",
     "Churn cold read 350 KiB open/file",
@@ -417,12 +417,8 @@ class ParsedLog:
             if "Churn GC step time" not in self.data:
                 self.set("Churn GC step time", seconds(d.get("time_us")))
             return
-        if msg.startswith("list: entries=123 "):
-            key = "Churn final cold list, 123 files" if self._seen_churn_cold_mount else "Churn final list, 123 files"
-            self.setdefault(key, time_us(kvs(msg).get("time_us")))
-            return
-        if msg.startswith("list: active=123 "):
-            key = "Churn final cold list, 123 files" if self._seen_churn_cold_mount else "Churn final list, 123 files"
+        if (msg.startswith("list: entries=") or msg.startswith("list: active=")) and self._churn_summary_ms is not None:
+            key = "Churn final cold list" if self._seen_churn_cold_mount else "Churn final list"
             self.setdefault(key, time_us(kvs(msg).get("time_us")))
             return
         if "churn cold mount rc=" in msg:
@@ -534,9 +530,9 @@ ROWS = [
     "Churn delete max",
     "Churn GC steps",
     "Churn GC erased sectors",
-    "Churn final list, 123 files",
+    "Churn final list",
     "Churn cold mount",
-    "Churn final cold list, 123 files",
+    "Churn final cold list",
     "Churn cold read 10-20 KiB total",
     "Churn cold read 10-20 KiB open/file",
     "Churn cold read 10-20 KiB after open",

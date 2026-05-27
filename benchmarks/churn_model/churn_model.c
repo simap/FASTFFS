@@ -66,6 +66,42 @@ static int choose_live_slot(bench_churn_model_t *model)
     return -1;
 }
 
+static uint32_t delete_weight(const bench_churn_slot_t *slot)
+{
+    uint32_t weight = slot->size / 4096u;
+    return weight == 0 ? 1 : weight;
+}
+
+static int choose_delete_slot(bench_churn_model_t *model)
+{
+    uint32_t total_weight = 0;
+    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+        if (model->slots[i].live && i != model->protected_large_slot) {
+            total_weight += delete_weight(&model->slots[i]);
+        }
+    }
+    if (total_weight == 0) {
+        if (model->protected_large_slot >= 0 &&
+            model->slots[model->protected_large_slot].live) {
+            return model->protected_large_slot;
+        }
+        return -1;
+    }
+
+    uint32_t target = prng_next(model) % total_weight;
+    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+        if (!model->slots[i].live || i == model->protected_large_slot) {
+            continue;
+        }
+        uint32_t weight = delete_weight(&model->slots[i]);
+        if (target < weight) {
+            return i;
+        }
+        target -= weight;
+    }
+    return -1;
+}
+
 static void fill_delete_event(const bench_churn_model_t *model,
                               bench_churn_event_t *event, int slot)
 {
@@ -149,7 +185,7 @@ bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
 
     while (model->live_bytes + model->pending_size >
            model->target_live_bytes + model->target_slack_bytes) {
-        int del = choose_live_slot(model);
+        int del = choose_delete_slot(model);
         if (del < 0) {
             break;
         }
@@ -161,7 +197,7 @@ bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
         model->optional_delete_checked = 1;
         if (model->live_bytes > model->target_live_bytes &&
             (prng_next(model) & 7u) == 0u) {
-            int del = choose_live_slot(model);
+            int del = choose_delete_slot(model);
             if (del >= 0) {
                 fill_delete_event(model, event, del);
                 return event->type;
@@ -182,7 +218,7 @@ bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
             model->pending_replacing = 0;
         }
         if (model->pending_slot < 0) {
-            int del = choose_live_slot(model);
+            int del = choose_delete_slot(model);
             if (del >= 0) {
                 model->pending_slot = del;
                 model->pending_replacing = 0;

@@ -98,9 +98,9 @@ See `design.md` for the deeper design notes.
 This is a comparison of other permissively licensed filesystems that were reasonably easy to port/integrate. There are many others, but most appeared to be glued to a whole operating system.
 
 In this benchmark, the default FASTFFS debt-GC configuration writes tiny files
-about 7x faster than the fastest tested non-FASTFFS result, writes 50 KB files
+about 6x faster than the fastest tested non-FASTFFS result, writes 50 KB files
 about 2x faster, performs name probes tens of times faster, and completes the
-churn workload about 1.5x faster than LittleFS and JesFS.
+churn workload about 1.2x faster than LittleFS and 1.4x faster than JesFS.
 
 Even a minimal RAM configuration stays faster than the other tested filesystems
 on the core 64 B-50 KiB file read/write and churn workloads, while remaining
@@ -113,26 +113,26 @@ that GC time is included in total churn runtime. This roughly simulates spending
 some idle cycles on GC opportunistically, instead of forcing foreground writes to
 pay the whole reclaim cost when free space is tight.
 
-The churn benchmark writes about 8 MiB of creates/replaces/deletes while keeping about 2.4 MiB live, measuring mutation throughput during the run and final 123-file read/list behavior.
+The churn benchmark writes about 8.6 MiB of creates/replaces/deletes while keeping 105 files and about 2.4 MiB live, measuring mutation throughput during the run and final live-set read/list behavior.
 
 | Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
 |---|---:|---:|---:|---:|---:|
-| FS memory, base + open + stack | 4,872 B + 376 B + 1,156 B | 256 B + 184 B + 1,156 B | 1,672 B + 756 B + 1,452 B | 164 B + 28 B + 1,164 B | 3,540 B + 344 B + 1,248 B |
+| FS memory, base + open + stack | 4,876 B + 376 B + 1,116 B | 260 B + 184 B + 1,156 B | 1,672 B + 756 B + 1,404 B | 164 B + 28 B + 1,164 B | 3,540 B + 80 B + 1,240 B |
 | Tiny-file overhead, 192 x 64 B | 16 B/file | 16 B/file | 448 B/file | 4,032 B/file | 438 B/file |
-| Write 192 x 64 B | 20.8 KiB/s | 10.1 KiB/s | 0.59 KiB/s | 2.93 KiB/s | 0.27 KiB/s |
-| Read 192 x 64 B total | 179.2 KiB/s | 35.6 KiB/s | 1.95 KiB/s | 5.21 KiB/s | 2.71 KiB/s |
+| Write 192 x 64 B | 18.7 KiB/s | 9.66 KiB/s | 0.59 KiB/s | 2.93 KiB/s | 0.27 KiB/s |
+| Read 192 x 64 B total | 179.5 KiB/s | 35.7 KiB/s | 1.95 KiB/s | 5.20 KiB/s | 2.70 KiB/s |
 | Read 192 x 64 B open/file | 178 us | 1.52 ms | 11.1 ms | 11.9 ms | 22.9 ms |
-| Write 16 x 50 KiB | 174.6 KiB/s | 122.2 KiB/s | 91.8 KiB/s | 72.9 KiB/s | 65.8 KiB/s |
-| Read 16 x 50 KiB total | 4,404 KiB/s | 4,357 KiB/s | 2,116 KiB/s | 1,278 KiB/s | 322.6 KiB/s |
-| List 208 files | 33.3 ms | 111 ms | 306 ms | 26.4 ms | 123 ms |
-| Existing-name probe | 164 us | 1.50 ms | 20.0 ms | 12.0 ms | 24.5 ms |
-| Missing-name probe | 78 us | 2.36 ms | 16.6 ms | 26.4 ms | 121 ms |
-| Churn total wall time | 107.281 s | 152.385 s | 158.943 s | 161.230 s | 755.656 s |
-| Churn 10-20 KiB write | 139.8 KiB/s | 77.3 KiB/s | 51.2 KiB/s | 52.1 KiB/s | 11.5 KiB/s |
-| Churn 20-60 KiB write | 155.7 KiB/s | 97.0 KiB/s | 71.8 KiB/s | 56.9 KiB/s | 11.6 KiB/s |
-| Churn 350 KiB write | 159.3 KiB/s | 113.3 KiB/s | 78.7 KiB/s | 48.4 KiB/s | 7.32 KiB/s |
-| Churn final cold list, 123 files | 18.7 ms | 281 ms | 302 ms | 17.8 ms | 116 ms |
-| Churn cold read 350 KiB total | 4,532 KiB/s | 4,456 KiB/s | 2,380 KiB/s | 3,037 KiB/s | 509.6 KiB/s |
+| Write 16 x 50 KiB | 173.9 KiB/s | 122.4 KiB/s | 90.2 KiB/s | 73.0 KiB/s | 65.8 KiB/s |
+| Read 16 x 50 KiB total | 4,427 KiB/s | 4,378 KiB/s | 2,116 KiB/s | 1,274 KiB/s | 322.3 KiB/s |
+| List 208 files | 33.2 ms | 111 ms | 306 ms | 26.5 ms | 123 ms |
+| Existing-name probe | 163 us | 1.50 ms | 20.0 ms | 12.0 ms | 24.6 ms |
+| Missing-name probe | 78 us | 2.36 ms | 16.6 ms | 26.5 ms | 121 ms |
+| Churn total wall time | 106.457 s | 148.656 s | 125.214 s | 152.325 s | 756.491 s |
+| Churn 10-20 KiB write | 139.4 KiB/s | 79.4 KiB/s | 53.7 KiB/s | 54.8 KiB/s | 14.4 KiB/s |
+| Churn 20-60 KiB write | 160.3 KiB/s | 104.9 KiB/s | 70.8 KiB/s | 62.2 KiB/s | 19.5 KiB/s |
+| Churn 350 KiB write | 108.5 KiB/s | 68.3 KiB/s | 82.5 KiB/s | 55.4 KiB/s | 9.02 KiB/s |
+| Churn final cold list, 105 files | 16.0 ms | 96.9 ms | 173 ms | 13.6 ms | 115 ms |
+| Churn cold read 350 KiB total | 4,508 KiB/s | 4,501 KiB/s | 2,560 KiB/s | 3,193 KiB/s | 828.2 KiB/s |
 
 ## Notes in no particular order
 
