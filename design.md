@@ -584,7 +584,6 @@ struct fffs_sector_footer {
     uint32_t serial;   // monotonic sector allocation/write serial
     uint8_t type;      // mixed data/metadata, directory, state, reserved
     uint8_t flags;     // valid/tombstone/reserved policy bits
-    uint16_t reserved; // future CRC, footer size, or format flags
     uint32_t magic;    // sector-level FASTFFS magic, read first when parsing sector MD in reverse
 };
 ```

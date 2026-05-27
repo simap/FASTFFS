@@ -222,7 +222,7 @@ test-crash-sweep: $(BUILD_DIR)/fffs_crash_sweep
 	./$(BUILD_DIR)/fffs_crash_sweep
 
 test-api-crash-sweep: $(BUILD_DIR)/fffs_api_crash_sweep
-	./$(BUILD_DIR)/fffs_api_crash_sweep 0xa11ce000 8 10000 256
+	./$(BUILD_DIR)/fffs_api_crash_sweep -s 0x46464653 -n 1 -t 50 -w 2 -j 1
 
 test-sanitize:
 	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test
