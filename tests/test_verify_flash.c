@@ -67,9 +67,96 @@ static void inject_next(struct ffsv_flash *flash, enum ffsv_op_type op,
     });
 }
 
+static void inject_next_write_mode(struct ffsv_flash *flash,
+        enum ffsv_op_type op, enum ffsv_failure_phase phase,
+        enum ffsv_failure_write_mode write_mode, size_t partial_bytes,
+        uint32_t seed) {
+    ffsv_flash_set_failure(flash, &(struct ffsv_failure_injection){
+        .enabled = true,
+        .sequence = ffsv_flash_next_sequence(flash),
+        .op_mask = UINT32_C(1) << op,
+        .phase = phase,
+        .write_mode = write_mode,
+        .status = FFSV_ERR_INJECTED,
+        .partial_bytes = partial_bytes,
+        .seed = seed,
+    });
+}
+
 static int new_flash(struct ffsv_flash **flash) {
     struct ffsv_flash_config cfg = test_cfg();
     return ffsv_flash_create(flash, &cfg);
+}
+
+static unsigned popcount8(uint8_t value) {
+    unsigned count = 0;
+    while (value) {
+        count += value & 1u;
+        value >>= 1;
+    }
+    return count;
+}
+
+struct sampler_test_ctx {
+    size_t calls;
+    enum ffsv_op_type expected_type;
+    size_t expected_offset;
+    size_t expected_size;
+    size_t max_upper_bits;
+    size_t overlay_size;
+};
+
+static int verify_program_sample(const struct ffsv_fault_case *fault,
+        void *user) {
+    struct sampler_test_ctx *ctx = user;
+    ASSERT_TRUE(fault != NULL);
+    ASSERT_TRUE(fault->type == ctx->expected_type);
+    ASSERT_TRUE(fault->offset == ctx->expected_offset);
+    ASSERT_TRUE(fault->size == ctx->expected_size);
+    ASSERT_TRUE(fault->permutation == ctx->calls);
+    ASSERT_TRUE(fault->sampled_bits == ctx->max_upper_bits);
+    ASSERT_TRUE(fault->branch != NULL);
+    ASSERT_TRUE(fault->view.overlay == NULL);
+    ASSERT_TRUE(fault->view.overlay_size == 0);
+
+    size_t upper_ones = 0;
+    for (size_t i = 0; i < ctx->overlay_size; i++) {
+        uint8_t value = ffsv_image_view_byte(&fault->view,
+                ctx->expected_offset + i);
+        ASSERT_TRUE((value & 0x0f) == 0x0f);
+        upper_ones += popcount8((uint8_t)(value & 0xf0));
+    }
+    ASSERT_TRUE(upper_ones <= ctx->max_upper_bits);
+    ASSERT_TRUE(ffsv_image_view_byte(&fault->view,
+                ctx->expected_offset + ctx->overlay_size) == 0xff);
+    ctx->calls += 1;
+    return FFSV_OK;
+}
+
+static int verify_erase_sample(const struct ffsv_fault_case *fault,
+        void *user) {
+    struct sampler_test_ctx *ctx = user;
+    ASSERT_TRUE(fault != NULL);
+    ASSERT_TRUE(fault->type == FFSV_OP_ERASE);
+    ASSERT_TRUE(fault->offset == ctx->expected_offset);
+    ASSERT_TRUE(fault->size == ctx->expected_size);
+    ASSERT_TRUE(fault->permutation == ctx->calls);
+    ASSERT_TRUE(fault->branch != NULL);
+    ASSERT_TRUE(fault->view.overlay == NULL);
+    ASSERT_TRUE(fault->view.overlay_size == 0);
+
+    bool any_zero = false;
+    bool any_one = false;
+    for (size_t i = 0; i < ctx->expected_size; i++) {
+        uint8_t value = ffsv_image_view_byte(&fault->view,
+                ctx->expected_offset + i);
+        any_zero = any_zero || value != 0xff;
+        any_one = any_one || value != 0x00;
+    }
+    ASSERT_TRUE(any_zero);
+    ASSERT_TRUE(any_one);
+    ctx->calls += 1;
+    return FFSV_OK;
 }
 
 static int test_nor_semantics_and_wear(void) {
@@ -186,6 +273,65 @@ static int test_failure_matrix_erase_commit_and_corrupt(void) {
     return 0;
 }
 
+static int test_random_clear_middle_program(void) {
+    struct ffsv_flash *flash_a = NULL;
+    struct ffsv_flash *flash_b = NULL;
+    struct ffsv_flash *flash_c = NULL;
+    uint8_t data[512];
+    memset(data, 0x0f, sizeof(data));
+
+    ASSERT_OK(new_flash(&flash_a));
+    ASSERT_OK(new_flash(&flash_b));
+    ASSERT_OK(new_flash(&flash_c));
+
+    inject_next_write_mode(flash_a, FFSV_OP_PROGRAM, FFSV_FAIL_MIDDLE,
+            FFSV_FAIL_WRITE_RANDOM_CLEAR, sizeof(data), 0x12345678);
+    ASSERT_EQ_INT(FFSV_ERR_INJECTED,
+            ffsv_flash_program(flash_a, 128, data, sizeof(data),
+                FFSV_CALLSITE));
+
+    inject_next_write_mode(flash_b, FFSV_OP_PROGRAM, FFSV_FAIL_MIDDLE,
+            FFSV_FAIL_WRITE_RANDOM_CLEAR, sizeof(data), 0x12345678);
+    ASSERT_EQ_INT(FFSV_ERR_INJECTED,
+            ffsv_flash_program(flash_b, 128, data, sizeof(data),
+                FFSV_CALLSITE));
+
+    inject_next_write_mode(flash_c, FFSV_OP_PROGRAM, FFSV_FAIL_MIDDLE,
+            FFSV_FAIL_WRITE_RANDOM_CLEAR, sizeof(data), 0x87654321);
+    ASSERT_EQ_INT(FFSV_ERR_INJECTED,
+            ffsv_flash_program(flash_c, 128, data, sizeof(data),
+                FFSV_CALLSITE));
+
+    ASSERT_TRUE(memcmp(ffsv_flash_image(flash_a) + 128,
+                ffsv_flash_image(flash_b) + 128, 128) == 0);
+    ASSERT_TRUE(memcmp(ffsv_flash_image(flash_a) + 128,
+                ffsv_flash_image(flash_c) + 128, 128) != 0);
+    ASSERT_TRUE(memcmp(ffsv_flash_image(flash_a) + 128, data, 128) != 0);
+    ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash_a, 256,
+                sizeof(data) - 128));
+
+    bool any_changed = false;
+    bool any_skipped = false;
+    for (size_t i = 0; i < 128; i++) {
+        uint8_t value = ffsv_flash_image_byte(flash_a, 128 + i);
+        ASSERT_TRUE((value & 0x0f) == 0x0f);
+        any_changed = any_changed || value != 0xff;
+        any_skipped = any_skipped || value != 0x0f;
+    }
+    ASSERT_TRUE(any_changed);
+    ASSERT_TRUE(any_skipped);
+
+    size_t count = 0;
+    const struct ffsv_op_record *log = ffsv_flash_log(flash_a, &count);
+    ASSERT_TRUE(count == 1);
+    ASSERT_TRUE(log[0].committed_bytes == 128);
+
+    ffsv_flash_destroy(flash_c);
+    ffsv_flash_destroy(flash_b);
+    ffsv_flash_destroy(flash_a);
+    return 0;
+}
+
 static int test_drop_staged_before_after(void) {
     const uint8_t data[4] = {0, 1, 2, 3};
     struct ffsv_flash *flash = NULL;
@@ -207,6 +353,62 @@ static int test_drop_staged_before_after(void) {
             ffsv_flash_drop_staged(flash, FFSV_CALLSITE));
     ASSERT_EQ_INT(FFSV_ERR_NO_STAGED_MUTATION,
             ffsv_flash_commit_staged(flash, FFSV_CALLSITE));
+
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_fault_sampler_program_and_erase(void) {
+    struct ffsv_flash *flash = NULL;
+    uint8_t data[512];
+    memset(data, 0x0f, sizeof(data));
+    ASSERT_OK(new_flash(&flash));
+
+    struct sampler_test_ctx program_ctx = {
+        .expected_type = FFSV_OP_PROGRAM,
+        .expected_offset = 128,
+        .expected_size = sizeof(data),
+        .max_upper_bits = 8,
+        .overlay_size = 128,
+    };
+    ffsv_flash_set_fault_sampler(flash, &(struct ffsv_fault_sampler){
+        .enabled = true,
+        .op_mask = UINT32_C(1) << FFSV_OP_PROGRAM,
+        .seed = 0x1234abcd,
+        .permutations_per_op = 3,
+        .max_bits_per_permutation = program_ctx.max_upper_bits,
+        .program_page_size = 256,
+        .verify = verify_program_sample,
+        .user = &program_ctx,
+    });
+    ASSERT_OK(ffsv_flash_program(flash, program_ctx.expected_offset, data,
+                sizeof(data), FFSV_CALLSITE));
+    ASSERT_TRUE(program_ctx.calls == 3);
+    ASSERT_TRUE(memcmp(ffsv_flash_image(flash) + program_ctx.expected_offset,
+                data, sizeof(data)) == 0);
+    ffsv_flash_clear_fault_sampler(flash);
+
+    uint8_t zeros[4096] = {0};
+    ASSERT_OK(ffsv_flash_program(flash, 4096, zeros, sizeof(zeros),
+                FFSV_CALLSITE));
+    struct sampler_test_ctx erase_ctx = {
+        .expected_type = FFSV_OP_ERASE,
+        .expected_offset = 4096,
+        .expected_size = 4096,
+    };
+    ffsv_flash_set_fault_sampler(flash, &(struct ffsv_fault_sampler){
+        .enabled = true,
+        .op_mask = UINT32_C(1) << FFSV_OP_ERASE,
+        .seed = 0x5678abcd,
+        .permutations_per_op = 2,
+        .verify = verify_erase_sample,
+        .user = &erase_ctx,
+    });
+    ASSERT_OK(ffsv_flash_erase(flash, erase_ctx.expected_offset,
+                erase_ctx.expected_size, FFSV_CALLSITE));
+    ASSERT_TRUE(erase_ctx.calls == 2);
+    ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash, erase_ctx.expected_offset,
+                erase_ctx.expected_size));
 
     ffsv_flash_destroy(flash);
     return 0;
@@ -345,7 +547,9 @@ int main(void) {
     failures += test_nor_semantics_and_wear();
     failures += test_failure_matrix_program();
     failures += test_failure_matrix_erase_commit_and_corrupt();
+    failures += test_random_clear_middle_program();
     failures += test_drop_staged_before_after();
+    failures += test_fault_sampler_program_and_erase();
     failures += test_snapshot_reopen_and_image_load();
     failures += test_cross_sector_mutations_and_counts();
     failures += test_log_filter_validation_and_dumps();

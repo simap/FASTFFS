@@ -66,12 +66,11 @@ static void remove_bucket_at(struct fffs *fs, size_t remove_idx) {
     while (table[idx].slot != 0) {
         uint16_t slot = table[idx].slot;
         size_t home = bucket_for(fs, slot);
-        if (probe_distance(mask, home, idx) == 0) {
-            break;
+        if (probe_distance(mask, home, hole) <
+                probe_distance(mask, home, idx)) {
+            table[hole] = table[idx];
+            hole = idx;
         }
-
-        table[hole] = table[idx];
-        hole = idx;
         idx = (idx + 1) & mask;
     }
 

@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define FFSV_NOR_PROGRAM_PAGE_SIZE 256u
+
 struct staged_mutation {
     bool active;
     size_t offset;
@@ -30,7 +32,16 @@ struct ffsv_flash {
     size_t log_count;
     size_t log_capacity;
     struct staged_mutation staged;
+    struct ffsv_fault_sampler sampler;
 };
+
+static size_t log_limit(const struct ffsv_flash *flash) {
+    return flash->cfg.max_log_entries ? flash->cfg.max_log_entries : 4096;
+}
+
+static size_t initial_log_capacity(size_t limit) {
+    return limit < 128 ? limit : 128;
+}
 
 static int checked_config(const struct ffsv_flash_config *cfg) {
     if (!cfg || cfg->total_size == 0 || cfg->sector_size == 0 ||
@@ -187,7 +198,26 @@ static struct ffsv_op_record *begin_op(struct ffsv_flash *flash,
     add_sector_counts(flash, type, offset, size);
 
     if (flash->log_count >= flash->log_capacity) {
-        return NULL;
+        size_t limit = log_limit(flash);
+        if (flash->log_capacity >= limit) {
+            return NULL;
+        }
+        size_t next_capacity = flash->log_capacity ?
+            flash->log_capacity * 2u : initial_log_capacity(limit);
+        if (next_capacity < flash->log_capacity ||
+                next_capacity > limit) {
+            next_capacity = limit;
+        }
+        if (next_capacity > SIZE_MAX / sizeof(*flash->log)) {
+            return NULL;
+        }
+        struct ffsv_op_record *next_log = realloc(flash->log,
+                next_capacity * sizeof(*next_log));
+        if (!next_log) {
+            return NULL;
+        }
+        flash->log = next_log;
+        flash->log_capacity = next_capacity;
     }
 
     struct ffsv_op_record *rec = &flash->log[flash->log_count++];
@@ -240,6 +270,35 @@ static size_t injected_partial(const struct ffsv_flash *flash, size_t size,
     return partial;
 }
 
+static size_t injected_program_partial(const struct ffsv_flash *flash,
+        size_t offset, size_t size) {
+    size_t partial = injected_partial(flash, size, flash->cfg.program_granule);
+    if (flash->failure.write_mode != FFSV_FAIL_WRITE_RANDOM_CLEAR) {
+        return partial;
+    }
+
+    size_t page_remaining = FFSV_NOR_PROGRAM_PAGE_SIZE -
+        (offset % FFSV_NOR_PROGRAM_PAGE_SIZE);
+    if (partial > page_remaining) {
+        partial = page_remaining;
+    }
+    if (flash->cfg.program_granule > 1) {
+        partial -= partial % flash->cfg.program_granule;
+    }
+    return partial;
+}
+
+static uint32_t failure_seed(const struct ffsv_flash *flash, size_t offset,
+        size_t size) {
+    uint32_t seed = flash->failure.seed ?
+        flash->failure.seed : UINT32_C(0x9e3779b9);
+    seed ^= (uint32_t)flash->failure.sequence;
+    seed ^= (uint32_t)(flash->failure.sequence >> 32);
+    seed ^= (uint32_t)offset * UINT32_C(0x85ebca6b);
+    seed ^= (uint32_t)size * UINT32_C(0xc2b2ae35);
+    return seed;
+}
+
 static int validate_program_transition(const struct ffsv_flash *flash,
         size_t offset, const uint8_t *data, size_t size) {
     (void)flash;
@@ -254,6 +313,9 @@ static int map_lfs_error(int err) {
 }
 
 static void refresh_image_cache(struct ffsv_flash *flash) {
+    if (!flash->image_cache) {
+        return;
+    }
     for (size_t block = 0; block < flash->sector_count; block++) {
         uint8_t *dst = flash->image_cache + block * flash->cfg.sector_size;
         const lfs_emubd_block_t *src = flash->emu.blocks[block];
@@ -315,6 +377,256 @@ static int emu_program_range(struct ffsv_flash *flash, size_t offset,
         size -= n;
     }
     refresh_image_cache(flash);
+    return FFSV_OK;
+}
+
+static int emu_program_random_clear(struct ffsv_flash *flash, size_t offset,
+        const uint8_t *data, size_t size) {
+    size_t data_offset = 0;
+    uint32_t seed = failure_seed(flash, offset, size);
+    while (size > 0) {
+        size_t block = offset / flash->cfg.sector_size;
+        size_t off = offset % flash->cfg.sector_size;
+        size_t n = flash->cfg.sector_size - off;
+        if (n > size) {
+            n = size;
+        }
+
+        int err = lfs_emubd_prog_random_clear(&flash->lfs_cfg,
+                (lfs_block_t)block, (lfs_off_t)off, data + data_offset,
+                (lfs_size_t)n, &(struct lfs_emubd_prog_fault_config){
+                    .seed = seed ^ (uint32_t)data_offset,
+                    .max_bits = 0,
+                }, NULL);
+        if (err) {
+            return map_lfs_error(err);
+        }
+
+        offset += n;
+        data_offset += n;
+        size -= n;
+    }
+    refresh_image_cache(flash);
+    return FFSV_OK;
+}
+
+static int emu_program_injected_middle(struct ffsv_flash *flash,
+        size_t offset, const uint8_t *data, size_t size, size_t *committed) {
+    size_t commit = injected_program_partial(flash, offset, size);
+    *committed = commit;
+    if (commit == 0) {
+        return FFSV_OK;
+    }
+    if (flash->failure.write_mode == FFSV_FAIL_WRITE_RANDOM_CLEAR) {
+        return emu_program_random_clear(flash, offset, data, commit);
+    }
+    return emu_program_range(flash, offset, data, commit);
+}
+
+static bool sampler_matches(const struct ffsv_flash *flash,
+        enum ffsv_op_type type) {
+    return flash->sampler.enabled && flash->sampler.verify &&
+        type < 32 && ((flash->sampler.op_mask & (UINT32_C(1) << type)) != 0);
+}
+
+static uint32_t sampler_seed(const struct ffsv_flash *flash,
+        enum ffsv_op_type type, uint64_t sequence, size_t offset,
+        size_t size, size_t permutation) {
+    uint32_t seed = flash->sampler.seed ?
+        flash->sampler.seed : UINT32_C(0x51f15eED);
+    seed ^= (uint32_t)sequence;
+    seed ^= (uint32_t)(sequence >> 32);
+    seed ^= (uint32_t)type * UINT32_C(0x9e3779b9);
+    seed ^= (uint32_t)offset * UINT32_C(0x85ebca6b);
+    seed ^= (uint32_t)size * UINT32_C(0xc2b2ae35);
+    seed ^= (uint32_t)permutation * UINT32_C(0x27d4eb2d);
+    return seed;
+}
+
+static int emu_branch_create(const struct ffsv_flash *flash,
+        struct ffsv_flash *branch) {
+    *branch = (struct ffsv_flash){0};
+    branch->cfg = flash->cfg;
+    branch->sector_count = flash->sector_count;
+    branch->log_capacity = initial_log_capacity(log_limit(flash));
+    branch->sector_counts = calloc(branch->sector_count,
+            sizeof(*branch->sector_counts));
+    branch->log = malloc(branch->log_capacity * sizeof(*branch->log));
+    if (!branch->sector_counts || !branch->log) {
+        free(branch->log);
+        free(branch->sector_counts);
+        *branch = (struct ffsv_flash){0};
+        return FFSV_ERR_NOMEM;
+    }
+    memcpy(branch->counts, flash->counts, sizeof(branch->counts));
+    memcpy(branch->sector_counts, flash->sector_counts,
+            branch->sector_count * sizeof(*branch->sector_counts));
+    branch->next_sequence = flash->next_sequence;
+    branch->time_ns = flash->time_ns;
+
+    branch->lfs_cfg = flash->lfs_cfg;
+    branch->lfs_cfg.context = &branch->emu;
+    branch->emu_cfg = flash->emu_cfg;
+
+    int err = lfs_emubd_copy(&flash->lfs_cfg, &branch->emu);
+    if (err) {
+        free(branch->sector_counts);
+        free(branch->log);
+        *branch = (struct ffsv_flash){0};
+        return map_lfs_error(err);
+    }
+    branch->emu.cfg = &branch->emu_cfg;
+    // Temporary branches must not mutate a shared disk mirror.
+    if (branch->emu.disk) {
+        branch->emu.disk->rc -= 1;
+        branch->emu.disk = NULL;
+    }
+    return FFSV_OK;
+}
+
+static void emu_branch_destroy(struct ffsv_flash *branch) {
+    if (!branch) {
+        return;
+    }
+    if (branch->emu.blocks) {
+        lfs_emubd_destroy(&branch->lfs_cfg);
+    }
+    free(branch->log);
+    free(branch->sector_counts);
+    free(branch->image_cache);
+    *branch = (struct ffsv_flash){0};
+}
+
+static int run_fault_case(struct ffsv_flash *flash,
+        struct ffsv_flash *branch, enum ffsv_op_type type,
+        uint64_t sequence, size_t offset, size_t size, size_t permutation,
+        uint32_t seed, size_t sampled_bits) {
+    struct ffsv_fault_case fault = {
+        .type = type,
+        .sequence = sequence,
+        .offset = offset,
+        .size = size,
+        .permutation = permutation,
+        .seed = seed,
+        .sampled_bits = sampled_bits,
+        .branch = branch,
+        .view = {
+            .base = ffsv_flash_image(branch),
+            .size = flash->cfg.total_size,
+        },
+    };
+    return flash->sampler.verify(&fault, flash->sampler.user);
+}
+
+static int apply_program_fault_branch(struct ffsv_flash *branch,
+        enum ffsv_op_type type, uint64_t sequence, size_t offset,
+        const uint8_t *data, size_t size, size_t page_size,
+        size_t max_bits, uint32_t seed,
+        size_t *sampled_bits_out) {
+    size_t page_remaining = page_size - (offset % page_size);
+    size_t fault_size = size < page_remaining ? size : page_remaining;
+    size_t sector_remaining = branch->cfg.sector_size -
+        (offset % branch->cfg.sector_size);
+    if (fault_size > sector_remaining) {
+        fault_size = sector_remaining;
+    }
+    if (branch->cfg.program_granule > 1) {
+        fault_size -= fault_size % branch->cfg.program_granule;
+    }
+    if (fault_size == 0) {
+        *sampled_bits_out = 0;
+        return FFSV_OK;
+    }
+
+    (void)type;
+    (void)sequence;
+    size_t block = offset / branch->cfg.sector_size;
+    size_t off = offset % branch->cfg.sector_size;
+    lfs_size_t sampled = 0;
+    int err = lfs_emubd_prog_random_clear(&branch->lfs_cfg,
+            (lfs_block_t)block, (lfs_off_t)off, data, (lfs_size_t)fault_size,
+            &(struct lfs_emubd_prog_fault_config){
+                .seed = seed,
+                .max_bits = (lfs_size_t)max_bits,
+            }, &sampled);
+    if (err) {
+        return map_lfs_error(err);
+    }
+    refresh_image_cache(branch);
+    *sampled_bits_out = sampled;
+    return FFSV_OK;
+}
+
+static int apply_erase_fault_branch(struct ffsv_flash *branch,
+        size_t offset, size_t size, uint32_t seed) {
+    size_t end = offset + size;
+    for (size_t pos = offset; pos < end; pos += branch->cfg.sector_size) {
+        int err = lfs_emubd_erase_random(&branch->lfs_cfg,
+                (lfs_block_t)(pos / branch->cfg.sector_size),
+                seed ^ (uint32_t)(pos / branch->cfg.sector_size));
+        if (err) {
+            return map_lfs_error(err);
+        }
+    }
+    refresh_image_cache(branch);
+    return FFSV_OK;
+}
+
+static int run_program_fault_sampler(struct ffsv_flash *flash,
+        enum ffsv_op_type type, uint64_t sequence, size_t offset,
+        const uint8_t *data, size_t size) {
+    if (!sampler_matches(flash, type)) {
+        return FFSV_OK;
+    }
+    size_t page_size = flash->sampler.program_page_size ?
+        flash->sampler.program_page_size : FFSV_NOR_PROGRAM_PAGE_SIZE;
+    for (size_t p = 0; p < flash->sampler.permutations_per_op; p++) {
+        struct ffsv_flash branch;
+        int err = emu_branch_create(flash, &branch);
+        if (err) {
+            return err;
+        }
+        uint32_t seed = sampler_seed(flash, type, sequence,
+                offset, size, p);
+        size_t sampled_bits = 0;
+        err = apply_program_fault_branch(&branch, type, sequence, offset,
+                data, size, page_size, flash->sampler.max_bits_per_permutation,
+                seed, &sampled_bits);
+        if (!err) {
+            err = run_fault_case(flash, &branch, type, sequence, offset,
+                    size, p, seed, sampled_bits);
+        }
+        emu_branch_destroy(&branch);
+        if (err) {
+            return err;
+        }
+    }
+    return FFSV_OK;
+}
+
+static int run_erase_fault_sampler(struct ffsv_flash *flash,
+        uint64_t sequence, size_t offset, size_t size) {
+    if (!sampler_matches(flash, FFSV_OP_ERASE)) {
+        return FFSV_OK;
+    }
+    for (size_t p = 0; p < flash->sampler.permutations_per_op; p++) {
+        struct ffsv_flash branch;
+        int err = emu_branch_create(flash, &branch);
+        if (err) {
+            return err;
+        }
+        uint32_t seed = sampler_seed(flash, FFSV_OP_ERASE, sequence,
+                offset, size, p);
+        err = apply_erase_fault_branch(&branch, offset, size, seed);
+        if (!err) {
+            err = run_fault_case(flash, &branch, FFSV_OP_ERASE, sequence,
+                    offset, size, p, seed, size * 8u);
+        }
+        emu_branch_destroy(&branch);
+        if (err) {
+            return err;
+        }
+    }
     return FFSV_OK;
 }
 
@@ -390,11 +702,12 @@ int ffsv_flash_create(struct ffsv_flash **out,
 
     flash->cfg = *cfg;
     flash->sector_count = cfg->total_size / cfg->sector_size;
-    flash->log_capacity = cfg->max_log_entries ? cfg->max_log_entries : 4096;
+    flash->cfg.max_log_entries = log_limit(flash);
+    flash->log_capacity = initial_log_capacity(flash->cfg.max_log_entries);
     flash->image_cache = malloc(cfg->total_size);
     flash->sector_counts = calloc(flash->sector_count,
             sizeof(*flash->sector_counts));
-    flash->log = calloc(flash->log_capacity, sizeof(*flash->log));
+    flash->log = malloc(flash->log_capacity * sizeof(*flash->log));
     if (!flash->image_cache || !flash->sector_counts || !flash->log) {
         ffsv_flash_destroy(flash);
         return FFSV_ERR_NOMEM;
@@ -441,6 +754,24 @@ int ffsv_flash_create_with_preset(struct ffsv_flash **out,
         return err;
     }
     return ffsv_flash_create(out, &cfg);
+}
+
+int ffsv_flash_cow_clone(struct ffsv_flash **out,
+        const struct ffsv_flash *flash) {
+    if (!out || !flash) {
+        return FFSV_ERR_INVALID;
+    }
+    struct ffsv_flash *clone = calloc(1, sizeof(*clone));
+    if (!clone) {
+        return FFSV_ERR_NOMEM;
+    }
+    int err = emu_branch_create(flash, clone);
+    if (err) {
+        free(clone);
+        return err;
+    }
+    *out = clone;
+    return FFSV_OK;
 }
 
 void ffsv_flash_destroy(struct ffsv_flash *flash) {
@@ -561,17 +892,32 @@ int ffsv_flash_program(struct ffsv_flash *flash, size_t offset,
     size_t commit = size;
     int result = FFSV_OK;
     if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
-        commit = injected_partial(flash, size, flash->cfg.program_granule);
         result = injected_status(flash);
     } else if (inject && flash->failure.phase == FFSV_FAIL_AFTER) {
         result = injected_status(flash);
     }
 
+    if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
+        commit = injected_program_partial(flash, offset, size);
+    }
     err = validate_program_transition(flash, offset, buffer, commit);
     if (err) {
         return finish_op(flash, rec, FFSV_OP_PROGRAM, size, err, 0);
     }
-    if (commit > 0) {
+    if (!inject) {
+        err = run_program_fault_sampler(flash, FFSV_OP_PROGRAM,
+                rec ? rec->sequence : flash->next_sequence - 1,
+                offset, buffer, size);
+        if (err) {
+            return finish_op(flash, rec, FFSV_OP_PROGRAM, size, err, 0);
+        }
+    }
+    if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
+        err = emu_program_injected_middle(flash, offset, buffer, size, &commit);
+        if (err) {
+            return finish_op(flash, rec, FFSV_OP_PROGRAM, size, err, 0);
+        }
+    } else if (commit > 0) {
         err = emu_program_range(flash, offset, buffer, commit);
         if (err) {
             return finish_op(flash, rec, FFSV_OP_PROGRAM, size, err, 0);
@@ -610,6 +956,13 @@ int ffsv_flash_erase(struct ffsv_flash *flash, size_t offset,
         result = injected_status(flash);
     }
 
+    if (!inject) {
+        err = run_erase_fault_sampler(flash, rec ? rec->sequence :
+                flash->next_sequence - 1, offset, size);
+        if (err) {
+            return finish_op(flash, rec, FFSV_OP_ERASE, size, err, 0);
+        }
+    }
     if (commit == size) {
         for (size_t pos = offset; pos < offset + size;
                 pos += flash->cfg.sector_size) {
@@ -696,12 +1049,26 @@ int ffsv_flash_commit_staged(struct ffsv_flash *flash,
     size_t commit = size;
     int result = FFSV_OK;
     if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
-        commit = injected_partial(flash, size, flash->cfg.program_granule);
         result = injected_status(flash);
     } else if (inject && flash->failure.phase == FFSV_FAIL_AFTER) {
         result = injected_status(flash);
     }
-    if (commit > 0) {
+    if (inject && flash->failure.phase == FFSV_FAIL_MIDDLE) {
+        int err = emu_program_injected_middle(flash, offset,
+                flash->staged.data, size, &commit);
+        if (err != FFSV_OK) {
+            return finish_op(flash, rec, FFSV_OP_COMMIT_STAGED, size, err, 0);
+        }
+    } else if (commit > 0) {
+        if (!inject) {
+            int err = run_program_fault_sampler(flash, FFSV_OP_COMMIT_STAGED,
+                    rec ? rec->sequence : flash->next_sequence - 1,
+                    offset, flash->staged.data, size);
+            if (err != FFSV_OK) {
+                return finish_op(flash, rec, FFSV_OP_COMMIT_STAGED, size,
+                        err, 0);
+            }
+        }
         int err = emu_program_range(flash, offset, flash->staged.data, commit);
         if (err != FFSV_OK) {
             return finish_op(flash, rec, FFSV_OP_COMMIT_STAGED, size, err, 0);
@@ -862,9 +1229,28 @@ void ffsv_flash_set_failure(struct ffsv_flash *flash,
     }
 }
 
+void ffsv_flash_clear_fault_sampler(struct ffsv_flash *flash) {
+    if (flash) {
+        flash->sampler = (struct ffsv_fault_sampler){0};
+    }
+}
+
+void ffsv_flash_set_fault_sampler(struct ffsv_flash *flash,
+        const struct ffsv_fault_sampler *sampler) {
+    if (flash && sampler) {
+        flash->sampler = *sampler;
+    }
+}
+
 const uint8_t *ffsv_flash_image(struct ffsv_flash *flash) {
     if (!flash) {
         return NULL;
+    }
+    if (!flash->image_cache) {
+        flash->image_cache = malloc(flash->cfg.total_size);
+        if (!flash->image_cache) {
+            return NULL;
+        }
     }
     refresh_image_cache(flash);
     return flash->image_cache;
@@ -963,6 +1349,33 @@ uint64_t ffsv_flash_count_matching(const struct ffsv_flash *flash,
         matches += 1;
     }
     return matches;
+}
+
+int ffsv_image_view_read(const struct ffsv_image_view *view, size_t offset,
+        void *buffer, size_t size) {
+    if (!view || (!buffer && size) || offset > view->size ||
+            size > view->size - offset || (!view->base && view->size)) {
+        return FFSV_ERR_INVALID;
+    }
+
+    uint8_t *out = buffer;
+    for (size_t i = 0; i < size; i++) {
+        size_t pos = offset + i;
+        if (view->overlay && pos >= view->overlay_offset &&
+                pos - view->overlay_offset < view->overlay_size) {
+            out[i] = view->overlay[pos - view->overlay_offset];
+        } else {
+            out[i] = view->base[pos];
+        }
+    }
+    return FFSV_OK;
+}
+
+uint8_t ffsv_image_view_byte(const struct ffsv_image_view *view,
+        size_t offset) {
+    uint8_t value = 0;
+    (void)ffsv_image_view_read(view, offset, &value, 1);
+    return value;
 }
 
 int ffsv_flash_dump_image(struct ffsv_flash *flash, const char *path) {

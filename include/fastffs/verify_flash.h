@@ -47,6 +47,11 @@ enum ffsv_failure_phase {
     FFSV_FAIL_AFTER = 2,
 };
 
+enum ffsv_failure_write_mode {
+    FFSV_FAIL_WRITE_PREFIX = 0,
+    FFSV_FAIL_WRITE_RANDOM_CLEAR = 1,
+};
+
 struct ffsv_timing {
     uint64_t read_fixed_ns;
     uint64_t read_per_byte_ns;
@@ -74,8 +79,10 @@ struct ffsv_failure_injection {
     uint64_t sequence;
     uint32_t op_mask;
     enum ffsv_failure_phase phase;
+    enum ffsv_failure_write_mode write_mode;
     int status;
     size_t partial_bytes;
+    uint32_t seed;
 };
 
 struct ffsv_op_record {
@@ -118,6 +125,40 @@ struct ffsv_flash_snapshot {
     uint64_t time_ns;
 };
 
+struct ffsv_image_view {
+    const uint8_t *base;
+    size_t size;
+    size_t overlay_offset;
+    const uint8_t *overlay;
+    size_t overlay_size;
+};
+
+struct ffsv_fault_case {
+    enum ffsv_op_type type;
+    uint64_t sequence;
+    size_t offset;
+    size_t size;
+    size_t permutation;
+    uint32_t seed;
+    size_t sampled_bits;
+    struct ffsv_flash *branch;
+    struct ffsv_image_view view;
+};
+
+typedef int (*ffsv_fault_verify_fn)(const struct ffsv_fault_case *fault,
+        void *user);
+
+struct ffsv_fault_sampler {
+    bool enabled;
+    uint32_t op_mask;
+    uint32_t seed;
+    size_t permutations_per_op;
+    size_t max_bits_per_permutation;
+    size_t program_page_size;
+    ffsv_fault_verify_fn verify;
+    void *user;
+};
+
 #define FFSV_STRINGIFY_(x) #x
 #define FFSV_STRINGIFY(x) FFSV_STRINGIFY_(x)
 #define FFSV_CALLSITE __FILE__ ":" FFSV_STRINGIFY(__LINE__)
@@ -126,6 +167,8 @@ int ffsv_flash_create(struct ffsv_flash **out,
         const struct ffsv_flash_config *cfg);
 int ffsv_flash_create_with_preset(struct ffsv_flash **out,
         enum ffsv_flash_preset preset, size_t total_size);
+int ffsv_flash_cow_clone(struct ffsv_flash **out,
+        const struct ffsv_flash *flash);
 void ffsv_flash_destroy(struct ffsv_flash *flash);
 int ffsv_flash_config_preset(struct ffsv_flash_config *cfg,
         enum ffsv_flash_preset preset, size_t total_size);
@@ -160,6 +203,9 @@ int ffsv_flash_reopen_from_snapshot(struct ffsv_flash **out,
 void ffsv_flash_clear_failure(struct ffsv_flash *flash);
 void ffsv_flash_set_failure(struct ffsv_flash *flash,
         const struct ffsv_failure_injection *failure);
+void ffsv_flash_clear_fault_sampler(struct ffsv_flash *flash);
+void ffsv_flash_set_fault_sampler(struct ffsv_flash *flash,
+        const struct ffsv_fault_sampler *sampler);
 
 const uint8_t *ffsv_flash_image(struct ffsv_flash *flash);
 const struct ffsv_flash_config *ffsv_flash_config(
@@ -182,6 +228,10 @@ const struct ffsv_sector_counts *ffsv_flash_sector_counts(
 uint64_t ffsv_flash_count_matching(const struct ffsv_flash *flash,
         enum ffsv_op_type type, size_t size, size_t sector,
         const char *call_site);
+int ffsv_image_view_read(const struct ffsv_image_view *view, size_t offset,
+        void *buffer, size_t size);
+uint8_t ffsv_image_view_byte(const struct ffsv_image_view *view,
+        size_t offset);
 
 int ffsv_flash_dump_image(struct ffsv_flash *flash, const char *path);
 int ffsv_flash_load_image(struct ffsv_flash *flash,

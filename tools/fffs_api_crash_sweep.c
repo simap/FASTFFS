@@ -5,6 +5,7 @@
 #include "churn_model.h"
 #include "../src/fffs_internal.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -26,6 +27,11 @@ enum {
     API_SWEEP_INDEX_SECTORS = 3,
     API_SWEEP_FILE_COUNT = BENCH_CHURN_MAX_FILES,
     API_SWEEP_DEFAULT_MAX_STEPS = 262144,
+    API_SWEEP_DEFAULT_SEED = UINT32_C(0x46464653),
+    API_SWEEP_DEFAULT_RUNS = 1,
+    API_SWEEP_DEFAULT_WRITE_MULTIPLE = 2,
+    API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES = 1,
+    API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS = 2,
     API_SWEEP_MAX_CONTENT = (API_SWEEP_SECTOR_SIZE * API_SWEEP_SECTOR_COUNT *
             40u) / 100u,
     API_SWEEP_PROGRAM_GRANULE = 4,
@@ -33,6 +39,8 @@ enum {
     API_SWEEP_MAX_CRASH_POINTS = 262144,
     API_SWEEP_CHURN_GC_STEPS = 8,
     API_SWEEP_PROGRESS_INTERVAL_SEC = 10,
+    API_SWEEP_PROGRESS_STEP_INTERVAL = 128,
+    API_SWEEP_PROGRESS_SAMPLE_INTERVAL = 2048,
     API_SWEEP_DEFAULT_THREADS = 8,
     API_SWEEP_MAX_THREADS = 64,
 };
@@ -87,6 +95,7 @@ struct crash_point {
 
 struct api_stats {
     uint64_t crash_points;
+    uint64_t sampled_faults;
     uint64_t random_workloads;
     uint64_t invariant_failures;
     uint64_t churn_writes[BENCH_CHURN_CLASS_COUNT];
@@ -94,6 +103,24 @@ struct api_stats {
     uint64_t generated_write_bytes;
     uint64_t generated_steps;
     uint64_t truncated_workloads;
+};
+
+struct api_sampler_ctx {
+    uint64_t allowed_a;
+    uint64_t allowed_b;
+    const struct api_model *before;
+    const struct api_model *after;
+    struct api_stats *stats;
+    FILE *log;
+    const char *log_path;
+    struct ffsv_flash *base_flash;
+    struct fffs *base_fs;
+    uint32_t workload_id;
+    size_t step_index;
+    size_t step_count;
+    uint8_t step_type;
+    struct dispatcher *dispatcher;
+    size_t thread_id;
 };
 
 struct wear_stats {
@@ -120,9 +147,9 @@ struct worker_status {
     bool done;
     uint32_t seed;
     size_t steps;
-    size_t crash_index;
-    size_t crash_count;
+    size_t step_index;
     uint64_t crash_points;
+    uint64_t sampled_faults;
     uint64_t failures;
     int err;
 };
@@ -132,10 +159,12 @@ struct dispatcher {
     uint32_t seed_start;
     size_t seed_count;
     size_t next_seed_index;
-    size_t tx_per_seed;
+    size_t transaction_limit;
     size_t target_write_multiple;
     size_t max_steps;
     size_t thread_count;
+    size_t sampled_permutations;
+    size_t sampled_max_bits;
     uint64_t next_report_ns;
     int err;
     struct worker_status *statuses;
@@ -175,7 +204,20 @@ struct mount_storage {
 #endif
 };
 
+struct api_runtime_state {
+    struct ffsv_flash *flash;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file open_file;
+    struct mount_storage storage;
+    struct open_tx tx;
+    bool mounted;
+};
+
 static void format_count(char *out, size_t out_size, uint64_t value);
+static void publish_worker_progress(struct dispatcher *dispatcher,
+        size_t thread_id, uint32_t seed, size_t step_index,
+        size_t step_count, const struct api_stats *stats, int err);
 
 static const char *cache_mode_name(void) {
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_NONE
@@ -282,6 +324,79 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
     });
 }
 
+static int runtime_clone(struct api_runtime_state *dst,
+        const struct ffsv_flash *flash, const struct fffs *fs,
+        const struct fffs_file *open_file, const struct open_tx *tx) {
+    memset(dst, 0, sizeof(*dst));
+    int err = mount_storage_init(&dst->storage);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    err = ffsv_flash_cow_clone(&dst->flash, flash);
+    if (err != FFSV_OK) {
+        mount_storage_destroy(&dst->storage);
+        return FFFS_ERR_IO;
+    }
+    err = fffs_host_backend_from_verify_flash(&dst->backend, dst->flash);
+    if (err != FFFS_OK) {
+        ffsv_flash_destroy(dst->flash);
+        mount_storage_destroy(&dst->storage);
+        return err;
+    }
+
+    dst->fs = *fs;
+    dst->fs.backend = dst->backend;
+    dst->fs.index_cache = dst->storage.index_cache;
+    memcpy(dst->storage.index_cache, fs->index_cache,
+            API_SWEEP_INDEX_CACHE_SIZE);
+#if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
+    dst->fs.index_heads = dst->storage.index_cache;
+#else
+    dst->fs.index_heads = NULL;
+#endif
+    dst->fs.scratch = dst->storage.scratch;
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    memcpy(dst->storage.alloc_map, fs->alloc_map,
+            sizeof(dst->storage.alloc_map));
+    dst->fs.alloc_map = dst->storage.alloc_map;
+#endif
+
+    dst->tx = *tx;
+    dst->tx.data = malloc(API_SWEEP_MAX_CONTENT);
+    if (!dst->tx.data) {
+        ffsv_flash_destroy(dst->flash);
+        mount_storage_destroy(&dst->storage);
+        return FFFS_ERR_NOMEM;
+    }
+    if (tx->data && tx->active) {
+        memcpy(dst->tx.data, tx->data, tx->size);
+    }
+    if (tx->active) {
+        dst->open_file = *open_file;
+        dst->open_file.fs = &dst->fs;
+        dst->open_file.inflight_next = NULL;
+        dst->fs.inflight_writers = dst->open_file.inflight_registered ?
+            &dst->open_file : NULL;
+    } else {
+        dst->fs.inflight_writers = NULL;
+    }
+    dst->mounted = true;
+    return FFFS_OK;
+}
+
+static void runtime_destroy(struct api_runtime_state *state) {
+    if (!state) {
+        return;
+    }
+    if (state->mounted) {
+        fffs_unmount(&state->fs);
+    }
+    ffsv_flash_destroy(state->flash);
+    mount_storage_destroy(&state->storage);
+    free(state->tx.data);
+    *state = (struct api_runtime_state){0};
+}
+
 static int model_file_name_cmp(const void *a, const void *b) {
     const struct model_file * const *fa = a;
     const struct model_file * const *fb = b;
@@ -360,15 +475,244 @@ static int namespace_hash(struct fffs *fs, uint64_t *out_hash) {
     return FFFS_OK;
 }
 
-static int check_image(struct fffs_backend *backend, struct fffs *fs,
-        uint64_t allowed_a, uint64_t allowed_b) {
+static void log_model(FILE *out, const char *label,
+        const struct api_model *model) {
+    if (!out || !model) {
+        return;
+    }
+    fprintf(out, "%s hash=%016llx", label,
+            (unsigned long long)model_hash(model));
+    for (size_t i = 0; i < API_SWEEP_FILE_COUNT; i++) {
+        const struct model_file *file = &model->files[i];
+        if (file->exists) {
+            fprintf(out, " %s(size=%zu,tx=%u,file=%u)", file->name,
+                    file->size, (unsigned)file->tx_id,
+                    (unsigned)file->file_id);
+        }
+    }
+    fprintf(out, "\n");
+}
+
+static void log_namespace(FILE *out, struct fffs *fs) {
+    if (!out || !fs) {
+        return;
+    }
+    struct fffs_stat entries[API_SWEEP_FILE_COUNT + 8];
+    size_t count = 0;
+    int err = fffs_list(fs, entries, sizeof(entries) / sizeof(entries[0]),
+            &count);
+    fprintf(out, "actual list err=%s count=%zu", fffs_status_name(err),
+            count);
+    if (err != FFFS_OK) {
+        fprintf(out, "\n");
+        return;
+    }
+    if (count > sizeof(entries) / sizeof(entries[0])) {
+        fprintf(out, " overflow\n");
+        return;
+    }
+    qsort(entries, count, sizeof(entries[0]), stat_name_cmp);
+    uint64_t actual = 0;
+    err = namespace_hash(fs, &actual);
+    fprintf(out, " hash=%s/%016llx", fffs_status_name(err),
+            (unsigned long long)actual);
+    for (size_t i = 0; i < count; i++) {
+        fprintf(out, " %s(size=%u)", entries[i].name,
+                (unsigned)entries[i].size);
+    }
+    fprintf(out, "\n");
+}
+
+static bool find_op_record(const struct ffsv_flash *flash, uint64_t sequence,
+        struct ffsv_op_record *out) {
+    size_t count = 0;
+    const struct ffsv_op_record *records = ffsv_flash_log(flash, &count);
+    for (size_t i = 0; i < count; i++) {
+        if (records[i].sequence == sequence) {
+            if (out) {
+                *out = records[i];
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static void log_inspect_summary(FILE *out, struct fffs_backend *backend) {
+    struct fffs_inspect_summary summary = {0};
+    int err = fffs_inspect_check(backend, &summary);
+    fprintf(out,
+            "inspect err=%s index=%zu deletes=%zu live=%zu "
+            "live_corrupt=%zu data_corrupt=%zu md_corrupt=%zu "
+            "md_live=%zu md_orphaned=%zu md_tombstoned=%zu\n",
+            fffs_status_name(err), summary.index_corrupt_records,
+            summary.index_deletes, summary.live_entries,
+            summary.live_entries_corrupt, summary.data_sectors_corrupt,
+            summary.md_corrupt, summary.md_live,
+            summary.md_obsolete_orphaned, summary.md_tombstoned);
+}
+
+static void log_failure_image(FILE *out, struct fffs_backend *backend,
+        struct fffs *fs, uint64_t allowed_a, uint64_t allowed_b) {
+    log_inspect_summary(out, backend);
+    if (fs) {
+        uint64_t actual = 0;
+        int hash_err = namespace_hash(fs, &actual);
+        fprintf(out, "allowed=%016llx/%016llx actual=%s/%016llx\n",
+                (unsigned long long)allowed_a,
+                (unsigned long long)allowed_b,
+                fffs_status_name(hash_err), (unsigned long long)actual);
+        log_namespace(out, fs);
+    } else {
+        fprintf(out, "allowed=%016llx/%016llx actual=not-mounted\n",
+                (unsigned long long)allowed_a,
+                (unsigned long long)allowed_b);
+    }
+    (void)fffs_inspect_dump(backend, out);
+}
+
+static void dump_failure_images(FILE *out, const char *log_path,
+        const char *kind, uint32_t workload_id, size_t step_index,
+        uint64_t sequence, size_t permutation, struct ffsv_flash *before,
+        struct ffsv_flash *after) {
+    if (!log_path || !before || !after) {
+        return;
+    }
+
+    char before_path[512];
+    char after_path[512];
+    snprintf(before_path, sizeof(before_path),
+            "%s.%s-%08x-step%zu-seq%llu-perm%zu-before.img",
+            log_path, kind, (unsigned)workload_id, step_index,
+            (unsigned long long)sequence, permutation);
+    snprintf(after_path, sizeof(after_path),
+            "%s.%s-%08x-step%zu-seq%llu-perm%zu-after.img",
+            log_path, kind, (unsigned)workload_id, step_index,
+            (unsigned long long)sequence, permutation);
+
+    int before_err = ffsv_flash_dump_image(before, before_path);
+    int after_err = ffsv_flash_dump_image(after, after_path);
+    if (out) {
+        fprintf(out, "failure images before=%s err=%s after=%s err=%s\n",
+                before_path, fffs_status_name(before_err),
+                after_path, fffs_status_name(after_err));
+    }
+}
+
+struct original_index_diag_ctx {
+    FILE *out;
+    uint16_t sector;
+};
+
+static const char *md_lifecycle_name(enum fffs_md_record_lifecycle lifecycle) {
+    switch (lifecycle) {
+    case FFFS_MD_RECORD_LIVE:
+        return "live";
+    case FFFS_MD_RECORD_TOMBSTONED:
+        return "tombstoned";
+    case FFFS_MD_RECORD_PARTIAL_TOMBSTONE:
+        return "partial-tombstone";
+    default:
+        return "unknown";
+    }
+}
+
+static bool original_sector_reachable(struct fffs *fs, uint16_t slot,
+        uint16_t head, uint16_t sector, int *err_out) {
+    uint16_t current = head;
+    *err_out = FFFS_OK;
+    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
+        if (current == sector) {
+            return true;
+        }
+        uint16_t next = 0;
+        int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
+                NULL, NULL, &next, NULL);
+        if (err != FFFS_OK) {
+            *err_out = err;
+            return false;
+        }
+        current = next;
+    }
+    if (current != 0) {
+        *err_out = FFFS_ERR_CORRUPT;
+    }
+    return false;
+}
+
+static int original_index_diag_visitor(struct fffs *fs,
+        const struct fffs_md_record *record, void *user) {
+    struct original_index_diag_ctx *ctx = user;
+    uint16_t head = 0;
+    bool found = false;
+    int head_err = fffs_index_head_for_slot(fs, record->slot, &head, &found);
+
+    struct fffs_stat md_st = {0};
+    uint16_t next = 0;
+    int md_err = fffs_read_metadata_for_slot(fs, ctx->sector, record->slot,
+            &md_st, NULL, NULL, &next, NULL);
+
+    bool exists = false;
+    int exists_err = md_err == FFFS_OK ?
+        fffs_exists(fs, md_st.name, &exists) : md_err;
+
+    struct fffs_stat stat_st = {0};
+    int stat_err = md_err == FFFS_OK ?
+        fffs_stat(fs, md_st.name, &stat_st) : md_err;
+
+    int reach_err = FFFS_OK;
+    bool reachable = false;
+    if (head_err == FFFS_OK && found) {
+        reachable = original_sector_reachable(fs, record->slot, head,
+                ctx->sector, &reach_err);
+    }
+
+    fprintf(ctx->out,
+            "original-index sector=%u record_off=%u lifecycle=%s "
+            "slot=%u md_next=%u md_name=%s md_size=%u md_err=%s "
+            "head_found=%d head=%u head_err=%s reachable=%d "
+            "reach_err=%s exists=%d exists_err=%s stat_size=%u "
+            "stat_err=%s\n",
+            (unsigned)ctx->sector, (unsigned)record->record_start,
+            md_lifecycle_name(record->lifecycle), (unsigned)record->slot,
+            (unsigned)next, md_err == FFFS_OK ? md_st.name : "",
+            (unsigned)md_st.size, fffs_status_name(md_err), found,
+            (unsigned)head, fffs_status_name(head_err), reachable,
+            fffs_status_name(reach_err), exists, fffs_status_name(exists_err),
+            (unsigned)stat_st.size, fffs_status_name(stat_err));
+    return FFFS_OK;
+}
+
+static void log_original_index_view(FILE *out, struct fffs *fs,
+        const struct ffsv_fault_case *fault) {
+    if (!out || !fs || !fault || fs->sector_size == 0) {
+        return;
+    }
+    uint16_t sector = (uint16_t)(fault->offset / fs->sector_size);
+    if (sector < fs->index_sectors || sector >= fs->sector_count) {
+        return;
+    }
+    fprintf(out, "original-index sector=%u fault_offset=%zu\n",
+            (unsigned)sector, fault->offset);
+    struct original_index_diag_ctx ctx = {
+        .out = out,
+        .sector = sector,
+    };
+    int err = fffs_visit_metadata_records(fs, sector,
+            original_index_diag_visitor, &ctx);
+    fprintf(out, "original-index visit_err=%s\n", fffs_status_name(err));
+}
+
+static int check_image_ex(struct fffs_backend *backend, struct fffs *fs,
+        uint64_t allowed_a, uint64_t allowed_b, bool allow_raw_corrupt) {
     struct fffs_inspect_summary summary;
     int err = fffs_inspect_check(backend, &summary);
     if (err != FFFS_OK) {
         return err;
     }
-    if (summary.index_corrupt_records || summary.live_entries_corrupt ||
-            summary.data_sectors_corrupt || summary.md_corrupt) {
+    if (!allow_raw_corrupt && (summary.index_corrupt_records ||
+            summary.live_entries_corrupt || summary.data_sectors_corrupt ||
+            summary.md_corrupt)) {
         return FFFS_ERR_CORRUPT;
     }
     uint64_t actual;
@@ -378,6 +722,73 @@ static int check_image(struct fffs_backend *backend, struct fffs *fs,
     }
     return actual == allowed_a || actual == allowed_b ? FFFS_OK :
         FFFS_ERR_CORRUPT;
+}
+
+static int verify_sampled_fault(const struct ffsv_fault_case *fault,
+        void *user) {
+    struct api_sampler_ctx *ctx = user;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct mount_storage storage;
+
+    int err = mount_storage_init(&storage);
+    if (err != FFFS_OK) {
+        return FFSV_ERR_NOMEM;
+    }
+    err = fffs_host_backend_from_verify_flash(&backend, fault->branch);
+    if (err == FFFS_OK) {
+        err = mount_fs(&fs, &backend, &storage);
+    }
+    bool mounted = err == FFFS_OK;
+    if (err == FFFS_OK) {
+        err = check_image_ex(&backend, &fs, ctx->allowed_a, ctx->allowed_b,
+                true);
+    }
+
+    ctx->stats->sampled_faults++;
+    ctx->stats->crash_points++;
+    if (ctx->dispatcher &&
+            (ctx->stats->sampled_faults %
+                API_SWEEP_PROGRESS_SAMPLE_INTERVAL) == 0) {
+        publish_worker_progress(ctx->dispatcher, ctx->thread_id,
+                ctx->workload_id, ctx->step_index, ctx->step_count,
+                ctx->stats, FFFS_OK);
+    }
+    if (err != FFFS_OK) {
+        ctx->stats->invariant_failures++;
+        publish_worker_progress(ctx->dispatcher, ctx->thread_id,
+                ctx->workload_id, ctx->step_index, ctx->step_count,
+                ctx->stats, err);
+        FILE *out = ctx->log ? ctx->log : stderr;
+        fprintf(out,
+                "api sampled failure workload=%u step=%zu type=%u "
+                "seq=%llu op=%s offset=%zu size=%zu perm=%zu seed=%u "
+                "bits=%zu mounted=%d err=%s\n",
+                (unsigned)ctx->workload_id, ctx->step_index,
+                (unsigned)ctx->step_type, (unsigned long long)fault->sequence,
+                ffsv_op_name(fault->type), fault->offset, fault->size,
+                fault->permutation, (unsigned)fault->seed,
+                fault->sampled_bits, mounted, fffs_status_name(err));
+        log_model(out, "expected-before", ctx->before);
+        log_model(out, "expected-after", ctx->after);
+        log_original_index_view(out, ctx->base_fs, fault);
+        dump_failure_images(out, ctx->log_path, "sampled",
+                ctx->workload_id, ctx->step_index, fault->sequence,
+                fault->permutation, ctx->base_flash, fault->branch);
+        log_failure_image(out, &backend, mounted ? &fs : NULL,
+                ctx->allowed_a, ctx->allowed_b);
+        fflush(out);
+        if (mounted) {
+            fffs_unmount(&fs);
+        }
+        mount_storage_destroy(&storage);
+        return FFSV_ERR_IO;
+    }
+    if (mounted) {
+        fffs_unmount(&fs);
+    }
+    mount_storage_destroy(&storage);
+    return FFSV_OK;
 }
 
 static int apply_step(struct fffs *fs, const struct api_step *step,
@@ -484,11 +895,92 @@ static bool log_has_injected_sequence(const struct ffsv_flash *flash,
     return false;
 }
 
+static int verify_cow_crash_point(const struct api_runtime_state *base,
+        const struct api_step *step, const struct crash_point *point,
+        FILE *log, const char *log_path) {
+    struct api_runtime_state attempt;
+    int err = runtime_clone(&attempt, base->flash, &base->fs,
+            &base->open_file, &base->tx);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    ffsv_flash_set_failure(attempt.flash, &(struct ffsv_failure_injection){
+        .enabled = true,
+        .sequence = point->sequence,
+        .op_mask = (UINT32_C(1) << FFSV_OP_PROGRAM) |
+            (UINT32_C(1) << FFSV_OP_ERASE),
+        .phase = FFSV_FAIL_AFTER,
+        .status = FFSV_ERR_INJECTED,
+    });
+    err = apply_step(&attempt.fs, step, &attempt.open_file, &attempt.tx);
+    ffsv_flash_clear_failure(attempt.flash);
+    bool injected = log_has_injected_sequence(attempt.flash,
+            point->sequence);
+    struct ffsv_op_record injected_record = {0};
+    bool have_record = find_op_record(attempt.flash, point->sequence,
+            &injected_record);
+
+    if (!injected) {
+        err = FFFS_ERR_CORRUPT;
+    } else {
+        err = FFFS_OK;
+    }
+
+    if (err == FFFS_OK) {
+        fffs_unmount(&attempt.fs);
+        attempt.mounted = false;
+
+        struct fffs recovered;
+        struct mount_storage storage;
+        err = mount_storage_init(&storage);
+        if (err == FFFS_OK) {
+            err = mount_fs(&recovered, &attempt.backend, &storage);
+        }
+        if (err == FFFS_OK) {
+            err = check_image_ex(&attempt.backend, &recovered,
+                    point->allowed_a, point->allowed_b, true);
+            if (err != FFFS_OK && log) {
+                fprintf(log,
+                        "api crash diagnostic workload=%u step=%u type=%u "
+                        "seq=%llu err=%s\n",
+                        point->workload_id, (unsigned)point->step_index,
+                        (unsigned)point->step_type,
+                        (unsigned long long)point->sequence,
+                        fffs_status_name(err));
+                if (have_record) {
+                    fprintf(log,
+                            "op type=%s offset=%zu size=%zu result=%s "
+                            "injected=%d phase=%d committed=%zu\n",
+                            ffsv_op_name(injected_record.type),
+                            injected_record.offset, injected_record.size,
+                            fffs_status_name(injected_record.result),
+                            injected_record.injected,
+                            injected_record.injected_phase,
+                            injected_record.committed_bytes);
+                }
+                dump_failure_images(log, log_path, "crash",
+                        point->workload_id, point->step_index,
+                        point->sequence, 0, base->flash, attempt.flash);
+                log_failure_image(log, &attempt.backend, &recovered,
+                        point->allowed_a, point->allowed_b);
+            }
+            fffs_unmount(&recovered);
+        }
+        mount_storage_destroy(&storage);
+    }
+
+    runtime_destroy(&attempt);
+    return err;
+}
+
 static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         const struct api_step *steps, size_t step_count,
-        struct crash_point *points, size_t *point_count,
-        const struct crash_point *target, bool *hit_target,
-        uint32_t workload_id) {
+        struct crash_point *points, size_t *point_count, uint32_t workload_id,
+        struct api_stats *stats,
+        size_t sampled_permutations, size_t sampled_max_bits, FILE *log,
+        const char *log_path, struct dispatcher *dispatcher,
+        size_t thread_id) {
     struct fffs fs;
     struct fffs_file open_file;
     struct mount_storage storage;
@@ -511,18 +1003,11 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         return err;
     }
 
-    if (target) {
-        ffsv_flash_set_failure(flash, &(struct ffsv_failure_injection){
-            .enabled = true,
-            .sequence = target->sequence,
-            .op_mask = (UINT32_C(1) << FFSV_OP_PROGRAM) |
-                (UINT32_C(1) << FFSV_OP_ERASE),
-            .phase = FFSV_FAIL_AFTER,
-            .status = FFSV_ERR_INJECTED,
-        });
-    }
-
     for (size_t i = 0; i < step_count; i++) {
+        if (dispatcher && (i % API_SWEEP_PROGRESS_STEP_INTERVAL) == 0) {
+            publish_worker_progress(dispatcher, thread_id, workload_id, i,
+                    step_count, stats, FFFS_OK);
+        }
         struct api_model before_model = model;
         struct api_model after_model = model;
         struct open_tx before_tx = tx;
@@ -532,36 +1017,101 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         size_t log_before = 0;
         (void)ffsv_flash_log(flash, &log_before);
 
-        err = apply_step(&fs, &steps[i], &open_file, &tx);
-        if (!target && err != FFFS_OK) {
+        struct api_runtime_state base = {0};
+        err = runtime_clone(&base, flash, &fs, &open_file, &tx);
+        if (err != FFFS_OK) {
             break;
         }
-        if (!target) {
-            size_t log_count = 0;
-            const struct ffsv_op_record *log = ffsv_flash_log(flash,
-                    &log_count);
-            err = collect_crash_points(log, log_before, log_count, points,
-                    point_count, before_hash, after_hash, workload_id,
-                    (uint16_t)i, (uint8_t)steps[i].type);
+
+        struct api_sampler_ctx sampler_ctx = {0};
+        if (sampled_permutations) {
+            sampler_ctx = (struct api_sampler_ctx){
+                .allowed_a = before_hash,
+                .allowed_b = after_hash,
+                .before = &before_model,
+                .after = &after_model,
+                .stats = stats,
+                .log = log,
+                .log_path = log_path,
+                .base_flash = flash,
+                .base_fs = &fs,
+                .workload_id = workload_id,
+                .step_index = i,
+                .step_count = step_count,
+                .step_type = (uint8_t)steps[i].type,
+                .dispatcher = dispatcher,
+                .thread_id = thread_id,
+            };
+            ffsv_flash_set_fault_sampler(flash, &(struct ffsv_fault_sampler){
+                .enabled = true,
+                .op_mask = (UINT32_C(1) << FFSV_OP_PROGRAM) |
+                    (UINT32_C(1) << FFSV_OP_COMMIT_STAGED) |
+                    (UINT32_C(1) << FFSV_OP_ERASE),
+                .seed = UINT32_C(0xa7150000) ^ workload_id ^
+                    (uint32_t)(i * 131u),
+                .permutations_per_op = sampled_permutations,
+                .max_bits_per_permutation = sampled_max_bits,
+                .program_page_size = 256,
+                .verify = verify_sampled_fault,
+                .user = &sampler_ctx,
+            });
+        }
+        err = apply_step(&fs, &steps[i], &open_file, &tx);
+        ffsv_flash_clear_fault_sampler(flash);
+        if (err != FFFS_OK) {
+            if (log) {
+                fprintf(log,
+                        "api apply failure workload=%u step=%zu type=%u "
+                        "err=%s\n",
+                        workload_id, i, (unsigned)steps[i].type,
+                        fffs_status_name(err));
+            }
+            runtime_destroy(&base);
+            break;
+        }
+        size_t log_count = 0;
+        const struct ffsv_op_record *records = ffsv_flash_log(flash,
+                &log_count);
+        size_t point_start = *point_count;
+        err = collect_crash_points(records, log_before, log_count, points,
+                point_count, before_hash, after_hash, workload_id,
+                (uint16_t)i, (uint8_t)steps[i].type);
+        if (err != FFFS_OK) {
+            runtime_destroy(&base);
+            break;
+        }
+        for (size_t p = point_start; p < *point_count; p++) {
+            err = verify_cow_crash_point(&base, &steps[i], &points[p], log,
+                    log_path);
+            stats->crash_points++;
             if (err != FFFS_OK) {
+                stats->invariant_failures++;
+                FILE *out = log ? log : stderr;
+                fprintf(out,
+                        "api crash failure workload=%u step=%u type=%u "
+                        "seq=%llu err=%s\n",
+                        points[p].workload_id,
+                        (unsigned)points[p].step_index,
+                        (unsigned)points[p].step_type,
+                        (unsigned long long)points[p].sequence,
+                        fffs_status_name(err));
+                fflush(out);
                 break;
             }
         }
-        if (target && log_has_injected_sequence(flash, target->sequence)) {
-            *hit_target = true;
-            err = FFFS_OK;
-            break;
-        }
-        if (target && err != FFFS_OK) {
-            err = FFFS_OK;
+        runtime_destroy(&base);
+        if (err != FFFS_OK) {
             break;
         }
         if (err == FFFS_OK) {
             model = after_model;
         }
     }
+    if (dispatcher) {
+        publish_worker_progress(dispatcher, thread_id, workload_id,
+                step_count, step_count, stats, err);
+    }
 
-    ffsv_flash_clear_failure(flash);
     fffs_unmount(&fs);
     mount_storage_destroy(&storage);
     free(tx.data);
@@ -632,48 +1182,20 @@ static void log_flash_wear(FILE *log, const struct ffsv_flash *flash,
 
 static int collect_workload_points(const struct api_step *steps,
         size_t step_count, struct crash_point *points, size_t *point_count,
-        uint32_t workload_id, FILE *log, struct wear_stats *wear_stats) {
+        uint32_t workload_id, FILE *log, struct wear_stats *wear_stats,
+        struct api_stats *stats, size_t sampled_permutations,
+        size_t sampled_max_bits, struct dispatcher *dispatcher,
+        size_t thread_id, const char *log_path) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
-    bool hit = false;
     int err = init_formatted_flash(&flash, &backend);
     if (err == FFFS_OK) {
         err = run_steps(flash, &backend, steps, step_count, points,
-                point_count, NULL, &hit, workload_id);
+                point_count, workload_id, stats, sampled_permutations,
+                sampled_max_bits, log, log_path, dispatcher, thread_id);
         if (err == FFFS_OK) {
             log_flash_wear(log, flash, workload_id, wear_stats);
         }
-    }
-    ffsv_flash_destroy(flash);
-    return err;
-}
-
-static int replay_crash_point(const struct api_step *steps, size_t step_count,
-        const struct crash_point *point) {
-    struct ffsv_flash *flash = NULL;
-    struct fffs_backend backend;
-    bool hit = false;
-    int err = init_formatted_flash(&flash, &backend);
-    if (err == FFFS_OK) {
-        err = run_steps(flash, &backend, steps, step_count, NULL, NULL,
-                point, &hit, point->workload_id);
-    }
-    if (err == FFFS_OK && !hit) {
-        err = FFFS_ERR_CORRUPT;
-    }
-    if (err == FFFS_OK) {
-        struct fffs recovered;
-        struct mount_storage storage;
-        err = mount_storage_init(&storage);
-        if (err == FFFS_OK) {
-            err = mount_fs(&recovered, &backend, &storage);
-        }
-        if (err == FFFS_OK) {
-            err = check_image(&backend, &recovered, point->allowed_a,
-                    point->allowed_b);
-            fffs_unmount(&recovered);
-        }
-        mount_storage_destroy(&storage);
     }
     ffsv_flash_destroy(flash);
     return err;
@@ -695,11 +1217,11 @@ static uint64_t progress_now_ns(void) {
 
 static void append_worker_status(char *out, size_t out_size, size_t id,
         const struct worker_status *status) {
-    char remaining[32];
+    char cases[32];
+    char sampled[32];
     char failures[32];
-    size_t crash_remaining = status->crash_count > status->crash_index ?
-        status->crash_count - status->crash_index : 0;
-    snprintf(remaining, sizeof(remaining), "%zu", crash_remaining);
+    format_count(cases, sizeof(cases), status->crash_points);
+    format_count(sampled, sizeof(sampled), status->sampled_faults);
     snprintf(failures, sizeof(failures), "%llu",
             (unsigned long long)status->failures);
     size_t used = strlen(out);
@@ -709,12 +1231,15 @@ static void append_worker_status(char *out, size_t out_size, size_t id,
     const char *sep = used == 0 ? "" : " ";
     if (status->active) {
         (void)id;
-        snprintf(out + used, out_size - used, "%s%08x,%s,%s",
-                sep, (unsigned)status->seed, remaining, failures);
+        snprintf(out + used, out_size - used,
+                "%s%08x:%zu/%zu:c%s:p%s:f%s",
+                sep, (unsigned)status->seed, status->step_index,
+                status->steps, cases, sampled, failures);
     } else {
         (void)id;
-        snprintf(out + used, out_size - used, "%s%s,%s,%s",
-                sep, status->done ? "done" : "idle", remaining, failures);
+        snprintf(out + used, out_size - used, "%s%s:c%s:p%s:f%s",
+                sep, status->done ? "done" : "idle", cases, sampled,
+                failures);
     }
 }
 
@@ -748,6 +1273,26 @@ static void update_worker_status(struct dispatcher *dispatcher,
     pthread_mutex_lock(&dispatcher->mutex);
     dispatcher->statuses[thread_id] = *update;
     pthread_mutex_unlock(&dispatcher->mutex);
+}
+
+static void publish_worker_progress(struct dispatcher *dispatcher,
+        size_t thread_id, uint32_t seed, size_t step_index,
+        size_t step_count, const struct api_stats *stats, int err) {
+    if (!dispatcher || !stats) {
+        return;
+    }
+    struct worker_status status = {
+        .active = true,
+        .seed = seed,
+        .steps = step_count,
+        .step_index = step_index,
+        .crash_points = stats->crash_points,
+        .sampled_faults = stats->sampled_faults,
+        .failures = stats->invariant_failures,
+        .err = err,
+    };
+    update_worker_status(dispatcher, thread_id, &status);
+    maybe_report_worker_status(dispatcher);
 }
 
 static size_t append_gc_step(struct api_step *steps, size_t pos,
@@ -933,7 +1478,7 @@ static void log_steps(FILE *log, uint32_t seed, const struct api_step *steps,
 static int run_workload(const struct api_step *steps, size_t step_count,
         struct api_stats *stats, uint32_t workload_id, FILE *log,
         struct dispatcher *dispatcher, size_t thread_id,
-        struct wear_stats *wear_stats) {
+        struct wear_stats *wear_stats, const char *log_path) {
     struct crash_point *points = calloc(API_SWEEP_MAX_CRASH_POINTS,
             sizeof(*points));
     if (!points) {
@@ -941,40 +1486,28 @@ static int run_workload(const struct api_step *steps, size_t step_count,
     }
     size_t point_count = 0;
     int err = collect_workload_points(steps, step_count, points,
-            &point_count, workload_id, log, wear_stats);
+            &point_count, workload_id, log, wear_stats, stats,
+            dispatcher ? dispatcher->sampled_permutations : 0,
+            dispatcher ? dispatcher->sampled_max_bits : 0,
+            dispatcher, thread_id, log_path);
     if (log) {
         fprintf(log, "seed=0x%08x crash_points=%zu\n",
                 (unsigned)workload_id, point_count);
         fflush(log);
     }
-    for (size_t i = 0; err == FFFS_OK && i < point_count; i++) {
-        err = replay_crash_point(steps, step_count, &points[i]);
-        stats->crash_points++;
-        if (dispatcher) {
-            struct worker_status status = {
-                .active = true,
-                .seed = workload_id,
-                .steps = step_count,
-                .crash_index = i + 1,
-                .crash_count = point_count,
-                .crash_points = stats->crash_points,
-                .failures = stats->invariant_failures,
-                .err = err,
-            };
-            update_worker_status(dispatcher, thread_id, &status);
-            maybe_report_worker_status(dispatcher);
-        }
-        if (err != FFFS_OK) {
-            stats->invariant_failures++;
-            fprintf(log,
-                    "api crash failure workload=%u step=%u type=%u "
-                    "seq=%llu err=%s\n",
-                    points[i].workload_id, (unsigned)points[i].step_index,
-                    (unsigned)points[i].step_type,
-                    (unsigned long long)points[i].sequence,
-                    fffs_status_name(err));
-            fflush(log);
-        }
+    if (dispatcher) {
+        struct worker_status status = {
+            .active = true,
+            .seed = workload_id,
+            .steps = step_count,
+            .step_index = step_count,
+            .crash_points = stats->crash_points,
+            .sampled_faults = stats->sampled_faults,
+            .failures = stats->invariant_failures,
+            .err = err,
+        };
+        update_worker_status(dispatcher, thread_id, &status);
+        maybe_report_worker_status(dispatcher);
     }
     free(points);
     return err;
@@ -982,6 +1515,7 @@ static int run_workload(const struct api_step *steps, size_t step_count,
 
 static void stats_add(struct api_stats *dst, const struct api_stats *src) {
     dst->crash_points += src->crash_points;
+    dst->sampled_faults += src->sampled_faults;
     dst->random_workloads += src->random_workloads;
     dst->invariant_failures += src->invariant_failures;
     dst->churn_deletes += src->churn_deletes;
@@ -1050,13 +1584,15 @@ static void *random_worker_main(void *arg) {
     while (dispatcher_next_seed(dispatcher, &seed_index, &seed)) {
         memset(steps, 0, dispatcher->max_steps * sizeof(*steps));
         size_t count = churn_workload(seed, steps, dispatcher->max_steps,
-                dispatcher->tx_per_seed, dispatcher->target_write_multiple,
-                &ctx->stats);
+                dispatcher->transaction_limit,
+                dispatcher->target_write_multiple, &ctx->stats);
         struct worker_status status = {
             .active = true,
             .seed = seed,
             .steps = count,
+            .step_index = 0,
             .crash_points = ctx->stats.crash_points,
+            .sampled_faults = ctx->stats.sampled_faults,
             .failures = ctx->stats.invariant_failures,
             .err = FFFS_OK,
         };
@@ -1064,9 +1600,9 @@ static void *random_worker_main(void *arg) {
         if (ctx->log) {
             fprintf(ctx->log,
                     "thread=%zu seed_index=%zu seed=0x%08x steps=%zu "
-                    "tx_cap=%zu\n",
+                    "transaction_limit=%zu\n",
                     ctx->thread_id, seed_index, (unsigned)seed, count,
-                    dispatcher->tx_per_seed);
+                    dispatcher->transaction_limit);
             log_steps(ctx->log, seed, steps, count);
         }
         ctx->stats.generated_steps += count;
@@ -1080,12 +1616,14 @@ static void *random_worker_main(void *arg) {
             }
         }
         int err = run_workload(steps, count, &ctx->stats, seed, ctx->log,
-                dispatcher, ctx->thread_id, &ctx->last_wear);
+                dispatcher, ctx->thread_id, &ctx->last_wear,
+                ctx->log_path);
         last_err = err;
         ctx->stats.random_workloads++;
         status.active = false;
         status.done = false;
         status.crash_points = ctx->stats.crash_points;
+        status.sampled_faults = ctx->stats.sampled_faults;
         status.failures = ctx->stats.invariant_failures;
         status.err = err;
         update_worker_status(dispatcher, ctx->thread_id, &status);
@@ -1100,6 +1638,7 @@ static void *random_worker_main(void *arg) {
         .active = false,
         .done = true,
         .crash_points = ctx->stats.crash_points,
+        .sampled_faults = ctx->stats.sampled_faults,
         .failures = ctx->stats.invariant_failures,
         .err = last_err,
     };
@@ -1113,8 +1652,9 @@ static void make_thread_log_path(char *out, size_t out_size,
 }
 
 static int run_random(uint32_t seed_start, size_t seed_count,
-        size_t tx_per_seed, size_t target_write_multiple, size_t max_steps,
-        size_t thread_count, const char *log_path, struct api_stats *stats,
+        size_t transaction_limit, size_t target_write_multiple,
+        size_t thread_count, size_t sampled_permutations,
+        size_t sampled_max_bits, const char *log_path, struct api_stats *stats,
         struct wear_summary *wear_summary) {
     if (thread_count == 0 || thread_count > API_SWEEP_MAX_THREADS) {
         return FFFS_ERR_INVALID;
@@ -1132,10 +1672,12 @@ static int run_random(uint32_t seed_start, size_t seed_count,
     struct dispatcher dispatcher = {
         .seed_start = seed_start,
         .seed_count = seed_count,
-        .tx_per_seed = tx_per_seed,
+        .transaction_limit = transaction_limit,
         .target_write_multiple = target_write_multiple,
-        .max_steps = max_steps,
+        .max_steps = API_SWEEP_DEFAULT_MAX_STEPS,
         .thread_count = thread_count,
+        .sampled_permutations = sampled_permutations,
+        .sampled_max_bits = sampled_max_bits,
         .next_report_ns = progress_now_ns() +
             (uint64_t)API_SWEEP_PROGRESS_INTERVAL_SEC *
             UINT64_C(1000000000),
@@ -1195,13 +1737,157 @@ static int run_random(uint32_t seed_start, size_t seed_count,
     return err;
 }
 
-static size_t parse_arg(const char *text, size_t fallback) {
-    if (!text) {
-        return fallback;
+struct cli_options {
+    uint32_t seed_start;
+    size_t run_count;
+    size_t transaction_limit;
+    size_t target_write_multiple;
+    size_t thread_count;
+    const char *log_path;
+    size_t partial_write_samples;
+    size_t partial_write_bits;
+};
+
+static void default_log_path(char *out, size_t out_size) {
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    if (tm && strftime(out, out_size,
+                "fffs_api_crash_sweep-%Y%m%d-%H%M%S", tm) != 0) {
+        return;
     }
+    snprintf(out, out_size, "fffs_api_crash_sweep");
+}
+
+static int parse_size_value(const char *text, size_t *out) {
+    if (!text || !*text) {
+        return FFFS_ERR_INVALID;
+    }
+    errno = 0;
     char *end = NULL;
-    unsigned long value = strtoul(text, &end, 0);
-    return end && *end == '\0' ? (size_t)value : fallback;
+    unsigned long long value = strtoull(text, &end, 0);
+    if (errno || !end || *end != '\0' || value > SIZE_MAX) {
+        return FFFS_ERR_INVALID;
+    }
+    *out = (size_t)value;
+    return FFFS_OK;
+}
+
+static int parse_u32_value(const char *text, uint32_t *out) {
+    size_t value = 0;
+    int err = parse_size_value(text, &value);
+    if (err != FFFS_OK || value > UINT32_MAX) {
+        return FFFS_ERR_INVALID;
+    }
+    *out = (uint32_t)value;
+    return FFFS_OK;
+}
+
+static const char *option_value(int argc, char **argv, int *index,
+        const char *arg, const char *long_name) {
+    size_t long_len = strlen(long_name);
+    if (strncmp(arg, "--", 2) == 0 &&
+            strncmp(arg, long_name, long_len) == 0 &&
+            arg[long_len] == '=') {
+        return arg + long_len + 1u;
+    }
+    if (*index + 1 >= argc) {
+        return NULL;
+    }
+    *index += 1;
+    return argv[*index];
+}
+
+static bool is_long_option(const char *arg, const char *long_name) {
+    size_t long_len = strlen(long_name);
+    return strcmp(arg, long_name) == 0 ||
+        (strncmp(arg, long_name, long_len) == 0 && arg[long_len] == '=');
+}
+
+static int parse_cli(int argc, char **argv, struct cli_options *opts,
+        char *default_log, size_t default_log_size) {
+    default_log_path(default_log, default_log_size);
+    *opts = (struct cli_options){
+        .seed_start = API_SWEEP_DEFAULT_SEED,
+        .run_count = API_SWEEP_DEFAULT_RUNS,
+        .transaction_limit = SIZE_MAX,
+        .target_write_multiple = API_SWEEP_DEFAULT_WRITE_MULTIPLE,
+        .thread_count = API_SWEEP_DEFAULT_THREADS,
+        .log_path = default_log,
+        .partial_write_samples = API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES,
+        .partial_write_bits = API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS,
+    };
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *value = NULL;
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+            return 1;
+        } else if (strcmp(arg, "-s") == 0 ||
+                is_long_option(arg, "--seed")) {
+            value = option_value(argc, argv, &i, arg, "--seed");
+            if (!value || parse_u32_value(value, &opts->seed_start) !=
+                    FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-n") == 0 ||
+                is_long_option(arg, "--runs")) {
+            value = option_value(argc, argv, &i, arg, "--runs");
+            if (!value || parse_size_value(value, &opts->run_count) !=
+                    FFFS_OK || opts->run_count == 0) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-w") == 0 ||
+                is_long_option(arg, "--write-multiple")) {
+            value = option_value(argc, argv, &i, arg, "--write-multiple");
+            if (!value || parse_size_value(value,
+                        &opts->target_write_multiple) != FFFS_OK ||
+                    opts->target_write_multiple == 0) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-t") == 0 ||
+                is_long_option(arg, "--transactions")) {
+            value = option_value(argc, argv, &i, arg, "--transactions");
+            if (!value || parse_size_value(value,
+                        &opts->transaction_limit) != FFFS_OK ||
+                    opts->transaction_limit == 0) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-j") == 0 ||
+                is_long_option(arg, "--threads")) {
+            value = option_value(argc, argv, &i, arg, "--threads");
+            if (!value || parse_size_value(value, &opts->thread_count) !=
+                    FFFS_OK || opts->thread_count == 0 ||
+                    opts->thread_count > API_SWEEP_MAX_THREADS) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-l") == 0 ||
+                is_long_option(arg, "--log-base")) {
+            value = option_value(argc, argv, &i, arg, "--log-base");
+            if (!value || !*value) {
+                return FFFS_ERR_INVALID;
+            }
+            opts->log_path = value;
+        } else if (strcmp(arg, "-p") == 0 ||
+                is_long_option(arg, "--partial-write-samples")) {
+            value = option_value(argc, argv, &i, arg,
+                    "--partial-write-samples");
+            if (!value || parse_size_value(value,
+                        &opts->partial_write_samples) != FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-b") == 0 ||
+                is_long_option(arg, "--partial-write-bits")) {
+            value = option_value(argc, argv, &i, arg,
+                    "--partial-write-bits");
+            if (!value || parse_size_value(value,
+                        &opts->partial_write_bits) != FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
+        } else {
+            return FFFS_ERR_INVALID;
+        }
+    }
+    return FFFS_OK;
 }
 
 static void format_count(char *out, size_t out_size, uint64_t value) {
@@ -1239,70 +1925,78 @@ static void print_count_line(const char *label, uint64_t value) {
 
 static void print_usage(const char *argv0) {
     printf("Usage:\n");
-    printf("  %s <seed_start> <seed_count> <tx_per_seed> "
-            "<target_write_multiples> [max_steps] [log_base] [threads]\n",
-            argv0);
-    printf("\n");
-    printf("Arguments:\n");
-    printf("  seed_start              first PRNG seed, decimal or 0x-prefixed\n");
-    printf("  seed_count              number of random workload seeds to run\n");
-    printf("  tx_per_seed             transaction cap for each random seed\n");
-    printf("  target_write_multiples  churn target as image-size multiples\n");
-    printf("  max_steps               maximum generated API steps per seed\n");
-    printf("  log_base                base path for per-thread logs\n");
-    printf("  threads                 worker thread count\n");
+    printf("  %s [options]\n", argv0);
     printf("\n");
     printf("Options:\n");
-    printf("  -h, --help              show this help and exit\n");
+    printf("  -s, --seed <u32>                  first PRNG seed "
+            "(default 0x%08x)\n", (unsigned)API_SWEEP_DEFAULT_SEED);
+    printf("  -n, --runs <count>                seed-driven runs "
+            "(default %u)\n", (unsigned)API_SWEEP_DEFAULT_RUNS);
+    printf("  -w, --write-multiple <count>      stop after writes reach "
+            "count * image size (default %u)\n",
+            (unsigned)API_SWEEP_DEFAULT_WRITE_MULTIPLE);
+    printf("  -t, --transactions <count>        optional transaction cap "
+            "per run (default unlimited)\n");
+    printf("  -j, --threads <count>             worker thread count "
+            "(default %u, max %u)\n", (unsigned)API_SWEEP_DEFAULT_THREADS,
+            (unsigned)API_SWEEP_MAX_THREADS);
+    printf("  -l, --log-base <path>             base path for per-thread "
+            "logs (default timestamped)\n");
+    printf("  -p, --partial-write-samples <n>   partial-program fault "
+            "samples per mutating flash op (default %u)\n",
+            (unsigned)API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES);
+    printf("  -b, --partial-write-bits <n>      eligible 1->0 bits to "
+            "sample per partial-write case (default %u, 0 means all)\n",
+            (unsigned)API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS);
+    printf("  -h, --help                        show this help and exit\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  %s 0xa11ce000 8 10000 256\n", argv0);
-    printf("  %s 0xa11ce000 8 10000 256 262144 "
-            "fffs_api_crash_sweep.log 8\n", argv0);
-    printf("  %s 0xa11ce000 1 50 32 8192 /tmp/fffs_api_smoke 1\n",
-            argv0);
+    printf("  %s -s 0x46464653 -n 1 -w 2 -j 1\n", argv0);
+    printf("  %s --seed 1234 --runs 4 --write-multiple 10 "
+            "--threads 4\n", argv0);
+    printf("  %s -s 1234 -n 1 -w 4 -j 1 "
+            "-p 10 -b 8 -l /tmp/fffs_api_diag\n", argv0);
 }
 
 int main(int argc, char **argv) {
-    if (argc == 1 || (argc == 2 &&
-                (strcmp(argv[1], "-h") == 0 ||
-                 strcmp(argv[1], "--help") == 0))) {
+    struct cli_options opts;
+    char default_log[64];
+    int cli_err = parse_cli(argc, argv, &opts, default_log,
+            sizeof(default_log));
+    if (cli_err == 1) {
         print_usage(argv[0]);
         return 0;
     }
-    if (argc < 5) {
+    if (cli_err != FFFS_OK) {
         print_usage(argv[0]);
         return 2;
     }
-
-    uint32_t seed_start = (uint32_t)parse_arg(argc > 1 ? argv[1] : NULL,
-            0xa11ce000u);
-    size_t seed_count = parse_arg(argc > 2 ? argv[2] : NULL, 5);
-    size_t tx_per_seed = parse_arg(argc > 3 ? argv[3] : NULL, 1000);
-    size_t target_write_multiple = parse_arg(argc > 4 ? argv[4] : NULL, 128);
-    size_t max_steps = parse_arg(argc > 5 ? argv[5] : NULL,
-            API_SWEEP_DEFAULT_MAX_STEPS);
-    const char *log_path = argc > 6 ? argv[6] : "fffs_api_crash_sweep.log";
-    size_t thread_count = parse_arg(argc > 7 ? argv[7] : NULL,
-            API_SWEEP_DEFAULT_THREADS);
     struct api_stats stats = {0};
     struct wear_summary wear_summary = {0};
 
     printf("fffs api crash sweep [%s]\n", cache_mode_name());
-    printf("logs: %s.t<N>.log\n", log_path);
-    int err = run_random(seed_start, seed_count, tx_per_seed,
-            target_write_multiple, max_steps, thread_count, log_path, &stats,
-            &wear_summary);
-    printf("seed start: 0x%08x\n", (unsigned)seed_start);
-    print_count_line("threads", thread_count);
-    print_count_line("tx per seed", tx_per_seed);
-    print_count_line("target written image multiples", target_write_multiple);
-    print_count_line("max steps per seed", max_steps);
+    printf("logs: %s.t<N>.log\n", opts.log_path);
+    int err = run_random(opts.seed_start, opts.run_count,
+            opts.transaction_limit, opts.target_write_multiple,
+            opts.thread_count, opts.partial_write_samples,
+            opts.partial_write_bits, opts.log_path, &stats, &wear_summary);
+    printf("seed: 0x%08x\n", (unsigned)opts.seed_start);
+    print_count_line("threads", opts.thread_count);
+    print_count_line("runs", opts.run_count);
+    if (opts.transaction_limit == SIZE_MAX) {
+        printf("transaction cap: unlimited\n");
+    } else {
+        print_count_line("transaction cap", opts.transaction_limit);
+    }
+    print_count_line("write multiple", opts.target_write_multiple);
+    print_count_line("partial-write samples", opts.partial_write_samples);
+    print_count_line("partial-write bits", opts.partial_write_bits);
     print_count_line("generated API steps", stats.generated_steps);
     print_count_line("generated write bytes", stats.generated_write_bytes);
     print_count_line("truncated workloads", stats.truncated_workloads);
     print_count_line("crash points tested", stats.crash_points);
-    print_count_line("random workloads", stats.random_workloads);
+    print_count_line("sampled fault cases", stats.sampled_faults);
+    print_count_line("runs completed", stats.random_workloads);
     print_count_line("small writes", stats.churn_writes[BENCH_CHURN_CLASS_SMALL]);
     print_count_line("medium writes", stats.churn_writes[BENCH_CHURN_CLASS_MEDIUM]);
     print_count_line("large writes", stats.churn_writes[BENCH_CHURN_CLASS_LARGE]);

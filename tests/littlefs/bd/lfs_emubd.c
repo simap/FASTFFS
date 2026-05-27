@@ -11,6 +11,7 @@
  * - Program operations model NOR flash bit transitions by allowing only
  *   monotonic 1->0 changes instead of requiring every programmed byte to
  *   still be erased.
+ * - Added deterministic sampled program/erase fault helpers.
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -49,6 +50,18 @@ static void lfs_emubd_decblock(lfs_emubd_block_t *block) {
             free(block);
         }
     }
+}
+
+static uint32_t lfs_emubd_prng_next(uint32_t *state) {
+    uint32_t x = *state;
+    if (x == 0) {
+        x = UINT32_C(0x6d2b79f5);
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
 }
 
 static lfs_emubd_block_t *lfs_emubd_mutblock(
@@ -134,6 +147,8 @@ int lfs_emubd_create(const struct lfs_config *cfg,
     bd->readed = 0;
     bd->proged = 0;
     bd->erased = 0;
+    bd->synced = 0;
+    bd->slept = 0;
     bd->power_cycles = bd->cfg->power_cycles;
     bd->ooo_block = -1;
     bd->ooo_data = NULL;
@@ -324,6 +339,7 @@ int lfs_emubd_read(const struct lfs_config *cfg, lfs_block_t block,
 
     // track reads
     bd->readed += size;
+    bd->slept += bd->cfg->read_sleep;
     if (bd->cfg->read_sleep) {
         int err = nanosleep(&(struct timespec){
                 .tv_sec=bd->cfg->read_sleep/1000000000,
@@ -402,6 +418,7 @@ int lfs_emubd_prog(const struct lfs_config *cfg, lfs_block_t block,
 
     // track progs
     bd->proged += size;
+    bd->slept += bd->cfg->prog_sleep;
     if (bd->cfg->prog_sleep) {
         int err = nanosleep(&(struct timespec){
                 .tv_sec=bd->cfg->prog_sleep/1000000000,
@@ -498,6 +515,7 @@ int lfs_emubd_erase(const struct lfs_config *cfg, lfs_block_t block) {
 
     // track erases
     bd->erased += bd->cfg->erase_size;
+    bd->slept += bd->cfg->erase_sleep;
     if (bd->cfg->erase_sleep) {
         int err = nanosleep(&(struct timespec){
                 .tv_sec=bd->cfg->erase_sleep/1000000000,
@@ -537,6 +555,7 @@ int lfs_emubd_sync(const struct lfs_config *cfg) {
         bd->ooo_block = -1;
         bd->ooo_data = NULL;
     }
+    bd->synced += 1;
 
     LFS_EMUBD_TRACE("lfs_emubd_sync -> %d", 0);
     return 0;
@@ -620,6 +639,20 @@ lfs_emubd_sio_t lfs_emubd_erased(const struct lfs_config *cfg) {
     return bd->erased;
 }
 
+lfs_emubd_sio_t lfs_emubd_synced(const struct lfs_config *cfg) {
+    LFS_EMUBD_TRACE("lfs_emubd_synced(%p)", (void*)cfg);
+    lfs_emubd_t *bd = cfg->context;
+    LFS_EMUBD_TRACE("lfs_emubd_synced -> %"PRIu64, bd->synced);
+    return bd->synced;
+}
+
+lfs_emubd_ssleep_t lfs_emubd_slept(const struct lfs_config *cfg) {
+    LFS_EMUBD_TRACE("lfs_emubd_slept(%p)", (void*)cfg);
+    lfs_emubd_t *bd = cfg->context;
+    LFS_EMUBD_TRACE("lfs_emubd_slept -> %"PRIu64, bd->slept);
+    return bd->slept;
+}
+
 int lfs_emubd_setreaded(const struct lfs_config *cfg, lfs_emubd_io_t readed) {
     LFS_EMUBD_TRACE("lfs_emubd_setreaded(%p, %"PRIu64")", (void*)cfg, readed);
     lfs_emubd_t *bd = cfg->context;
@@ -641,6 +674,25 @@ int lfs_emubd_seterased(const struct lfs_config *cfg, lfs_emubd_io_t erased) {
     lfs_emubd_t *bd = cfg->context;
     bd->erased = erased;
     LFS_EMUBD_TRACE("lfs_emubd_seterased -> %d", 0);
+    return 0;
+}
+
+int lfs_emubd_setsynced(const struct lfs_config *cfg, lfs_emubd_io_t synced) {
+    LFS_EMUBD_TRACE("lfs_emubd_setsynced(%p, %"PRIu64")",
+            (void*)cfg, synced);
+    lfs_emubd_t *bd = cfg->context;
+    bd->synced = synced;
+    LFS_EMUBD_TRACE("lfs_emubd_setsynced -> %d", 0);
+    return 0;
+}
+
+int lfs_emubd_setslept(const struct lfs_config *cfg,
+        lfs_emubd_sleep_t slept) {
+    LFS_EMUBD_TRACE("lfs_emubd_setslept(%p, %"PRIu64")",
+            (void*)cfg, slept);
+    lfs_emubd_t *bd = cfg->context;
+    bd->slept = slept;
+    LFS_EMUBD_TRACE("lfs_emubd_setslept -> %d", 0);
     return 0;
 }
 
@@ -726,6 +778,8 @@ int lfs_emubd_copy(const struct lfs_config *cfg, lfs_emubd_t *copy) {
     copy->readed = bd->readed;
     copy->proged = bd->proged;
     copy->erased = bd->erased;
+    copy->synced = bd->synced;
+    copy->slept = bd->slept;
     copy->power_cycles = bd->power_cycles;
     copy->ooo_block = bd->ooo_block;
     copy->ooo_data = lfs_emubd_incblock(bd->ooo_data);
@@ -736,5 +790,128 @@ int lfs_emubd_copy(const struct lfs_config *cfg, lfs_emubd_t *copy) {
     copy->cfg = bd->cfg;
 
     LFS_EMUBD_TRACE("lfs_emubd_copy -> %d", 0);
+    return 0;
+}
+
+int lfs_emubd_prog_random_clear(const struct lfs_config *cfg,
+        lfs_block_t block, lfs_off_t off, const void *buffer,
+        lfs_size_t size, const struct lfs_emubd_prog_fault_config *fault,
+        lfs_size_t *sampled_bits) {
+    LFS_EMUBD_TRACE("lfs_emubd_prog_random_clear(%p, "
+                "0x%"PRIx32", %"PRIu32", %p, %"PRIu32", %p, %p)",
+            (void*)cfg, block, off, buffer, size,
+            (void*)fault, (void*)sampled_bits);
+    lfs_emubd_t *bd = cfg->context;
+
+    LFS_ASSERT(block < bd->cfg->erase_count);
+    LFS_ASSERT(off  % bd->cfg->prog_size == 0);
+    LFS_ASSERT(size % bd->cfg->prog_size == 0);
+    LFS_ASSERT(off+size <= bd->cfg->erase_size);
+
+    uint8_t *program = malloc(size);
+    lfs_size_t candidate_capacity = size * 8u;
+    lfs_size_t *candidates = candidate_capacity ?
+        malloc(candidate_capacity * sizeof(*candidates)) : NULL;
+    if ((!program && size) || (!candidates && candidate_capacity)) {
+        free(program);
+        free(candidates);
+        LFS_EMUBD_TRACE("lfs_emubd_prog_random_clear -> %d",
+                LFS_ERR_NOMEM);
+        return LFS_ERR_NOMEM;
+    }
+
+    const lfs_emubd_block_t *b = bd->blocks[block];
+    const uint8_t *data = buffer;
+    lfs_size_t candidate_count = 0;
+    for (lfs_size_t i = 0; i < size; i++) {
+        uint8_t base = b ? b->data[off+i] :
+            ((bd->cfg->erase_value != -1) ? bd->cfg->erase_value : 0);
+        uint8_t inflight = (uint8_t)(base & data[i]);
+        uint8_t clearable = (uint8_t)(base & (uint8_t)~inflight);
+        program[i] = data[i];
+
+        for (uint8_t bit_index = 0; bit_index < 8; bit_index++) {
+            uint8_t bit = (uint8_t)(1u << bit_index);
+            if (clearable & bit) {
+                candidates[candidate_count++] = i * 8u + bit_index;
+            }
+        }
+    }
+
+    lfs_size_t selected = fault ? fault->max_bits : 0;
+    if (selected == 0 || selected > candidate_count) {
+        selected = candidate_count;
+    }
+
+    uint32_t rng = fault ? fault->seed : UINT32_C(0x9e3779b9);
+    for (lfs_size_t i = 0; i < selected; i++) {
+        lfs_size_t j = i + (lfs_size_t)(lfs_emubd_prng_next(&rng) %
+                (uint32_t)(candidate_count - i));
+        lfs_size_t tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+
+        if (lfs_emubd_prng_next(&rng) & 1u) {
+            lfs_size_t byte = candidates[i] / 8u;
+            uint8_t bit = (uint8_t)(1u << (candidates[i] % 8u));
+            uint8_t base = b ? b->data[off+byte] :
+                ((bd->cfg->erase_value != -1) ? bd->cfg->erase_value : 0);
+            uint8_t target = (uint8_t)(base & program[byte]);
+            target |= bit;
+            program[byte] = (uint8_t)(target | (uint8_t)~base);
+        }
+    }
+
+    if (sampled_bits) {
+        *sampled_bits = selected;
+    }
+
+    free(candidates);
+    int err = lfs_emubd_prog(cfg, block, off, program, size);
+    free(program);
+    LFS_EMUBD_TRACE("lfs_emubd_prog_random_clear -> %d", err);
+    return err;
+}
+
+int lfs_emubd_erase_random(const struct lfs_config *cfg,
+        lfs_block_t block, uint32_t seed) {
+    LFS_EMUBD_TRACE("lfs_emubd_erase_random(%p, 0x%"PRIx32", %"PRIu32")",
+            (void*)cfg, block, seed);
+    lfs_emubd_t *bd = cfg->context;
+
+    LFS_ASSERT(block < bd->cfg->erase_count);
+
+    lfs_emubd_block_t *b = lfs_emubd_mutblock(cfg, &bd->blocks[block]);
+    if (!b) {
+        LFS_EMUBD_TRACE("lfs_emubd_erase_random -> %d", LFS_ERR_NOMEM);
+        return LFS_ERR_NOMEM;
+    }
+
+    uint32_t rng = seed;
+    for (lfs_size_t i = 0; i < bd->cfg->erase_size; i++) {
+        b->data[i] = (uint8_t)lfs_emubd_prng_next(&rng);
+    }
+
+    if (bd->disk) {
+        off_t res1 = lseek(bd->disk->fd,
+                (off_t)block*bd->cfg->erase_size,
+                SEEK_SET);
+        if (res1 < 0) {
+            int err = -errno;
+            LFS_EMUBD_TRACE("lfs_emubd_erase_random -> %d", err);
+            return err;
+        }
+
+        ssize_t res2 = write(bd->disk->fd, b->data, bd->cfg->erase_size);
+        if (res2 < 0) {
+            int err = -errno;
+            LFS_EMUBD_TRACE("lfs_emubd_erase_random -> %d", err);
+            return err;
+        }
+    }
+
+    bd->erased += bd->cfg->erase_size;
+    bd->slept += bd->cfg->erase_sleep;
+    LFS_EMUBD_TRACE("lfs_emubd_erase_random -> %d", 0);
     return 0;
 }

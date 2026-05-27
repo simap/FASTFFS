@@ -50,16 +50,14 @@ static int sector_footer_state(struct fffs *fs, size_t sector,
     enum fffs_lifecycle_object_state footer_state =
         fffs_lifecycle_decode_footer(footer[5]);
     if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            footer[8] != 'F' || footer[9] != 'F' ||
-            footer[10] != 'S' || footer[11] != 'D' ||
-            footer_state == FFFS_LIFECYCLE_OBJECT_INVALID) {
-        return FFFS_ERR_CORRUPT;
+            footer[6] != 'F' || footer[7] != 'F' ||
+            footer[8] != 'S' || footer[9] != 'D' ||
+            footer_state == FFFS_LIFECYCLE_OBJECT_INVALID ||
+            footer_state == FFFS_LIFECYCLE_OBJECT_ERASED) {
+        *state = GC_SECTOR_DIRTY_NO_FOOTER;
+        return FFFS_OK;
     }
-    if (footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED &&
-            footer[6] == 0xff && footer[7] == 0xff &&
-            footer[8] == 'F' && footer[9] == 'F' &&
-            footer[10] == 'S' && footer[11] == 'D') {
+    if (footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
         *state = GC_SECTOR_TOMBSTONED;
         return FFFS_OK;
     }
@@ -182,8 +180,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    if (state == GC_SECTOR_DIRTY_NO_FOOTER &&
-            fffs_sector_is_inflight(fs, (uint16_t)s)) {
+    if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.live_seen = true;
         fs->gc_md.active = false;

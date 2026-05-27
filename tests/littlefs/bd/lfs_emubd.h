@@ -10,6 +10,7 @@
  * Copyright (c) 2026, FASTFFS contributors.
  * - This fork is used as the FASTFFS verification backend.
  * - Program operations model NOR flash monotonic 1->0 writes.
+ * - Added deterministic sampled program/erase fault helpers.
  */
 #ifndef LFS_EMUBD_H
 #define LFS_EMUBD_H
@@ -70,6 +71,15 @@ typedef int32_t lfs_emubd_spowercycles_t;
 // Type for delays in nanoseconds
 typedef uint64_t lfs_emubd_sleep_t;
 typedef int64_t lfs_emubd_ssleep_t;
+
+struct lfs_emubd_prog_fault_config {
+    // Seed for deterministic sampled partial programming.
+    uint32_t seed;
+
+    // Maximum number of intended 1->0 bit transitions to sample. A value of
+    // zero samples all candidate bits.
+    lfs_size_t max_bits;
+};
 
 // emubd config, this is required for testing
 struct lfs_emubd_config {
@@ -157,6 +167,8 @@ typedef struct lfs_emubd {
     lfs_emubd_io_t readed;
     lfs_emubd_io_t proged;
     lfs_emubd_io_t erased;
+    lfs_emubd_io_t synced;
+    lfs_emubd_sleep_t slept;
     lfs_emubd_powercycles_t power_cycles;
     lfs_ssize_t ooo_block;
     lfs_emubd_block_t *ooo_data;
@@ -214,6 +226,12 @@ lfs_emubd_sio_t lfs_emubd_proged(const struct lfs_config *cfg);
 // Get total amount of bytes erased
 lfs_emubd_sio_t lfs_emubd_erased(const struct lfs_config *cfg);
 
+// Get total number of sync calls
+lfs_emubd_sio_t lfs_emubd_synced(const struct lfs_config *cfg);
+
+// Get accumulated configured sleep time in nanoseconds
+lfs_emubd_ssleep_t lfs_emubd_slept(const struct lfs_config *cfg);
+
 // Manually set amount of bytes read
 int lfs_emubd_setreaded(const struct lfs_config *cfg, lfs_emubd_io_t readed);
 
@@ -222,6 +240,13 @@ int lfs_emubd_setproged(const struct lfs_config *cfg, lfs_emubd_io_t proged);
 
 // Manually set amount of bytes erased
 int lfs_emubd_seterased(const struct lfs_config *cfg, lfs_emubd_io_t erased);
+
+// Manually set number of sync calls
+int lfs_emubd_setsynced(const struct lfs_config *cfg, lfs_emubd_io_t synced);
+
+// Manually set accumulated configured sleep time in nanoseconds
+int lfs_emubd_setslept(const struct lfs_config *cfg,
+        lfs_emubd_sleep_t slept);
 
 // Get simulated wear on a given block
 lfs_emubd_swear_t lfs_emubd_wear(const struct lfs_config *cfg,
@@ -241,6 +266,18 @@ int lfs_emubd_setpowercycles(const struct lfs_config *cfg,
 
 // Create a copy-on-write copy of the state of this block device
 int lfs_emubd_copy(const struct lfs_config *cfg, lfs_emubd_t *copy);
+
+// Program a deterministic sampled subset of the intended 1->0 bit
+// transitions. This is useful for modeling interrupted NOR programs.
+int lfs_emubd_prog_random_clear(const struct lfs_config *cfg,
+        lfs_block_t block, lfs_off_t off, const void *buffer,
+        lfs_size_t size, const struct lfs_emubd_prog_fault_config *fault,
+        lfs_size_t *sampled_bits);
+
+// Fill an erase block with deterministic undefined data. This is useful for
+// modeling interrupted erases on a temporary branch.
+int lfs_emubd_erase_random(const struct lfs_config *cfg,
+        lfs_block_t block, uint32_t seed);
 
 
 #ifdef __cplusplus

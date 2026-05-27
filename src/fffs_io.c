@@ -211,9 +211,15 @@ int fffs_program_index_header(const struct fffs_backend *backend,
         FFFS_INDEX_VERSION,
         (uint8_t)((index_sectors << 4) | (serial & 0x0f)),
         sector_shift,
-        FFFS_INDEX_FLAGS_VALID,
+        0xff,
     };
-    return backend_program_aligned(backend, offset, hdr, sizeof(hdr));
+    int err = backend_program_aligned(backend, offset, hdr, sizeof(hdr));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    uint8_t flags = FFFS_INDEX_FLAGS_VALID;
+    return backend_program_aligned(backend, offset + 7u,
+            &flags, sizeof(flags));
 }
 
 static bool index_serial_newer(uint8_t serial, uint8_t best_serial) {
@@ -420,10 +426,18 @@ static size_t index_sector_end(const struct fffs *fs, size_t sector) {
 
 static int program_index_record_at(struct fffs *fs, size_t offset,
         uint16_t slot, uint16_t head) {
-    uint8_t rec[4];
-    store16(rec, slot);
-    store16(rec + 2, head);
-    return fffs_flash_program_aligned(fs, offset, rec, sizeof(rec));
+    uint8_t slot_bytes[2];
+    store16(slot_bytes, slot);
+    int err = fffs_flash_program_aligned(fs, offset, slot_bytes,
+            sizeof(slot_bytes));
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    uint8_t head_bytes[2];
+    store16(head_bytes, head);
+    return fffs_flash_program_aligned(fs, offset + 2u, head_bytes,
+            sizeof(head_bytes));
 }
 
 static int clobber_active_tail(struct fffs *fs, size_t rec_off) {
@@ -434,6 +448,14 @@ static int clobber_active_tail(struct fffs *fs, size_t rec_off) {
     }
     fs->next_index_offset = rec_off + 4;
     return FFFS_OK;
+}
+
+static int clobber_or_reject_active_tail(struct fffs *fs, size_t rec_off,
+        bool terminal_active_tail) {
+    if (fs->strict || !terminal_active_tail) {
+        return FFFS_ERR_CORRUPT;
+    }
+    return clobber_active_tail(fs, rec_off);
 }
 
 static bool index_bytes_erased(const uint8_t *bytes, size_t size) {
@@ -624,31 +646,24 @@ static int index_record_writer_flush(struct fffs *fs,
 
 static int index_record_writer_append(struct fffs *fs,
         struct index_record_writer *writer, uint16_t slot, uint16_t head) {
-    if (fs->next_index_offset + writer->len + 4 >
+    int err = index_record_writer_flush(fs, writer);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    if (fs->next_index_offset + 4 >
             (fs->active_index_sector + 1) * fs->sector_size) {
-        int err = index_record_writer_flush(fs, writer);
-        if (err != FFFS_OK) {
-            return err;
-        }
         err = index_record_writer_prepare_spill(fs, writer);
         if (err != FFFS_OK) {
             return err;
         }
     }
 
-    if (writer->len + 4 > sizeof(writer->buf)) {
-        int err = index_record_writer_flush(fs, writer);
-        if (err != FFFS_OK) {
-            return err;
-        }
+    err = program_index_record_at(fs, fs->next_index_offset, slot, head);
+    if (err != FFFS_OK) {
+        return err;
     }
-
-    store16(writer->buf + writer->len, slot);
-    store16(writer->buf + writer->len + 2, head);
-    writer->len += 4;
-    if (writer->len == sizeof(writer->buf)) {
-        return index_record_writer_flush(fs, writer);
-    }
+    fs->next_index_offset += 4;
     return FFFS_OK;
 }
 
@@ -889,13 +904,6 @@ int fffs_replay_index(struct fffs *fs) {
                     }
                     continue;
                 }
-                if (head == 0) {
-                    err = fffs_index_remove(fs, slot);
-                    if (err != FFFS_OK) {
-                        return err;
-                    }
-                    continue;
-                }
                 bool terminal_active_tail = false;
                 /*
                  * An interrupted final append can leave wrong slot/head bits.
@@ -908,25 +916,40 @@ int fffs_replay_index(struct fffs *fs) {
                         return err;
                     }
                 }
-                if (head < fs->index_sectors || head >= fs->sector_count) {
-                    if (fs->strict || !terminal_active_tail) {
-                        return FFFS_ERR_CORRUPT;
-                    }
-                    err = clobber_active_tail(fs, rec_off);
+
+                if (slot == 0 || slot == UINT16_MAX ||
+                        head == UINT16_MAX) {
+                    err = clobber_or_reject_active_tail(fs, rec_off,
+                            terminal_active_tail);
                     if (err != FFFS_OK) {
                         return err;
                     }
                     goto next_sector;
                 }
+                if (head == 0) {
+                    err = fffs_index_remove(fs, slot);
+                    if (err != FFFS_OK) {
+                        return err;
+                    }
+                    continue;
+                }
+
+                if (head < fs->index_sectors || head >= fs->sector_count) {
+                    err = clobber_or_reject_active_tail(fs, rec_off,
+                            terminal_active_tail);
+                    if (err != FFFS_OK) {
+                        return err;
+                    }
+                    goto next_sector;
+                }
+
                 if (terminal_active_tail) {
                     uint32_t root_size;
                     err = fffs_read_root_size_for_slot(fs, head, slot,
                             &root_size);
                     if (err != FFFS_OK) {
-                        if (fs->strict) {
-                            return FFFS_ERR_CORRUPT;
-                        }
-                        err = clobber_active_tail(fs, rec_off);
+                        err = clobber_or_reject_active_tail(fs, rec_off,
+                                terminal_active_tail);
                         if (err != FFFS_OK) {
                             return err;
                         }
@@ -989,11 +1012,12 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
     enum fffs_lifecycle_object_state footer_state =
         fffs_lifecycle_decode_footer(footer[5]);
     if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
-            (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
-             footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED)) {
-        return FFFS_ERR_CORRUPT;
+            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0) {
+        return FFFS_ERR_NO_SPACE;
+    }
+    if (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
+            footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
+        return FFFS_ERR_NO_SPACE;
     }
     if (serial) {
         *serial = load32(footer);
@@ -1002,20 +1026,28 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
 }
 
 static void encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
-        uint32_t serial) {
+        uint32_t serial, bool valid) {
     memset(footer, 0xff, FFFS_SECTOR_FOOTER_SIZE);
     store32(footer, serial);
     footer[4] = FFFS_SECTOR_TYPE_FILE;
-    footer[5] = FFFS_SECTOR_FLAGS_VALID;
-    memcpy(footer + 8, FFFS_SECTOR_MAGIC, 4);
+    footer[5] = valid ? FFFS_SECTOR_FLAGS_VALID : 0xff;
+    memcpy(footer + 6, FFFS_SECTOR_MAGIC, 4);
 }
 
 int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t serial) {
     uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    encode_sector_footer(footer, serial);
-    return fffs_flash_program_aligned(fs, fffs_sector_footer_offset(fs, sector),
+    encode_sector_footer(footer, serial, false);
+    int err = fffs_flash_program_aligned(fs, fffs_sector_footer_offset(fs, sector),
             footer, sizeof(footer));
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    uint8_t state = FFFS_SECTOR_FLAGS_VALID;
+    return fffs_flash_program_aligned(fs,
+            fffs_sector_footer_offset(fs, sector) + 5u,
+            &state, sizeof(state));
 }
 
 int fffs_tombstone_sector(struct fffs *fs, uint16_t sector) {
@@ -1195,8 +1227,7 @@ static bool validate_live_file_footer(const uint8_t *footer) {
     enum fffs_lifecycle_object_state footer_state =
         fffs_lifecycle_decode_footer(footer[5]);
     return footer[4] == FFFS_SECTOR_TYPE_FILE &&
-        footer[6] == 0xff && footer[7] == 0xff &&
-        memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) == 0 &&
+        memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) == 0 &&
         footer_state == FFFS_LIFECYCLE_OBJECT_LIVE;
 }
 
@@ -1326,8 +1357,7 @@ int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
         enum fffs_lifecycle_object_state footer_state =
             fffs_lifecycle_decode_footer(footer[5]);
         if (footer[4] == FFFS_SECTOR_TYPE_FILE &&
-                footer[6] == 0xff && footer[7] == 0xff &&
-                memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) == 0 &&
+                memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) == 0 &&
                 footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
             walk->cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
             walk->claimed_data_end = 0;
@@ -1661,8 +1691,7 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     enum fffs_lifecycle_object_state footer_state =
         fffs_lifecycle_decode_footer(footer[5]);
     if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
+            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0 ||
             footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
         return FFFS_ERR_NO_SPACE;
     }
@@ -1750,7 +1779,7 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
     store32(md + 11, commit_index ? total_size : file_offset);
     md[15] = commit_index ? FFFS_MD_TYPE_FILE_ROOT_V1 :
         FFFS_MD_TYPE_FILE_CONT_V1;
-    encode_sector_footer(footer, serial);
+    encode_sector_footer(footer, serial, false);
 
     size_t off = (size_t)sector * fs->sector_size + record_off;
     int err = write_footer ?
@@ -1758,6 +1787,15 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         fffs_flash_program_aligned(fs, off, md, FFFS_MD_FILE_RECORD_SIZE);
     if (err != FFFS_OK) {
         return err;
+    }
+    if (write_footer) {
+        uint8_t state = FFFS_SECTOR_FLAGS_VALID;
+        err = fffs_flash_program_aligned(fs,
+                fffs_sector_footer_offset(fs, sector) + 5u,
+                &state, sizeof(state));
+        if (err != FFFS_OK) {
+            return err;
+        }
     }
     size_t logical_data_len = commit_index ?
         (size_t)file->root_payload_offset + data_len : data_len;

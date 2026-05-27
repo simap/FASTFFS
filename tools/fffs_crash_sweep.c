@@ -24,6 +24,8 @@ enum {
     SWEEP_MAX_OPS = 128,
     SWEEP_SCRATCH_SIZE = 4096,
     SWEEP_MAX_MUTATIONS_PER_OP = 256,
+    SWEEP_DEFAULT_SAMPLED_PERMUTATIONS = 5,
+    SWEEP_DEFAULT_SAMPLED_MAX_BITS = 2,
 };
 
 enum sweep_op_type {
@@ -44,9 +46,18 @@ struct sweep_model {
 
 struct sweep_stats {
     uint64_t crash_points;
+    uint64_t sampled_faults;
     uint64_t random_workloads;
     uint64_t tiny_cases;
     uint64_t invariant_failures;
+};
+
+struct sweep_sampler_ctx {
+    const struct sweep_model *before;
+    const struct sweep_model *after;
+    struct sweep_stats *stats;
+    uint32_t workload_id;
+    size_t op_index;
 };
 
 struct mount_storage {
@@ -224,25 +235,65 @@ static void print_model(const char *label, const struct sweep_model *model) {
     fprintf(stderr, "\n");
 }
 
-static int check_invariants(struct fffs_backend *backend, struct fffs *fs,
-        const struct sweep_model *before, const struct sweep_model *after) {
-    struct fffs_inspect_summary summary;
-    int err = fffs_inspect_check(backend, &summary);
-    if (err != FFFS_OK) {
-        fprintf(stderr, "inspect err=%s\n", fffs_status_name(err));
-        return err;
+static void print_observed_model(struct fffs *fs) {
+    fprintf(stderr, "observed:");
+    for (size_t i = 0; i < SWEEP_FILE_COUNT; i++) {
+        char name[FFFS_MAX_NAME + 1];
+        struct fffs_stat st;
+        file_name((uint8_t)i, name, sizeof(name));
+        int err = fffs_stat(fs, name, &st);
+        if (err == FFFS_ERR_NOT_FOUND) {
+            continue;
+        }
+        if (err != FFFS_OK) {
+            fprintf(stderr, " f%zu=<%s>", i, fffs_status_name(err));
+            continue;
+        }
+
+        struct fffs_file file;
+        uint8_t value = 0;
+        size_t nread = 0;
+        err = fffs_open(fs, &file, name, FFFS_O_RDONLY);
+        if (err == FFFS_OK) {
+            err = fffs_read(&file, &value, sizeof(value), &nread);
+            int close_err = fffs_close(&file);
+            if (err == FFFS_OK && close_err != FFFS_OK) {
+                err = close_err;
+            }
+        }
+        if (err == FFFS_OK && nread == 1 && st.size == 1) {
+            fprintf(stderr, " f%zu=%u", i, (unsigned)value);
+        } else {
+            fprintf(stderr, " f%zu=<size=%u read=%s n=%zu>", i,
+                    (unsigned)st.size, fffs_status_name(err), nread);
+        }
     }
-    if (summary.index_corrupt_records || summary.live_entries_corrupt ||
-            summary.data_sectors_corrupt || summary.md_corrupt) {
-        fprintf(stderr,
-                "inspect corrupt index=%zu live=%zu data=%zu md=%zu\n",
-                summary.index_corrupt_records,
-                summary.live_entries_corrupt,
-                summary.data_sectors_corrupt, summary.md_corrupt);
-        return FFFS_ERR_CORRUPT;
+    fprintf(stderr, "\n");
+}
+
+static int check_invariants_ex(struct fffs_backend *backend, struct fffs *fs,
+        const struct sweep_model *before, const struct sweep_model *after,
+        bool allow_raw_corrupt) {
+    if (!allow_raw_corrupt) {
+        struct fffs_inspect_summary summary;
+        int err = fffs_inspect_check(backend, &summary);
+        if (err != FFFS_OK) {
+            fprintf(stderr, "inspect err=%s\n", fffs_status_name(err));
+            return err;
+        }
+        if (summary.live_entries_corrupt ||
+                summary.index_corrupt_records ||
+                summary.data_sectors_corrupt || summary.md_corrupt) {
+            fprintf(stderr,
+                    "inspect corrupt index=%zu live=%zu data=%zu md=%zu\n",
+                    summary.index_corrupt_records,
+                    summary.live_entries_corrupt,
+                    summary.data_sectors_corrupt, summary.md_corrupt);
+            return FFFS_ERR_CORRUPT;
+        }
     }
 
-    err = compare_model(fs, before);
+    int err = compare_model(fs, before);
     if (err == FFFS_OK) {
         return FFFS_OK;
     }
@@ -250,8 +301,60 @@ static int check_invariants(struct fffs_backend *backend, struct fffs *fs,
     if (err != FFFS_OK) {
         print_model("before", before);
         print_model("after", after);
+        print_observed_model(fs);
     }
     return err;
+}
+
+static int check_invariants(struct fffs_backend *backend, struct fffs *fs,
+        const struct sweep_model *before, const struct sweep_model *after) {
+    return check_invariants_ex(backend, fs, before, after, false);
+}
+
+static int verify_sampled_fault(const struct ffsv_fault_case *fault,
+        void *user) {
+    struct sweep_sampler_ctx *ctx = user;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct mount_storage storage;
+
+    int err = mount_storage_init(&storage);
+    if (err != FFFS_OK) {
+        return FFSV_ERR_NOMEM;
+    }
+    err = fffs_host_backend_from_verify_flash(&backend, fault->branch);
+    if (err == FFFS_OK) {
+        err = mount_fs(&fs, &backend, &storage);
+    }
+    bool mounted = err == FFFS_OK;
+    if (err == FFFS_OK) {
+        err = check_invariants_ex(&backend, &fs, ctx->before, ctx->after,
+                true);
+        fffs_unmount(&fs);
+    }
+    mount_storage_destroy(&storage);
+
+    ctx->stats->sampled_faults++;
+    ctx->stats->crash_points++;
+    if (err != FFFS_OK) {
+        ctx->stats->invariant_failures++;
+        const uint8_t *image = ffsv_flash_image(fault->branch);
+        fprintf(stderr,
+                "sample failure workload=%u op=%zu seq=%llu type=%s "
+                "offset=%zu size=%zu perm=%zu seed=%u bits=%zu "
+                "mounted=%d err=%s bytes=%02x%02x%02x%02x\n",
+                (unsigned)ctx->workload_id, ctx->op_index,
+                (unsigned long long)fault->sequence,
+                ffsv_op_name(fault->type), fault->offset, fault->size,
+                fault->permutation, (unsigned)fault->seed,
+                fault->sampled_bits, mounted, fffs_status_name(err),
+                image ? image[fault->offset] : 0,
+                image ? image[fault->offset + 1] : 0,
+                image ? image[fault->offset + 2] : 0,
+                image ? image[fault->offset + 3] : 0);
+        return FFSV_ERR_IO;
+    }
+    return FFSV_OK;
 }
 
 static int collect_mutations(const struct ffsv_op_record *log,
@@ -281,10 +384,11 @@ static bool log_has_injected_sequence(const struct ffsv_flash *flash,
     return false;
 }
 
-static int sweep_op_crashes(const struct ffsv_flash_snapshot *snapshot,
+static int sweep_op_crashes(const struct ffsv_flash *base_flash,
         const struct sweep_op *op, const struct sweep_model *before,
         const struct sweep_model *after, struct sweep_stats *stats,
-        uint32_t workload_id, size_t op_index) {
+        uint32_t workload_id, size_t op_index,
+        size_t sampled_permutations, size_t sampled_max_bits) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
@@ -296,7 +400,7 @@ static int sweep_op_crashes(const struct ffsv_flash_snapshot *snapshot,
     if (err != FFFS_OK) {
         return err;
     }
-    err = flash_to_fs(ffsv_flash_reopen_from_snapshot(&flash, snapshot));
+    err = flash_to_fs(ffsv_flash_cow_clone(&flash, base_flash));
     if (err != FFFS_OK) {
         mount_storage_destroy(&storage);
         return err;
@@ -308,7 +412,31 @@ static int sweep_op_crashes(const struct ffsv_flash_snapshot *snapshot,
     size_t log_before = 0;
     if (err == FFFS_OK) {
         (void)ffsv_flash_log(flash, &log_before);
+        struct sweep_sampler_ctx sampler_ctx = {0};
+        if (sampled_permutations) {
+            sampler_ctx = (struct sweep_sampler_ctx){
+                .before = before,
+                .after = after,
+                .stats = stats,
+                .workload_id = workload_id,
+                .op_index = op_index,
+            };
+            ffsv_flash_set_fault_sampler(flash, &(struct ffsv_fault_sampler){
+                .enabled = true,
+                .op_mask = (UINT32_C(1) << FFSV_OP_PROGRAM) |
+                    (UINT32_C(1) << FFSV_OP_COMMIT_STAGED) |
+                    (UINT32_C(1) << FFSV_OP_ERASE),
+                .seed = UINT32_C(0x5eed0000) ^ workload_id ^
+                    (uint32_t)(op_index * 97u),
+                .permutations_per_op = sampled_permutations,
+                .max_bits_per_permutation = sampled_max_bits,
+                .program_page_size = 256,
+                .verify = verify_sampled_fault,
+                .user = &sampler_ctx,
+            });
+        }
         err = execute_op(&fs, op);
+        ffsv_flash_clear_fault_sampler(flash);
     }
     size_t log_count = 0;
     const struct ffsv_op_record *log = ffsv_flash_log(flash, &log_count);
@@ -345,8 +473,8 @@ static int sweep_op_crashes(const struct ffsv_flash_snapshot *snapshot,
                 mount_storage_destroy(&attempt_storage);
                 return err;
             }
-            err = flash_to_fs(ffsv_flash_reopen_from_snapshot(&attempt_flash,
-                        snapshot));
+            err = flash_to_fs(ffsv_flash_cow_clone(&attempt_flash,
+                        base_flash));
             if (err != FFFS_OK) {
                 mount_storage_destroy(&attempt_storage);
                 mount_storage_destroy(&recovered_storage);
@@ -408,7 +536,8 @@ static int sweep_op_crashes(const struct ffsv_flash_snapshot *snapshot,
 }
 
 static int run_workload(const struct sweep_op *ops, size_t op_count,
-        struct sweep_stats *stats, uint32_t workload_id) {
+        struct sweep_stats *stats, uint32_t workload_id,
+        size_t sampled_permutations, size_t sampled_max_bits) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     struct fffs fs;
@@ -433,20 +562,20 @@ static int run_workload(const struct sweep_op *ops, size_t op_count,
     }
 
     for (size_t i = 0; err == FFFS_OK && i < op_count; i++) {
-        struct ffsv_flash_snapshot before_snapshot;
+        struct ffsv_flash *before_flash = NULL;
         struct sweep_model before_model = model;
         struct sweep_model after_model = model;
         apply_model(&after_model, &ops[i]);
 
-        err = flash_to_fs(ffsv_flash_snapshot_create(flash,
-                    &before_snapshot));
+        err = flash_to_fs(ffsv_flash_cow_clone(&before_flash, flash));
         if (err != FFFS_OK) {
             break;
         }
 
-        err = sweep_op_crashes(&before_snapshot, &ops[i], &before_model,
-                &after_model, stats, workload_id, i);
-        ffsv_flash_snapshot_destroy(&before_snapshot);
+        err = sweep_op_crashes(before_flash, &ops[i], &before_model,
+                &after_model, stats, workload_id, i, sampled_permutations,
+                sampled_max_bits);
+        ffsv_flash_destroy(before_flash);
         if (err != FFFS_OK) {
             break;
         }
@@ -485,7 +614,8 @@ static void random_workload(uint32_t seed, struct sweep_op *ops,
 }
 
 static int run_random(size_t workloads, size_t ops_per_workload,
-        struct sweep_stats *stats) {
+        struct sweep_stats *stats, size_t sampled_permutations,
+        size_t sampled_max_bits) {
     struct sweep_op ops[SWEEP_MAX_OPS];
     if (ops_per_workload > SWEEP_MAX_OPS) {
         return FFFS_ERR_INVALID;
@@ -493,7 +623,8 @@ static int run_random(size_t workloads, size_t ops_per_workload,
     for (size_t i = 0; i < workloads; i++) {
         random_workload((uint32_t)(0xc001d00du + i * 97u), ops,
                 ops_per_workload);
-        int err = run_workload(ops, ops_per_workload, stats, (uint32_t)i);
+        int err = run_workload(ops, ops_per_workload, stats, (uint32_t)i,
+                sampled_permutations, sampled_max_bits);
         stats->random_workloads++;
         if (err != FFFS_OK) {
             return err;
@@ -503,10 +634,12 @@ static int run_random(size_t workloads, size_t ops_per_workload,
 }
 
 static int run_tiny_exhaustive_rec(struct sweep_op *ops, size_t depth,
-        size_t max_depth, struct sweep_stats *stats) {
+        size_t max_depth, struct sweep_stats *stats,
+        size_t sampled_permutations, size_t sampled_max_bits) {
     if (depth == max_depth) {
         int err = run_workload(ops, max_depth, stats,
-                (uint32_t)(UINT32_C(0x80000000) | stats->tiny_cases));
+                (uint32_t)(UINT32_C(0x80000000) | stats->tiny_cases),
+                sampled_permutations, sampled_max_bits);
         stats->tiny_cases++;
         return err;
     }
@@ -517,7 +650,8 @@ static int run_tiny_exhaustive_rec(struct sweep_op *ops, size_t depth,
             .file_id = (uint8_t)file,
             .value = (uint8_t)(depth * 17u + file),
         };
-        int err = run_tiny_exhaustive_rec(ops, depth + 1, max_depth, stats);
+        int err = run_tiny_exhaustive_rec(ops, depth + 1, max_depth, stats,
+                sampled_permutations, sampled_max_bits);
         if (err != FFFS_OK) {
             return err;
         }
@@ -527,7 +661,8 @@ static int run_tiny_exhaustive_rec(struct sweep_op *ops, size_t depth,
             .file_id = (uint8_t)file,
             .value = 0,
         };
-        err = run_tiny_exhaustive_rec(ops, depth + 1, max_depth, stats);
+        err = run_tiny_exhaustive_rec(ops, depth + 1, max_depth, stats,
+                sampled_permutations, sampled_max_bits);
         if (err != FFFS_OK) {
             return err;
         }
@@ -535,12 +670,14 @@ static int run_tiny_exhaustive_rec(struct sweep_op *ops, size_t depth,
     return FFFS_OK;
 }
 
-static int run_tiny_exhaustive(size_t depth, struct sweep_stats *stats) {
+static int run_tiny_exhaustive(size_t depth, struct sweep_stats *stats,
+        size_t sampled_permutations, size_t sampled_max_bits) {
     struct sweep_op ops[SWEEP_MAX_OPS];
     if (depth > SWEEP_MAX_OPS) {
         return FFFS_ERR_INVALID;
     }
-    return run_tiny_exhaustive_rec(ops, 0, depth, stats);
+    return run_tiny_exhaustive_rec(ops, 0, depth, stats,
+            sampled_permutations, sampled_max_bits);
 }
 
 static size_t parse_arg(const char *text, size_t fallback) {
@@ -589,15 +726,23 @@ int main(int argc, char **argv) {
     size_t random_workloads = parse_arg(argc > 1 ? argv[1] : NULL, 10);
     size_t ops_per_workload = parse_arg(argc > 2 ? argv[2] : NULL, 24);
     size_t tiny_depth = parse_arg(argc > 3 ? argv[3] : NULL, 3);
+    size_t sampled_permutations = parse_arg(argc > 4 ? argv[4] : NULL,
+            SWEEP_DEFAULT_SAMPLED_PERMUTATIONS);
+    size_t sampled_max_bits = parse_arg(argc > 5 ? argv[5] : NULL,
+            SWEEP_DEFAULT_SAMPLED_MAX_BITS);
     struct sweep_stats stats = {0};
 
     printf("fffs crash sweep [%s]\n", cache_mode_name());
-    int err = run_random(random_workloads, ops_per_workload, &stats);
+    int err = run_random(random_workloads, ops_per_workload, &stats,
+            sampled_permutations, sampled_max_bits);
     if (err == FFFS_OK && tiny_depth > 0) {
-        err = run_tiny_exhaustive(tiny_depth, &stats);
+        err = run_tiny_exhaustive(tiny_depth, &stats, sampled_permutations,
+                sampled_max_bits);
     }
 
     print_count_line("crash points tested", stats.crash_points);
+    print_count_line("sampled fault cases", stats.sampled_faults);
+    print_count_line("sampled max bits", sampled_max_bits);
     print_count_line("random workloads", stats.random_workloads);
     print_count_line("tiny-volume exhaustive cases", stats.tiny_cases);
     print_count_line("invariant failures", stats.invariant_failures);

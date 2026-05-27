@@ -66,8 +66,7 @@ static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
     enum fffs_lifecycle_object_state footer_state =
         fffs_lifecycle_decode_footer(footer[5]);
     if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 0xff || footer[7] != 0xff ||
-            memcmp(footer + 8, FFFS_SECTOR_MAGIC, 4) != 0 ||
+            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0 ||
             (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
              footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED)) {
         return false;
@@ -421,7 +420,6 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             continue;
         }
         if (!valid_footer(footer, NULL)) {
-            summary->data_sectors_corrupt += 1;
             continue;
         }
         if (fffs_lifecycle_decode_footer(footer[5]) ==
@@ -605,7 +603,7 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
 
         uint32_t serial = 0;
         if (!valid_footer(footer, &serial)) {
-            fprintf(out, "sector=%zu corrupt-footer\n", sector);
+            fprintf(out, "sector=%zu invalid-footer\n", sector);
             continue;
         }
 

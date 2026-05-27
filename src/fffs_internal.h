@@ -55,7 +55,7 @@ struct fffs_read_cache_view {
 #define FFFS_MD_FLAGS_TOMBSTONED FFFS_LIFECYCLE_TOMBSTONED
 #define FFFS_MD_TYPE_FILE_ROOT_V1 0x11
 #define FFFS_MD_TYPE_FILE_CONT_V1 0x12
-#define FFFS_SECTOR_FOOTER_SIZE 12
+#define FFFS_SECTOR_FOOTER_SIZE 10
 #define FFFS_SECTOR_MAGIC "FFSD"
 #define FFFS_SECTOR_FLAG_VALID 0x80
 #define FFFS_SECTOR_FLAG_TOMBSTONED 0x40
@@ -95,10 +95,8 @@ static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_footer(
     enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
     enum fffs_bitmirror_state tombstone =
         fffs_lifecycle_tombstone_pair(state);
-    enum fffs_bitmirror_state hint = fffs_lifecycle_hint_pair(state);
     if (valid == FFFS_BITMIRROR_MIXED ||
-            tombstone == FFFS_BITMIRROR_MIXED ||
-            hint == FFFS_BITMIRROR_MIXED) {
+            tombstone == FFFS_BITMIRROR_MIXED) {
         return FFFS_LIFECYCLE_OBJECT_INVALID;
     }
     if (tombstone == FFFS_BITMIRROR_CLEARED) {
