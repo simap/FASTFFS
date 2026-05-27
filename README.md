@@ -134,6 +134,44 @@ The churn benchmark writes about 8.6 MiB of creates/replaces/deletes while keepi
 | Churn final cold list, 105 files | 16.0 ms | 96.9 ms | 173 ms | 13.6 ms | 115 ms |
 | Churn cold read 350 KiB total | 4,508 KiB/s | 4,501 KiB/s | 2,560 KiB/s | 3,193 KiB/s | 828.2 KiB/s |
 
+## Power Loss And Corruption Testing
+
+FASTFFS avoids corruption by ordering writes so new file data is
+not reachable until the final index record is appended. If power fails
+while writing file payload or file metadata, the old committed file remains
+and the incomplete write is left as orphaned data for later GC. If power fails
+while appending the final index record, the last record may be invalid and is
+checked on mount. If recovery is allowed and the bad record is provably the end
+of the index, the partial record is effectively removed by overwriting it,
+leaving the filesystem in the previous valid state. This ensures that committed
+data remains intact and readable, and partial writes do not corrupt any previous
+data.
+
+FASTFFS builds upon the LittleFS test flash emulation and fault-injection
+system.
+
+The verifier models more than simple before/after operation failure. It
+uses a NOR-like backend derived from LittleFS `emubd` to simulate multiple
+possible persisted state outcomes at every possible program/erase. By
+randomizing eligible bits inside sampled program and erase operations, it fuzzes
+single and multi-bit partial write outcomes across index records, metadata,
+payloads, footers, and lifecycle fields. Each sampled crash branch is remounted
+and checked against the expected committed namespace. Visible files are read
+back byte-for-byte through a deterministic namespace hash. Thorough sweeps also
+run the internal sector inspector. High-volume sweeps can run namespace-only to
+spend the time on more crash points and partial-program branches.
+
+Recent host sweep evidence:
+
+| Sweep | Geometry | Workload | Crash Points | Partial Fault Cases | Result |
+|---|---:|---:|---:|---:|---:|
+| API crash sweep, namespace-only | 4 KiB sectors, 512 KiB image | 3,051,374 API steps, 168.4 MB writes, 37,925 deletes | 45,744,322 | 43,092,792 | 0 failures |
+| API crash sweep, namespace-only | 256 B sectors, 64 KiB image | 8,572,968 API steps, 425.4 MB writes, 218,790 deletes | 273,580,857 | 243,182,984 | 0 failures |
+
+The 256 B sector run intentionally creates frequent index rotation, index
+compaction, GC pressure, and long file chains. The 4 KiB sector run matches a
+more typical NOR erase-sector geometry.
+
 ## Notes in no particular order
 
 JesFS really punches above it's weight. It's simple and lightweight.

@@ -121,6 +121,7 @@ struct api_sampler_ctx {
     const char *log_path;
     struct ffsv_flash *base_flash;
     struct fffs *base_fs;
+    bool inspect_internals;
     uint32_t workload_id;
     size_t step_index;
     size_t step_count;
@@ -171,6 +172,7 @@ struct dispatcher {
     size_t thread_count;
     size_t sampled_permutations;
     size_t sampled_max_bits;
+    bool inspect_internals;
     struct api_sweep_config flash_config;
     uint64_t next_report_ns;
     int err;
@@ -725,19 +727,22 @@ static void log_original_index_view(FILE *out, struct fffs *fs,
 }
 
 static int check_image_ex(struct fffs_backend *backend, struct fffs *fs,
-        uint64_t allowed_a, uint64_t allowed_b, bool allow_raw_corrupt) {
-    struct fffs_inspect_summary summary;
-    int err = fffs_inspect_check(backend, &summary);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    if (!allow_raw_corrupt && (summary.index_corrupt_records ||
-            summary.live_entries_corrupt || summary.data_sectors_corrupt ||
-            summary.md_corrupt)) {
-        return FFFS_ERR_CORRUPT;
+        uint64_t allowed_a, uint64_t allowed_b, bool allow_raw_corrupt,
+        bool inspect_internals) {
+    if (inspect_internals) {
+        struct fffs_inspect_summary summary;
+        int err = fffs_inspect_check(backend, &summary);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (!allow_raw_corrupt && (summary.index_corrupt_records ||
+                summary.live_entries_corrupt ||
+                summary.data_sectors_corrupt || summary.md_corrupt)) {
+            return FFFS_ERR_CORRUPT;
+        }
     }
     uint64_t actual;
-    err = namespace_hash(fs, &actual);
+    int err = namespace_hash(fs, &actual);
     if (err != FFFS_OK) {
         return err;
     }
@@ -763,7 +768,7 @@ static int verify_sampled_fault(const struct ffsv_fault_case *fault,
     bool mounted = err == FFFS_OK;
     if (err == FFFS_OK) {
         err = check_image_ex(&backend, &fs, ctx->allowed_a, ctx->allowed_b,
-                true);
+                true, ctx->inspect_internals);
     }
 
     ctx->stats->sampled_faults++;
@@ -919,7 +924,7 @@ static bool log_has_injected_sequence(const struct ffsv_flash *flash,
 static int verify_cow_crash_point(const struct api_runtime_state *base,
         const struct api_step *step, const struct crash_point *point,
         FILE *log, const char *log_path,
-        const struct api_sweep_config *config) {
+        const struct api_sweep_config *config, bool inspect_internals) {
     struct api_runtime_state attempt;
     int err = runtime_clone(&attempt, base->flash, &base->fs,
             &base->open_file, &base->tx, config);
@@ -961,7 +966,8 @@ static int verify_cow_crash_point(const struct api_runtime_state *base,
         }
         if (err == FFFS_OK) {
             err = check_image_ex(&attempt.backend, &recovered,
-                    point->allowed_a, point->allowed_b, true);
+                    point->allowed_a, point->allowed_b, true,
+                    inspect_internals);
             if (err != FFFS_OK && log) {
                 fprintf(log,
                         "api crash diagnostic workload=%u step=%u type=%u "
@@ -1002,7 +1008,8 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         struct api_stats *stats,
         size_t sampled_permutations, size_t sampled_max_bits, FILE *log,
         const char *log_path, struct dispatcher *dispatcher,
-        size_t thread_id, const struct api_sweep_config *config) {
+        size_t thread_id, const struct api_sweep_config *config,
+        bool inspect_internals) {
     struct fffs fs;
     struct fffs_file open_file;
     struct mount_storage storage;
@@ -1057,6 +1064,7 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
                 .log_path = log_path,
                 .base_flash = flash,
                 .base_fs = &fs,
+                .inspect_internals = inspect_internals,
                 .workload_id = workload_id,
                 .step_index = i,
                 .step_count = step_count,
@@ -1104,7 +1112,7 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         }
         for (size_t p = point_start; p < *point_count; p++) {
             err = verify_cow_crash_point(&base, &steps[i], &points[p], log,
-                    log_path, config);
+                    log_path, config, inspect_internals);
             stats->crash_points++;
             if (err != FFFS_OK) {
                 stats->invariant_failures++;
@@ -1209,7 +1217,7 @@ static int collect_workload_points(const struct api_step *steps,
         struct api_stats *stats, size_t sampled_permutations,
         size_t sampled_max_bits, struct dispatcher *dispatcher,
         size_t thread_id, const char *log_path,
-        const struct api_sweep_config *config) {
+        const struct api_sweep_config *config, bool inspect_internals) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
     int err = init_formatted_flash(&flash, &backend, config);
@@ -1217,7 +1225,7 @@ static int collect_workload_points(const struct api_step *steps,
         err = run_steps(flash, &backend, steps, step_count, points,
                 point_count, workload_id, stats, sampled_permutations,
                 sampled_max_bits, log, log_path, dispatcher, thread_id,
-                config);
+                config, inspect_internals);
         if (err == FFFS_OK) {
             log_flash_wear(log, flash, workload_id, wear_stats);
         }
@@ -1508,7 +1516,7 @@ static int run_workload(const struct api_step *steps, size_t step_count,
         struct api_stats *stats, uint32_t workload_id, FILE *log,
         struct dispatcher *dispatcher, size_t thread_id,
         struct wear_stats *wear_stats, const char *log_path,
-        const struct api_sweep_config *config) {
+        const struct api_sweep_config *config, bool inspect_internals) {
     struct crash_point *points = calloc(API_SWEEP_MAX_CRASH_POINTS,
             sizeof(*points));
     if (!points) {
@@ -1519,7 +1527,7 @@ static int run_workload(const struct api_step *steps, size_t step_count,
             &point_count, workload_id, log, wear_stats, stats,
             dispatcher ? dispatcher->sampled_permutations : 0,
             dispatcher ? dispatcher->sampled_max_bits : 0,
-            dispatcher, thread_id, log_path, config);
+            dispatcher, thread_id, log_path, config, inspect_internals);
     if (log) {
         fprintf(log, "seed=0x%08x crash_points=%zu\n",
                 (unsigned)workload_id, point_count);
@@ -1648,7 +1656,8 @@ static void *random_worker_main(void *arg) {
         }
         int err = run_workload(steps, count, &ctx->stats, seed, ctx->log,
                 dispatcher, ctx->thread_id, &ctx->last_wear,
-                ctx->log_path, &dispatcher->flash_config);
+                ctx->log_path, &dispatcher->flash_config,
+                dispatcher->inspect_internals);
         last_err = err;
         ctx->stats.random_workloads++;
         status.active = false;
@@ -1687,7 +1696,7 @@ static int run_random(uint32_t seed_start, size_t seed_count,
         size_t thread_count, size_t sampled_permutations,
         size_t sampled_max_bits, const char *log_path,
         const struct api_sweep_config *flash_config, struct api_stats *stats,
-        struct wear_summary *wear_summary) {
+        struct wear_summary *wear_summary, bool inspect_internals) {
     if (thread_count == 0 || thread_count > API_SWEEP_MAX_THREADS) {
         return FFFS_ERR_INVALID;
     }
@@ -1710,6 +1719,7 @@ static int run_random(uint32_t seed_start, size_t seed_count,
         .thread_count = thread_count,
         .sampled_permutations = sampled_permutations,
         .sampled_max_bits = sampled_max_bits,
+        .inspect_internals = inspect_internals,
         .flash_config = *flash_config,
         .next_report_ns = progress_now_ns() +
             (uint64_t)API_SWEEP_PROGRESS_INTERVAL_SEC *
@@ -1779,6 +1789,7 @@ struct cli_options {
     const char *log_path;
     size_t partial_write_samples;
     size_t partial_write_bits;
+    bool inspect_internals;
     struct api_sweep_config flash_config;
 };
 
@@ -1891,6 +1902,7 @@ static int parse_cli(int argc, char **argv, struct cli_options *opts,
         .log_path = default_log,
         .partial_write_samples = API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES,
         .partial_write_bits = API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS,
+        .inspect_internals = true,
         .flash_config = {
             .sector_size = API_SWEEP_DEFAULT_SECTOR_SIZE,
             .sector_count = API_SWEEP_DEFAULT_SECTOR_COUNT,
@@ -1986,6 +1998,9 @@ static int parse_cli(int argc, char **argv, struct cli_options *opts,
                         &opts->flash_config.index_sectors) != FFFS_OK) {
                 return FFFS_ERR_INVALID;
             }
+        } else if (strcmp(arg, "--namespace-only") == 0 ||
+                strcmp(arg, "--no-inspect") == 0) {
+            opts->inspect_internals = false;
         } else {
             return FFFS_ERR_INVALID;
         }
@@ -2058,6 +2073,9 @@ static void print_usage(const char *argv0) {
             "(default %u)\n", (unsigned)API_SWEEP_DEFAULT_SECTOR_COUNT);
     printf("  -I, --index-sectors <count>       FASTFFS index sectors "
             "(default %u)\n", (unsigned)API_SWEEP_DEFAULT_INDEX_SECTORS);
+    printf("      --namespace-only              skip internal sector "
+            "inspection; still mount, list, and read visible files\n");
+    printf("      --no-inspect                  alias for --namespace-only\n");
     printf("  -h, --help                        show this help and exit\n");
     printf("\n");
     printf("Examples:\n");
@@ -2091,7 +2109,7 @@ int main(int argc, char **argv) {
             opts.transaction_limit, opts.target_write_multiple,
             opts.thread_count, opts.partial_write_samples,
             opts.partial_write_bits, opts.log_path, &opts.flash_config,
-            &stats, &wear_summary);
+            &stats, &wear_summary, opts.inspect_internals);
     printf("seed: 0x%08x\n", (unsigned)opts.seed_start);
     print_count_line("threads", opts.thread_count);
     print_count_line("runs", opts.run_count);
@@ -2105,6 +2123,8 @@ int main(int argc, char **argv) {
     print_count_line("sector count", opts.flash_config.sector_count);
     print_count_line("index sectors", opts.flash_config.index_sectors);
     print_count_line("image bytes", api_sweep_image_size(&opts.flash_config));
+    printf("inspect internals: %s\n",
+            opts.inspect_internals ? "yes" : "no");
     print_count_line("partial-write samples", opts.partial_write_samples);
     print_count_line("partial-write bits", opts.partial_write_bits);
     print_count_line("generated API steps", stats.generated_steps);
