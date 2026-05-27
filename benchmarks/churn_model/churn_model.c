@@ -17,11 +17,11 @@ static uint32_t choose_churn_size(bench_churn_model_t *model,
                                   bench_churn_class_t *cls)
 {
     uint32_t r = prng_next(model) % 1000u;
-    if (r < 930u) {
+    if (r < 800u) {
         *cls = BENCH_CHURN_CLASS_SMALL;
         return (10u * 1024u) + (prng_next(model) % (10u * 1024u + 1u));
     }
-    if (r < 995u) {
+    if (r < 950u) {
         *cls = BENCH_CHURN_CLASS_MEDIUM;
         return (20u * 1024u) + (prng_next(model) % (40u * 1024u + 1u));
     }

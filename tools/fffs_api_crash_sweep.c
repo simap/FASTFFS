@@ -22,9 +22,9 @@
 #define API_SWEEP_INDEX_CACHE_SIZE FFFS_INDEX_CACHE_BYTES(API_SWEEP_INDEX_HEADS)
 
 enum {
-    API_SWEEP_SECTOR_SIZE = 256,
-    API_SWEEP_SECTOR_COUNT = 256,
-    API_SWEEP_INDEX_SECTORS = 3,
+    API_SWEEP_DEFAULT_SECTOR_SIZE = 256,
+    API_SWEEP_DEFAULT_SECTOR_COUNT = 256,
+    API_SWEEP_DEFAULT_INDEX_SECTORS = 3,
     API_SWEEP_FILE_COUNT = BENCH_CHURN_MAX_FILES,
     API_SWEEP_DEFAULT_MAX_STEPS = 262144,
     API_SWEEP_DEFAULT_SEED = UINT32_C(0x46464653),
@@ -32,10 +32,9 @@ enum {
     API_SWEEP_DEFAULT_WRITE_MULTIPLE = 2,
     API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES = 1,
     API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS = 2,
-    API_SWEEP_MAX_CONTENT = (API_SWEEP_SECTOR_SIZE * API_SWEEP_SECTOR_COUNT *
-            40u) / 100u,
     API_SWEEP_PROGRAM_GRANULE = 4,
     API_SWEEP_SCRATCH_SIZE = 4096,
+    API_SWEEP_ALLOC_MAP_WORDS = 512,
     API_SWEEP_MAX_CRASH_POINTS = 262144,
     API_SWEEP_CHURN_GC_STEPS = 8,
     API_SWEEP_PROGRESS_INTERVAL_SEC = 10,
@@ -105,6 +104,13 @@ struct api_stats {
     uint64_t truncated_workloads;
 };
 
+struct api_sweep_config {
+    size_t sector_size;
+    size_t sector_count;
+    size_t index_sectors;
+    enum fffs_sector_size format_sector_size;
+};
+
 struct api_sampler_ctx {
     uint64_t allowed_a;
     uint64_t allowed_b;
@@ -165,6 +171,7 @@ struct dispatcher {
     size_t thread_count;
     size_t sampled_permutations;
     size_t sampled_max_bits;
+    struct api_sweep_config flash_config;
     uint64_t next_report_ns;
     int err;
     struct worker_status *statuses;
@@ -200,7 +207,7 @@ struct mount_storage {
     void *index_cache;
     uint8_t scratch[API_SWEEP_SCRATCH_SIZE];
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
-    uint32_t alloc_map[512];
+    uint32_t alloc_map[API_SWEEP_ALLOC_MAP_WORDS];
 #endif
 };
 
@@ -275,14 +282,27 @@ static uint64_t hash_generated_content(uint64_t hash, uint16_t tx_id,
     return hash;
 }
 
-static int new_flash(struct ffsv_flash **flash, struct fffs_backend *backend) {
+static uint64_t api_sweep_image_size(const struct api_sweep_config *config) {
+    return (uint64_t)config->sector_size * config->sector_count;
+}
+
+static size_t api_sweep_max_content(const struct api_sweep_config *config) {
+    uint64_t max = api_sweep_image_size(config) * 40u / 100u;
+    if (max > UINT16_MAX) {
+        max = UINT16_MAX;
+    }
+    return (size_t)max;
+}
+
+static int new_flash(struct ffsv_flash **flash, struct fffs_backend *backend,
+        const struct api_sweep_config *config) {
     struct ffsv_flash_config cfg;
     int err = ffsv_flash_config_preset(&cfg, FFSV_PRESET_TARGET_NOR_NOTES,
-            API_SWEEP_SECTOR_SIZE * API_SWEEP_SECTOR_COUNT);
+            (size_t)api_sweep_image_size(config));
     if (err != FFSV_OK) {
         return FFFS_ERR_IO;
     }
-    cfg.sector_size = API_SWEEP_SECTOR_SIZE;
+    cfg.sector_size = config->sector_size;
     cfg.max_log_entries = 300000;
     err = ffsv_flash_create(flash, &cfg);
     if (err != FFSV_OK) {
@@ -326,7 +346,8 @@ static int mount_fs(struct fffs *fs, const struct fffs_backend *backend,
 
 static int runtime_clone(struct api_runtime_state *dst,
         const struct ffsv_flash *flash, const struct fffs *fs,
-        const struct fffs_file *open_file, const struct open_tx *tx) {
+        const struct fffs_file *open_file, const struct open_tx *tx,
+        const struct api_sweep_config *config) {
     memset(dst, 0, sizeof(*dst));
     int err = mount_storage_init(&dst->storage);
     if (err != FFFS_OK) {
@@ -362,7 +383,7 @@ static int runtime_clone(struct api_runtime_state *dst,
 #endif
 
     dst->tx = *tx;
-    dst->tx.data = malloc(API_SWEEP_MAX_CONTENT);
+    dst->tx.data = malloc(api_sweep_max_content(config));
     if (!dst->tx.data) {
         ffsv_flash_destroy(dst->flash);
         mount_storage_destroy(&dst->storage);
@@ -897,10 +918,11 @@ static bool log_has_injected_sequence(const struct ffsv_flash *flash,
 
 static int verify_cow_crash_point(const struct api_runtime_state *base,
         const struct api_step *step, const struct crash_point *point,
-        FILE *log, const char *log_path) {
+        FILE *log, const char *log_path,
+        const struct api_sweep_config *config) {
     struct api_runtime_state attempt;
     int err = runtime_clone(&attempt, base->flash, &base->fs,
-            &base->open_file, &base->tx);
+            &base->open_file, &base->tx, config);
     if (err != FFFS_OK) {
         return err;
     }
@@ -980,13 +1002,13 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         struct api_stats *stats,
         size_t sampled_permutations, size_t sampled_max_bits, FILE *log,
         const char *log_path, struct dispatcher *dispatcher,
-        size_t thread_id) {
+        size_t thread_id, const struct api_sweep_config *config) {
     struct fffs fs;
     struct fffs_file open_file;
     struct mount_storage storage;
     struct api_model model = {0};
     struct open_tx tx = {0};
-    tx.data = malloc(API_SWEEP_MAX_CONTENT);
+    tx.data = malloc(api_sweep_max_content(config));
     if (!tx.data) {
         return FFFS_ERR_NOMEM;
     }
@@ -1018,7 +1040,7 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         (void)ffsv_flash_log(flash, &log_before);
 
         struct api_runtime_state base = {0};
-        err = runtime_clone(&base, flash, &fs, &open_file, &tx);
+        err = runtime_clone(&base, flash, &fs, &open_file, &tx, config);
         if (err != FFFS_OK) {
             break;
         }
@@ -1082,7 +1104,7 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
         }
         for (size_t p = point_start; p < *point_count; p++) {
             err = verify_cow_crash_point(&base, &steps[i], &points[p], log,
-                    log_path);
+                    log_path, config);
             stats->crash_points++;
             if (err != FFFS_OK) {
                 stats->invariant_failures++;
@@ -1119,14 +1141,15 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
 }
 
 static int init_formatted_flash(struct ffsv_flash **flash,
-        struct fffs_backend *backend) {
-    int err = new_flash(flash, backend);
+        struct fffs_backend *backend,
+        const struct api_sweep_config *config) {
+    int err = new_flash(flash, backend, config);
     if (err != FFFS_OK) {
         return err;
     }
     return fffs_format(backend, &(struct fffs_format_options){
-        .index_sectors = API_SWEEP_INDEX_SECTORS,
-        .sector_size = FFFS_SECTOR_256,
+        .index_sectors = (uint8_t)config->index_sectors,
+        .sector_size = config->format_sector_size,
     });
 }
 
@@ -1185,14 +1208,16 @@ static int collect_workload_points(const struct api_step *steps,
         uint32_t workload_id, FILE *log, struct wear_stats *wear_stats,
         struct api_stats *stats, size_t sampled_permutations,
         size_t sampled_max_bits, struct dispatcher *dispatcher,
-        size_t thread_id, const char *log_path) {
+        size_t thread_id, const char *log_path,
+        const struct api_sweep_config *config) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
-    int err = init_formatted_flash(&flash, &backend);
+    int err = init_formatted_flash(&flash, &backend, config);
     if (err == FFFS_OK) {
         err = run_steps(flash, &backend, steps, step_count, points,
                 point_count, workload_id, stats, sampled_permutations,
-                sampled_max_bits, log, log_path, dispatcher, thread_id);
+                sampled_max_bits, log, log_path, dispatcher, thread_id,
+                config);
         if (err == FFFS_OK) {
             log_flash_wear(log, flash, workload_id, wear_stats);
         }
@@ -1358,11 +1383,11 @@ static size_t append_write_tx(struct api_step *steps, size_t pos,
     return pos;
 }
 
-static size_t scaled_churn_size(const bench_churn_event_t *event) {
-    enum {
-        large_min = API_SWEEP_MAX_CONTENT * 3u / 4u,
-        large_span = API_SWEEP_MAX_CONTENT - large_min + 1u,
-    };
+static size_t scaled_churn_size(const bench_churn_event_t *event,
+        const struct api_sweep_config *config) {
+    size_t max_content = api_sweep_max_content(config);
+    size_t large_min = max_content * 3u / 4u;
+    size_t large_span = max_content - large_min + 1u;
     switch (event->cls) {
     case BENCH_CHURN_CLASS_SMALL:
         return 16u + (event->write_seed % 145u);
@@ -1375,34 +1400,37 @@ static size_t scaled_churn_size(const bench_churn_event_t *event) {
     }
 }
 
-static size_t api_sweep_file_data_per_sector(void) {
-    size_t raw = API_SWEEP_SECTOR_SIZE - FFFS_SECTOR_FOOTER_SIZE -
+static size_t api_sweep_file_data_per_sector(
+        const struct api_sweep_config *config) {
+    size_t raw = config->sector_size - FFFS_SECTOR_FOOTER_SIZE -
         FFFS_MD_SIZE;
     return raw - (raw % API_SWEEP_PROGRAM_GRANULE);
 }
 
-static size_t api_sweep_file_sector_count(size_t payload_size) {
-    size_t data_per_sector = api_sweep_file_data_per_sector();
+static size_t api_sweep_file_sector_count(size_t payload_size,
+        const struct api_sweep_config *config) {
+    size_t data_per_sector = api_sweep_file_data_per_sector(config);
     if (payload_size == 0) {
         return 1;
     }
     return (payload_size + data_per_sector - 1u) / data_per_sector;
 }
 
-static size_t estimated_file_footprint(size_t payload_size) {
-    return api_sweep_file_sector_count(payload_size) * API_SWEEP_SECTOR_SIZE;
+static size_t estimated_file_footprint(size_t payload_size,
+        const struct api_sweep_config *config) {
+    return api_sweep_file_sector_count(payload_size, config) *
+        config->sector_size;
 }
 
 static size_t churn_workload(uint32_t seed, struct api_step *steps,
         size_t capacity, size_t tx_count, size_t target_write_multiple,
-        struct api_stats *stats) {
+        const struct api_sweep_config *config, struct api_stats *stats) {
     bench_churn_model_t model;
     uint32_t rng = seed ^ UINT32_C(0x5eed1234);
     size_t pos = 0;
     size_t tx = 0;
     uint64_t actual_written = 0;
-    uint64_t image_size = (uint64_t)API_SWEEP_SECTOR_SIZE *
-        API_SWEEP_SECTOR_COUNT;
+    uint64_t image_size = api_sweep_image_size(config);
     uint64_t target_written64 = image_size * target_write_multiple;
     uint32_t force_large_after = target_written64 / 10u > UINT32_MAX ?
         UINT32_MAX : (uint32_t)(target_written64 / 10u);
@@ -1411,8 +1439,8 @@ static size_t churn_workload(uint32_t seed, struct api_step *steps,
     }
 
     bench_churn_model_init(&model, seed,
-            API_SWEEP_SECTOR_SIZE * API_SWEEP_SECTOR_COUNT * 75u / 100u,
-            UINT32_MAX, API_SWEEP_SECTOR_SIZE * API_SWEEP_SECTOR_COUNT / 8u,
+            (uint32_t)(image_size * 75u / 100u),
+            UINT32_MAX, (uint32_t)(image_size / 8u),
             force_large_after);
 
     while (tx < tx_count && pos < capacity && actual_written < target_written64) {
@@ -1438,11 +1466,12 @@ static size_t churn_workload(uint32_t seed, struct api_step *steps,
             tx++;
             continue;
         }
-        size_t size = scaled_churn_size(&event);
-        if (size > API_SWEEP_MAX_CONTENT) {
-            size = API_SWEEP_MAX_CONTENT;
+        size_t size = scaled_churn_size(&event, config);
+        size_t max_content = api_sweep_max_content(config);
+        if (size > max_content) {
+            size = max_content;
         }
-        size_t model_size = estimated_file_footprint(size);
+        size_t model_size = estimated_file_footprint(size, config);
         event.size = model_size > UINT32_MAX ? UINT32_MAX :
             (uint32_t)model_size;
         bool complete = false;
@@ -1478,7 +1507,8 @@ static void log_steps(FILE *log, uint32_t seed, const struct api_step *steps,
 static int run_workload(const struct api_step *steps, size_t step_count,
         struct api_stats *stats, uint32_t workload_id, FILE *log,
         struct dispatcher *dispatcher, size_t thread_id,
-        struct wear_stats *wear_stats, const char *log_path) {
+        struct wear_stats *wear_stats, const char *log_path,
+        const struct api_sweep_config *config) {
     struct crash_point *points = calloc(API_SWEEP_MAX_CRASH_POINTS,
             sizeof(*points));
     if (!points) {
@@ -1489,7 +1519,7 @@ static int run_workload(const struct api_step *steps, size_t step_count,
             &point_count, workload_id, log, wear_stats, stats,
             dispatcher ? dispatcher->sampled_permutations : 0,
             dispatcher ? dispatcher->sampled_max_bits : 0,
-            dispatcher, thread_id, log_path);
+            dispatcher, thread_id, log_path, config);
     if (log) {
         fprintf(log, "seed=0x%08x crash_points=%zu\n",
                 (unsigned)workload_id, point_count);
@@ -1585,7 +1615,8 @@ static void *random_worker_main(void *arg) {
         memset(steps, 0, dispatcher->max_steps * sizeof(*steps));
         size_t count = churn_workload(seed, steps, dispatcher->max_steps,
                 dispatcher->transaction_limit,
-                dispatcher->target_write_multiple, &ctx->stats);
+                dispatcher->target_write_multiple, &dispatcher->flash_config,
+                &ctx->stats);
         struct worker_status status = {
             .active = true,
             .seed = seed,
@@ -1617,7 +1648,7 @@ static void *random_worker_main(void *arg) {
         }
         int err = run_workload(steps, count, &ctx->stats, seed, ctx->log,
                 dispatcher, ctx->thread_id, &ctx->last_wear,
-                ctx->log_path);
+                ctx->log_path, &dispatcher->flash_config);
         last_err = err;
         ctx->stats.random_workloads++;
         status.active = false;
@@ -1654,7 +1685,8 @@ static void make_thread_log_path(char *out, size_t out_size,
 static int run_random(uint32_t seed_start, size_t seed_count,
         size_t transaction_limit, size_t target_write_multiple,
         size_t thread_count, size_t sampled_permutations,
-        size_t sampled_max_bits, const char *log_path, struct api_stats *stats,
+        size_t sampled_max_bits, const char *log_path,
+        const struct api_sweep_config *flash_config, struct api_stats *stats,
         struct wear_summary *wear_summary) {
     if (thread_count == 0 || thread_count > API_SWEEP_MAX_THREADS) {
         return FFFS_ERR_INVALID;
@@ -1678,6 +1710,7 @@ static int run_random(uint32_t seed_start, size_t seed_count,
         .thread_count = thread_count,
         .sampled_permutations = sampled_permutations,
         .sampled_max_bits = sampled_max_bits,
+        .flash_config = *flash_config,
         .next_report_ns = progress_now_ns() +
             (uint64_t)API_SWEEP_PROGRESS_INTERVAL_SEC *
             UINT64_C(1000000000),
@@ -1746,6 +1779,7 @@ struct cli_options {
     const char *log_path;
     size_t partial_write_samples;
     size_t partial_write_bits;
+    struct api_sweep_config flash_config;
 };
 
 static void default_log_path(char *out, size_t out_size) {
@@ -1782,6 +1816,48 @@ static int parse_u32_value(const char *text, uint32_t *out) {
     return FFFS_OK;
 }
 
+static bool sector_size_to_format(size_t size,
+        enum fffs_sector_size *format_size) {
+    switch (size) {
+    case FFFS_SECTOR_256:
+    case FFFS_SECTOR_512:
+    case FFFS_SECTOR_1K:
+    case FFFS_SECTOR_2K:
+    case FFFS_SECTOR_4K:
+    case FFFS_SECTOR_8K:
+        *format_size = (enum fffs_sector_size)size;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static int validate_flash_config(struct api_sweep_config *config) {
+    if (!sector_size_to_format(config->sector_size,
+                &config->format_sector_size)) {
+        return FFFS_ERR_INVALID;
+    }
+    if (config->sector_count == 0 || config->index_sectors == 0 ||
+            config->index_sectors >= config->sector_count ||
+            config->index_sectors > UINT8_MAX) {
+        return FFFS_ERR_INVALID;
+    }
+    if (config->sector_count > SIZE_MAX / config->sector_size ||
+            api_sweep_image_size(config) > UINT32_MAX) {
+        return FFFS_ERR_INVALID;
+    }
+#if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
+    if ((config->sector_count + 31u) / 32u > API_SWEEP_ALLOC_MAP_WORDS) {
+        return FFFS_ERR_INVALID;
+    }
+#endif
+    if (api_sweep_file_data_per_sector(config) == 0 ||
+            api_sweep_max_content(config) == 0) {
+        return FFFS_ERR_INVALID;
+    }
+    return FFFS_OK;
+}
+
 static const char *option_value(int argc, char **argv, int *index,
         const char *arg, const char *long_name) {
     size_t long_len = strlen(long_name);
@@ -1815,6 +1891,12 @@ static int parse_cli(int argc, char **argv, struct cli_options *opts,
         .log_path = default_log,
         .partial_write_samples = API_SWEEP_DEFAULT_PARTIAL_WRITE_SAMPLES,
         .partial_write_bits = API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS,
+        .flash_config = {
+            .sector_size = API_SWEEP_DEFAULT_SECTOR_SIZE,
+            .sector_count = API_SWEEP_DEFAULT_SECTOR_COUNT,
+            .index_sectors = API_SWEEP_DEFAULT_INDEX_SECTORS,
+            .format_sector_size = FFFS_SECTOR_256,
+        },
     };
 
     for (int i = 1; i < argc; i++) {
@@ -1883,11 +1965,32 @@ static int parse_cli(int argc, char **argv, struct cli_options *opts,
                         &opts->partial_write_bits) != FFFS_OK) {
                 return FFFS_ERR_INVALID;
             }
+        } else if (strcmp(arg, "-S") == 0 ||
+                is_long_option(arg, "--sector-size")) {
+            value = option_value(argc, argv, &i, arg, "--sector-size");
+            if (!value || parse_size_value(value,
+                        &opts->flash_config.sector_size) != FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-C") == 0 ||
+                is_long_option(arg, "--sector-count")) {
+            value = option_value(argc, argv, &i, arg, "--sector-count");
+            if (!value || parse_size_value(value,
+                        &opts->flash_config.sector_count) != FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
+        } else if (strcmp(arg, "-I") == 0 ||
+                is_long_option(arg, "--index-sectors")) {
+            value = option_value(argc, argv, &i, arg, "--index-sectors");
+            if (!value || parse_size_value(value,
+                        &opts->flash_config.index_sectors) != FFFS_OK) {
+                return FFFS_ERR_INVALID;
+            }
         } else {
             return FFFS_ERR_INVALID;
         }
     }
-    return FFFS_OK;
+    return validate_flash_config(&opts->flash_config);
 }
 
 static void format_count(char *out, size_t out_size, uint64_t value) {
@@ -1948,6 +2051,13 @@ static void print_usage(const char *argv0) {
     printf("  -b, --partial-write-bits <n>      eligible 1->0 bits to "
             "sample per partial-write case (default %u, 0 means all)\n",
             (unsigned)API_SWEEP_DEFAULT_PARTIAL_WRITE_BITS);
+    printf("  -S, --sector-size <bytes>         flash sector size: "
+            "256, 512, 1024, 2048, 4096, or 8192 (default %u)\n",
+            (unsigned)API_SWEEP_DEFAULT_SECTOR_SIZE);
+    printf("  -C, --sector-count <count>        flash sector count "
+            "(default %u)\n", (unsigned)API_SWEEP_DEFAULT_SECTOR_COUNT);
+    printf("  -I, --index-sectors <count>       FASTFFS index sectors "
+            "(default %u)\n", (unsigned)API_SWEEP_DEFAULT_INDEX_SECTORS);
     printf("  -h, --help                        show this help and exit\n");
     printf("\n");
     printf("Examples:\n");
@@ -1955,7 +2065,8 @@ static void print_usage(const char *argv0) {
     printf("  %s --seed 1234 --runs 4 --write-multiple 10 "
             "--threads 4\n", argv0);
     printf("  %s -s 1234 -n 1 -w 4 -j 1 "
-            "-p 10 -b 8 -l /tmp/fffs_api_diag\n", argv0);
+            "-p 10 -b 8 -S 512 -C 512 -I 4 "
+            "-l /tmp/fffs_api_diag\n", argv0);
 }
 
 int main(int argc, char **argv) {
@@ -1979,7 +2090,8 @@ int main(int argc, char **argv) {
     int err = run_random(opts.seed_start, opts.run_count,
             opts.transaction_limit, opts.target_write_multiple,
             opts.thread_count, opts.partial_write_samples,
-            opts.partial_write_bits, opts.log_path, &stats, &wear_summary);
+            opts.partial_write_bits, opts.log_path, &opts.flash_config,
+            &stats, &wear_summary);
     printf("seed: 0x%08x\n", (unsigned)opts.seed_start);
     print_count_line("threads", opts.thread_count);
     print_count_line("runs", opts.run_count);
@@ -1989,6 +2101,10 @@ int main(int argc, char **argv) {
         print_count_line("transaction cap", opts.transaction_limit);
     }
     print_count_line("write multiple", opts.target_write_multiple);
+    print_count_line("sector size", opts.flash_config.sector_size);
+    print_count_line("sector count", opts.flash_config.sector_count);
+    print_count_line("index sectors", opts.flash_config.index_sectors);
+    print_count_line("image bytes", api_sweep_image_size(&opts.flash_config));
     print_count_line("partial-write samples", opts.partial_write_samples);
     print_count_line("partial-write bits", opts.partial_write_bits);
     print_count_line("generated API steps", stats.generated_steps);
