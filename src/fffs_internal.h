@@ -68,6 +68,27 @@ struct fffs_read_cache_view {
 #error "FFFS_MD_PRELOAD_MAX must fit at least one metadata record and footer"
 #endif
 
+static inline uint16_t fffs_load_le16(const uint8_t *p) {
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline uint32_t fffs_load_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline void fffs_store_le16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static inline void fffs_store_le32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
 enum fffs_lifecycle_object_state {
     FFFS_LIFECYCLE_OBJECT_INVALID,
     FFFS_LIFECYCLE_OBJECT_ERASED,
@@ -142,6 +163,8 @@ int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size);
 int fffs_flash_program(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
+int fffs_backend_program_aligned(const struct fffs_backend *backend,
+        size_t offset, const void *buffer, size_t size);
 int fffs_flash_program_aligned(struct fffs *fs, size_t offset,
         const void *buffer, size_t size);
 void fffs_scratch_bump(struct fffs *fs);
@@ -201,6 +224,8 @@ int fffs_tombstone_sector(struct fffs *fs, uint16_t sector);
 int fffs_mark_sector_full(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_footer_offset(struct fffs *fs, uint16_t sector);
+void fffs_encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
+        uint32_t serial, bool valid);
 int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
         uint16_t *data_len, uint16_t *next,

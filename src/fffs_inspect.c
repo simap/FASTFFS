@@ -34,15 +34,6 @@ enum md_state {
     MD_CORRUPT = 3,
 };
 
-static uint16_t load16(const uint8_t *p) {
-    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint32_t load32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static int backend_read(const struct fffs_backend *backend, size_t offset,
         void *buffer, size_t size) {
     if (offset > backend->size || size > backend->size - offset) {
@@ -72,7 +63,7 @@ static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         return false;
     }
     if (serial) {
-        *serial = load32(footer);
+        *serial = fffs_load_le32(footer);
     }
     return true;
 }
@@ -92,9 +83,10 @@ static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
             md[15] != FFFS_MD_TYPE_FILE_CONT_V1) {
         return MD_CORRUPT;
     }
-    uint16_t data_off = load16(md + 7);
-    uint16_t data_len = load16(md + 9);
-    if ((size_t)data_off + data_len > data_limit || load16(md + 5) == 0) {
+    uint16_t data_off = fffs_load_le16(md + 7);
+    uint16_t data_len = fffs_load_le16(md + 9);
+    if ((size_t)data_off + data_len > data_limit ||
+            fffs_load_le16(md + 5) == 0) {
         return MD_CORRUPT;
     }
 
@@ -102,12 +94,12 @@ static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
         memset(out, 0, sizeof(*out));
         out->type = md[15];
         out->state = md[0];
-        out->slot = load16(md + 1);
+        out->slot = fffs_load_le16(md + 1);
         out->data_off = data_off;
         out->data_len = data_len;
-        out->next = load16(md + 3);
+        out->next = fffs_load_le16(md + 3);
         if (md[15] == FFFS_MD_TYPE_FILE_ROOT_V1) {
-            out->size = load32(md + 11);
+            out->size = fffs_load_le32(md + 11);
         }
     }
     return md_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED ?
@@ -221,8 +213,8 @@ static int replay_active_index(const struct fffs_backend *backend,
         if (err != FFFS_OK) {
             return err;
         }
-        uint16_t slot = load16(rec);
-        uint16_t head = load16(rec + 2);
+        uint16_t slot = fffs_load_le16(rec);
+        uint16_t head = fffs_load_le16(rec + 2);
         if (slot == UINT16_MAX && head == UINT16_MAX) {
             return FFFS_OK;
         }
@@ -254,8 +246,8 @@ static int inspect_index(const struct fffs_backend *backend,
         if (err != FFFS_OK) {
             return err;
         }
-        uint16_t slot = load16(rec);
-        uint16_t head = load16(rec + 2);
+        uint16_t slot = fffs_load_le16(rec);
+        uint16_t head = fffs_load_le16(rec + 2);
         if (slot == UINT16_MAX && head == UINT16_MAX) {
             break;
         }
@@ -573,8 +565,8 @@ static int dump_active_index(const struct fffs_backend *backend, FILE *out,
         if (err != FFFS_OK) {
             return err;
         }
-        uint16_t slot = load16(rec);
-        uint16_t head = load16(rec + 2);
+        uint16_t slot = fffs_load_le16(rec);
+        uint16_t head = fffs_load_le16(rec + 2);
         if (slot == UINT16_MAX && head == UINT16_MAX) {
             break;
         }

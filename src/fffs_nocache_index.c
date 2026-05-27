@@ -36,10 +36,6 @@ struct index_scan {
     bool uses_fs_scratch;
 };
 
-static uint16_t load16(const uint8_t *p) {
-    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-}
-
 static size_t logical_sector(const struct fffs *fs, size_t seq_pos) {
     return (fs->oldest_index_sector + seq_pos) % fs->index_sectors;
 }
@@ -140,8 +136,8 @@ static int read_index_at(struct index_scan *scan, size_t offset,
         return err;
     }
     const uint8_t *rec = scan->window + (offset - scan->window_start);
-    *slot = load16(rec);
-    *head = load16(rec + 2);
+    *slot = fffs_load_le16(rec);
+    *head = fffs_load_le16(rec + 2);
     *erased = *slot == UINT16_MAX && *head == UINT16_MAX;
     if (*erased) {
         return FFFS_OK;

@@ -14,9 +14,12 @@ idf_component_register(
         "${FASTFFS_ROOT}/src/fffs_bitset.c"
         "${FASTFFS_ROOT}/src/fffs_gc.c"
         "${FASTFFS_ROOT}/src/fffs_hashtable_index.c"
-        "${FASTFFS_ROOT}/src/fffs_io.c"
+        "${FASTFFS_ROOT}/src/fffs_file_md.c"
+        "${FASTFFS_ROOT}/src/fffs_flash.c"
+        "${FASTFFS_ROOT}/src/fffs_index_log.c"
         "${FASTFFS_ROOT}/src/fffs_nocache_index.c"
         "${FASTFFS_ROOT}/src/fffs_ram_index.c"
+        "${FASTFFS_ROOT}/src/fffs_sector.c"
     INCLUDE_DIRS
         "."
         "${BENCHFS}"
