@@ -344,8 +344,7 @@ static int seek_md_visitor(struct fffs *fs,
         const struct fffs_md_record *record, void *ctx) {
     (void)fs;
     struct seek_md_record *out = ctx;
-    if (record->lifecycle != FFFS_MD_RECORD_LIVE ||
-            record->slot != out->slot) {
+    if (!record->live || record->slot != out->slot) {
         return FFFS_OK;
     }
     out->data_off = record->data_off;

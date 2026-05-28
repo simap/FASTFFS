@@ -123,7 +123,7 @@ static int sector_is_reachable_from_any_chain(struct fffs *fs, size_t sector,
 
 static int gc_classify_record(struct fffs *fs, size_t sector,
         const struct fffs_md_record *record, bool *live) {
-    if (record->lifecycle != FFFS_MD_RECORD_LIVE) {
+    if (!record->live) {
         return FFFS_OK;
     }
     if (fffs_slot_is_inflight(fs, record->slot)) {
@@ -288,8 +288,8 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
 
     if (walk_result == FFFS_MD_WALK_RECORD && fs->gc_md.active) {
         if (out_action) {
-            *out_action = record.lifecycle == FFFS_MD_RECORD_LIVE &&
-                !fs->gc_md.live_seen ? FFFS_GC_TOMBSTONED : FFFS_GC_SCANNED;
+            *out_action = record.live && !fs->gc_md.live_seen ?
+                FFFS_GC_TOMBSTONED : FFFS_GC_SCANNED;
         }
         return FFFS_OK;
     }

@@ -247,16 +247,10 @@ enum fffs_md_walk_result {
     FFFS_MD_WALK_END_CLAIMED_DATA,
     FFFS_MD_WALK_END_INVALID,
 };
-enum fffs_md_record_lifecycle {
-    FFFS_MD_RECORD_LIVE,
-    FFFS_MD_RECORD_TOMBSTONED,
-    FFFS_MD_RECORD_PARTIAL_TOMBSTONE,
-    FFFS_MD_RECORD_UNCOMMITTED,
-};
 struct fffs_md_record {
     uint8_t type;
     uint8_t state;
-    enum fffs_md_record_lifecycle lifecycle;
+    bool live;
     uint16_t slot;
     uint16_t next;
     uint16_t span_len;

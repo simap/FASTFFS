@@ -170,25 +170,17 @@ static int decode_file_md_record(struct fffs *fs,
         return FFFS_OK;
     }
 
-    enum fffs_md_record_lifecycle lifecycle;
     enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(buf[0]);
     enum fffs_bitmirror_state tombstone =
         fffs_lifecycle_tombstone_pair(buf[0]);
-    if (buf[0] == 0xff) {
-        lifecycle = FFFS_MD_RECORD_UNCOMMITTED;
-    } else if (fffs_lifecycle_is_live(valid, tombstone)) {
-        lifecycle = FFFS_MD_RECORD_LIVE;
-    } else if (valid != FFFS_BITMIRROR_CLEARED) {
+    bool live = fffs_lifecycle_is_live(valid, tombstone);
+    if (buf[0] != 0xff && !live && valid != FFFS_BITMIRROR_CLEARED) {
         return FFFS_OK;
-    } else if (tombstone == FFFS_BITMIRROR_CLEARED) {
-        lifecycle = FFFS_MD_RECORD_TOMBSTONED;
-    } else {
-        lifecycle = FFFS_MD_RECORD_PARTIAL_TOMBSTONE;
     }
 
     record->type = type;
     record->state = buf[0];
-    record->lifecycle = lifecycle;
+    record->live = live;
     record->slot = fffs_load_le16(buf + 1);
     record->next = fffs_load_le16(buf + 3);
     record->span_len = fffs_load_le16(buf + 5);
@@ -198,7 +190,7 @@ static int decode_file_md_record(struct fffs *fs,
     record->record_start = record_start;
     record->record_len = record_len;
 
-    bool uncommitted = lifecycle == FFFS_MD_RECORD_UNCOMMITTED;
+    bool uncommitted = buf[0] == 0xff;
     if ((size_t)record->data_off + record->data_len > record_start) {
         return FFFS_OK;
     }
@@ -375,8 +367,7 @@ int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
     }
     struct fffs_md_record record;
     while ((err = md_record_iter_next(&iter, fs, &record)) == FFFS_OK) {
-        if (record.lifecycle != FFFS_MD_RECORD_LIVE ||
-                record.slot != want_slot) {
+        if (!record.live || record.slot != want_slot) {
             continue;
         }
 
@@ -435,8 +426,7 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
     }
     struct fffs_md_record record;
     while ((err = md_record_iter_next(&iter, fs, &record)) == FFFS_OK) {
-        if (record.lifecycle != FFFS_MD_RECORD_LIVE ||
-                record.slot != want_slot) {
+        if (!record.live || record.slot != want_slot) {
             continue;
         }
 
@@ -494,8 +484,7 @@ static int read_uncommitted_metadata_for_slot(struct fffs *fs, uint16_t sector,
     }
     struct fffs_md_record record;
     while ((err = md_record_iter_next(&iter, fs, &record)) == FFFS_OK) {
-        if (record.lifecycle == FFFS_MD_RECORD_UNCOMMITTED &&
-                record.slot == want_slot) {
+        if (record.state == 0xff && record.slot == want_slot) {
             *out = record;
             found = true;
         }
@@ -584,8 +573,7 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
             break;
         }
         record_count++;
-        if (record.lifecycle == FFFS_MD_RECORD_LIVE &&
-                record.slot == reject_slot) {
+        if (record.live && record.slot == reject_slot) {
             return FFFS_ERR_NO_SPACE;
         }
         size_t data_end = (size_t)record.data_off + record.data_len;
