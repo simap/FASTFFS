@@ -66,22 +66,25 @@ static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
     if (fffs_flash_bytes_erased(md, FFFS_MD_SIZE)) {
         return MD_ERASED;
     }
-    enum fffs_lifecycle_object_state md_state =
-        fffs_lifecycle_decode_md(md[0]);
+    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(md[0]);
+    enum fffs_bitmirror_state tombstone =
+        fffs_lifecycle_tombstone_pair(md[0]);
+    bool uncommitted = md[0] == 0xff;
+    bool live = fffs_lifecycle_is_live(valid, tombstone);
+    bool tombstoned = valid != FFFS_BITMIRROR_MIXED &&
+        (tombstone == FFFS_BITMIRROR_CLEARED ||
+         tombstone == FFFS_BITMIRROR_MIXED);
     if (md[15] != FFFS_MD_TYPE_FILE_ROOT_V1 &&
             md[15] != FFFS_MD_TYPE_FILE_CONT_V1) {
         return MD_CORRUPT;
     }
-    if (md_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
-            md_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED &&
-            md_state != FFFS_LIFECYCLE_OBJECT_ERASED) {
+    if (!live && !tombstoned && !uncommitted) {
         return MD_CORRUPT;
     }
     uint16_t data_off = fffs_load_le16(md + 7);
     uint16_t data_len = fffs_load_le16(md + 9);
     uint16_t span_len = fffs_load_le16(md + 5);
     (void)sector_size;
-    bool uncommitted = md_state == FFFS_LIFECYCLE_OBJECT_ERASED;
     if ((size_t)data_off + data_len > data_limit ||
             (!uncommitted && span_len == 0)) {
         return MD_CORRUPT;
@@ -103,8 +106,7 @@ static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
     if (uncommitted) {
         return MD_UNCOMMITTED;
     }
-    return md_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED ?
-        MD_TOMBSTONED : MD_VALID;
+    return tombstoned ? MD_TOMBSTONED : MD_VALID;
 }
 
 static int read_root_name_for_decoded(const struct fffs_backend *backend,

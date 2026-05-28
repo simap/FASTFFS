@@ -11,88 +11,46 @@
 
 #include <string.h>
 
-struct decoded_file_md {
-    uint8_t type;
-    uint8_t state;
-    uint16_t slot;
-    uint16_t data_off;
-    uint16_t data_len;
-    uint16_t next;
-    uint16_t span_len;
-    uint32_t size;
-    uint32_t file_offset;
-    size_t record_start;
-    size_t record_len;
-};
-
-enum decoded_file_md_state {
-    FFFS_DECODED_MD_ERASED,
-    FFFS_DECODED_MD_INVALID,
-    FFFS_DECODED_MD_UNCOMMITTED,
-    FFFS_DECODED_MD_LIVE,
-    FFFS_DECODED_MD_PARTIAL_TOMBSTONE,
-    FFFS_DECODED_MD_TOMBSTONED,
-};
-
-static enum decoded_file_md_state decode_file_md_lifecycle(uint8_t state) {
-    if (state == 0xff) {
-        return FFFS_DECODED_MD_UNCOMMITTED;
-    }
-    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
-    enum fffs_bitmirror_state tombstone =
-        fffs_lifecycle_tombstone_pair(state);
-    if (valid != FFFS_BITMIRROR_CLEARED) {
-        return FFFS_DECODED_MD_INVALID;
-    }
-    if (tombstone == FFFS_BITMIRROR_SET) {
-        return FFFS_DECODED_MD_LIVE;
-    }
-    if (tombstone == FFFS_BITMIRROR_CLEARED) {
-        return FFFS_DECODED_MD_TOMBSTONED;
-    }
-    return FFFS_DECODED_MD_PARTIAL_TOMBSTONE;
-}
-
 static int read_root_prefix(struct fffs *fs, uint16_t sector,
-        const struct decoded_file_md *md, struct fffs_stat *st,
-        uint16_t *payload_data_off, uint16_t *payload_data_len,
-        struct fffs_read_cache_view *cache) {
-    if (md->data_len < 2) {
+        uint16_t data_off, uint16_t data_len, uint32_t size,
+        struct fffs_stat *st, uint16_t *payload_data_off,
+        uint16_t *payload_data_len, struct fffs_read_cache_view *cache) {
+    if (data_len < 2) {
         return FFFS_ERR_CORRUPT;
     }
     uint8_t local[FFFS_MAX_NAME + 2u];
     bool use_cache = cache && cache->data && cache->capacity >= sizeof(local);
     uint8_t *buf = use_cache ? cache->data : local;
     size_t buf_size = use_cache ? cache->capacity : sizeof(local);
-    size_t nread = md->data_len < buf_size ? md->data_len : buf_size;
+    size_t nread = data_len < buf_size ? data_len : buf_size;
     int err = fffs_flash_read(fs, (size_t)sector * fs->sector_size +
-            md->data_off, buf, nread);
+            data_off, buf, nread);
     if (err != FFFS_OK) {
         return err;
     }
     size_t name_len = buf[0];
     size_t vmeta_len_off = 1u + name_len;
     if (name_len == 0 || name_len > FFFS_MAX_NAME ||
-            vmeta_len_off >= md->data_len || vmeta_len_off >= nread) {
+            vmeta_len_off >= data_len || vmeta_len_off >= nread) {
         return FFFS_ERR_CORRUPT;
     }
 
     size_t vmeta_len = buf[vmeta_len_off];
     size_t payload_off = 1u + name_len + 1u + vmeta_len;
-    if (payload_off > md->data_len) {
+    if (payload_off > data_len) {
         return FFFS_ERR_CORRUPT;
     }
 
     if (st) {
         memcpy(st->name, buf + 1, name_len);
         st->name[name_len] = '\0';
-        st->size = md->size;
+        st->size = size;
     }
     if (payload_data_off) {
-        *payload_data_off = (uint16_t)(md->data_off + payload_off);
+        *payload_data_off = (uint16_t)(data_off + payload_off);
     }
     if (payload_data_len) {
-        *payload_data_len = (uint16_t)(md->data_len - payload_off);
+        *payload_data_len = (uint16_t)(data_len - payload_off);
     }
     if (use_cache) {
         size_t cached_payload = payload_off < nread ? nread - payload_off : 0;
@@ -172,8 +130,9 @@ static bool validate_live_file_footer(const uint8_t *footer) {
 
 static int decode_file_md_record(struct fffs *fs,
         struct fffs_md_read_window *reader, size_t cursor,
-        struct decoded_file_md *out, enum decoded_file_md_state *state) {
-    *state = FFFS_DECODED_MD_INVALID;
+        struct fffs_md_record *record, enum fffs_md_walk_result *result) {
+    *result = FFFS_MD_WALK_END_INVALID;
+    memset(record, 0, sizeof(*record));
     uint8_t type;
     int err = file_md_reader_read(fs, reader,
             (size_t)reader->sector * fs->sector_size + cursor - 1u,
@@ -182,7 +141,7 @@ static int decode_file_md_record(struct fffs *fs,
         return err;
     }
     if (type == 0xff) {
-        *state = FFFS_DECODED_MD_ERASED;
+        *result = FFFS_MD_WALK_END_ERASED;
         return FFFS_OK;
     }
 
@@ -191,10 +150,6 @@ static int decode_file_md_record(struct fffs *fs,
         return FFFS_ERR_CORRUPT;
     }
     size_t record_start = cursor - record_len;
-    memset(out, 0, sizeof(*out));
-    out->type = type;
-    out->record_start = record_start;
-    out->record_len = record_len;
 
     if (type == FFFS_MD_TYPE_FILE_ROOT_V1 ||
             type == FFFS_MD_TYPE_FILE_CONT_V1) {
@@ -211,71 +166,56 @@ static int decode_file_md_record(struct fffs *fs,
         return err;
     }
     if (fffs_flash_bytes_erased(buf, record_len)) {
-        *state = FFFS_DECODED_MD_ERASED;
+        *result = FFFS_MD_WALK_END_ERASED;
         return FFFS_OK;
     }
 
-    out->state = buf[0];
-    *state = decode_file_md_lifecycle(buf[0]);
-    if (*state == FFFS_DECODED_MD_INVALID ||
-            *state == FFFS_DECODED_MD_ERASED) {
+    enum fffs_md_record_lifecycle lifecycle;
+    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(buf[0]);
+    enum fffs_bitmirror_state tombstone =
+        fffs_lifecycle_tombstone_pair(buf[0]);
+    if (buf[0] == 0xff) {
+        lifecycle = FFFS_MD_RECORD_UNCOMMITTED;
+    } else if (fffs_lifecycle_is_live(valid, tombstone)) {
+        lifecycle = FFFS_MD_RECORD_LIVE;
+    } else if (valid != FFFS_BITMIRROR_CLEARED) {
         return FFFS_OK;
+    } else if (tombstone == FFFS_BITMIRROR_CLEARED) {
+        lifecycle = FFFS_MD_RECORD_TOMBSTONED;
+    } else {
+        lifecycle = FFFS_MD_RECORD_PARTIAL_TOMBSTONE;
     }
-    out->slot = fffs_load_le16(buf + 1);
-    out->next = fffs_load_le16(buf + 3);
-    out->span_len = fffs_load_le16(buf + 5);
-    out->data_off = fffs_load_le16(buf + 7);
-    out->data_len = fffs_load_le16(buf + 9);
-    bool uncommitted = *state == FFFS_DECODED_MD_UNCOMMITTED;
-    if ((size_t)out->data_off + out->data_len > record_start) {
-        *state = FFFS_DECODED_MD_INVALID;
+
+    record->type = type;
+    record->state = buf[0];
+    record->lifecycle = lifecycle;
+    record->slot = fffs_load_le16(buf + 1);
+    record->next = fffs_load_le16(buf + 3);
+    record->span_len = fffs_load_le16(buf + 5);
+    record->data_off = fffs_load_le16(buf + 7);
+    record->data_len = fffs_load_le16(buf + 9);
+    record->size_or_offset = fffs_load_le32(buf + 11);
+    record->record_start = record_start;
+    record->record_len = record_len;
+
+    bool uncommitted = lifecycle == FFFS_MD_RECORD_UNCOMMITTED;
+    if ((size_t)record->data_off + record->data_len > record_start) {
         return FFFS_OK;
     }
     if (!uncommitted) {
-        if (out->span_len == 0 ||
-                (size_t)reader->sector + out->span_len > fs->sector_count) {
-            *state = FFFS_DECODED_MD_INVALID;
+        if (record->span_len == 0 ||
+                (size_t)reader->sector + record->span_len >
+                    fs->sector_count) {
             return FFFS_OK;
         }
-        if (out->next != 0 &&
-                (out->next < fs->index_sectors ||
-                 out->next >= fs->sector_count)) {
-            *state = FFFS_DECODED_MD_INVALID;
+        if (record->next != 0 &&
+                (record->next < fs->index_sectors ||
+                 record->next >= fs->sector_count)) {
             return FFFS_OK;
         }
     }
-    if (type == FFFS_MD_TYPE_FILE_ROOT_V1) {
-        out->size = fffs_load_le32(buf + 11);
-    } else {
-        out->file_offset = fffs_load_le32(buf + 11);
-    }
+    *result = FFFS_MD_WALK_RECORD;
     return FFFS_OK;
-}
-
-static void md_record_from_decoded(const struct decoded_file_md *md,
-        enum decoded_file_md_state state, struct fffs_md_record *record) {
-    enum fffs_md_record_lifecycle lifecycle = FFFS_MD_RECORD_LIVE;
-    if (state == FFFS_DECODED_MD_TOMBSTONED) {
-        lifecycle = FFFS_MD_RECORD_TOMBSTONED;
-    } else if (state == FFFS_DECODED_MD_PARTIAL_TOMBSTONE) {
-        lifecycle = FFFS_MD_RECORD_PARTIAL_TOMBSTONE;
-    } else if (state == FFFS_DECODED_MD_UNCOMMITTED) {
-        lifecycle = FFFS_MD_RECORD_UNCOMMITTED;
-    }
-    *record = (struct fffs_md_record){
-        .type = md->type,
-        .state = md->state,
-        .lifecycle = lifecycle,
-        .slot = md->slot,
-        .next = md->next,
-        .span_len = md->span_len,
-        .data_off = md->data_off,
-        .data_len = md->data_len,
-        .size_or_offset = md->type == FFFS_MD_TYPE_FILE_ROOT_V1 ?
-            md->size : md->file_offset,
-        .record_start = md->record_start,
-        .record_len = md->record_len,
-    };
 }
 
 static bool valid_data_sector(const struct fffs *fs, uint16_t sector) {
@@ -397,32 +337,21 @@ int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
         return FFFS_OK;
     }
 
-    struct decoded_file_md md;
-    enum decoded_file_md_state md_state;
-    int err = decode_file_md_record(fs, window, walk->cursor, &md, &md_state);
+    int err = decode_file_md_record(fs, window, walk->cursor, record, result);
     if (err != FFFS_OK) {
         return err;
     }
-    if (md_state == FFFS_DECODED_MD_ERASED) {
-        *result = FFFS_MD_WALK_END_ERASED;
-        walk->active = false;
-        memset(record, 0, sizeof(*record));
-        return FFFS_OK;
-    }
-    md_record_from_decoded(&md, md_state, record);
-    if (md_state == FFFS_DECODED_MD_INVALID) {
-        *result = FFFS_MD_WALK_END_INVALID;
+    if (*result != FFFS_MD_WALK_RECORD) {
         walk->active = false;
         return FFFS_OK;
     }
 
-    walk->cursor = md.record_start;
-    size_t data_end = (size_t)md.data_off + md.data_len;
+    walk->cursor = record->record_start;
+    size_t data_end = (size_t)record->data_off + record->data_len;
     if (data_end > walk->claimed_data_end) {
         walk->claimed_data_end = data_end;
     }
 
-    *result = FFFS_MD_WALK_RECORD;
     if (walk->cursor <= walk->claimed_data_end) {
         walk->active = false;
     }
@@ -455,12 +384,8 @@ int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t payload_data_len = record.data_len;
         if (record.type == FFFS_MD_TYPE_FILE_ROOT_V1 &&
                 (st || data_off || data_len || cache)) {
-            struct decoded_file_md md = {
-                .data_off = record.data_off,
-                .data_len = record.data_len,
-                .size = record.size_or_offset,
-            };
-            int err = read_root_prefix(fs, sector, &md, st,
+            int err = read_root_prefix(fs, sector, record.data_off,
+                    record.data_len, record.size_or_offset, st,
                     &payload_data_off, &payload_data_len, cache);
             if (err != FFFS_OK) {
                 return err;

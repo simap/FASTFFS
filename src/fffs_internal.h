@@ -112,6 +112,13 @@ static inline enum fffs_bitmirror_state fffs_lifecycle_hint_pair(
     return fffs_bitmirror_state(state, 0x24);
 }
 
+static inline bool fffs_lifecycle_is_live(
+        enum fffs_bitmirror_state valid_bits,
+        enum fffs_bitmirror_state tombstone_bits) {
+    return valid_bits == FFFS_BITMIRROR_CLEARED &&
+        tombstone_bits == FFFS_BITMIRROR_SET;
+}
+
 static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_footer(
         uint8_t state) {
     enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
@@ -122,27 +129,6 @@ static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_footer(
         return FFFS_LIFECYCLE_OBJECT_INVALID;
     }
     if (tombstone == FFFS_BITMIRROR_CLEARED) {
-        return FFFS_LIFECYCLE_OBJECT_TOMBSTONED;
-    }
-    if (valid == FFFS_BITMIRROR_CLEARED) {
-        return FFFS_LIFECYCLE_OBJECT_LIVE;
-    }
-    if (state == 0xff) {
-        return FFFS_LIFECYCLE_OBJECT_ERASED;
-    }
-    return FFFS_LIFECYCLE_OBJECT_INVALID;
-}
-
-static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_md(
-        uint8_t state) {
-    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
-    enum fffs_bitmirror_state tombstone =
-        fffs_lifecycle_tombstone_pair(state);
-    if (valid == FFFS_BITMIRROR_MIXED) {
-        return FFFS_LIFECYCLE_OBJECT_INVALID;
-    }
-    if (tombstone == FFFS_BITMIRROR_CLEARED ||
-            tombstone == FFFS_BITMIRROR_MIXED) {
         return FFFS_LIFECYCLE_OBJECT_TOMBSTONED;
     }
     if (valid == FFFS_BITMIRROR_CLEARED) {
