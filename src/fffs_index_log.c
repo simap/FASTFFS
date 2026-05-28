@@ -806,8 +806,8 @@ int fffs_replay_index(struct fffs *fs) {
 
                 if (terminal_active_tail) {
                     uint32_t root_size;
-                    err = fffs_read_root_size_for_slot(fs, head, slot,
-                            &root_size);
+                    err = fffs_read_metadata_for_slot(fs, head, slot, NULL,
+                            NULL, NULL, NULL, NULL, &root_size, NULL);
                     if (err != FFFS_OK) {
                         err = clobber_or_reject_active_tail(fs, rec_off,
                                 terminal_active_tail);

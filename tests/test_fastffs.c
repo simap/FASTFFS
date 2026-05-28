@@ -71,7 +71,10 @@ struct fffs_read_cache_view;
 int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
         uint16_t *data_len, uint16_t *next, uint16_t *span_len,
-        struct fffs_read_cache_view *cache);
+        uint32_t *root_size, struct fffs_read_cache_view *cache);
+int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
+        uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
+        uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -474,6 +477,43 @@ static int test_allocator_repairs_partial_full_hint_after_scan(void) {
 
     ASSERT_OK(write_chunks(&fs, "f004", value, sizeof(value)));
     ASSERT_TRUE(ffsv_flash_image_byte(flash, state_off) == 0x5a);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_free_window_rejects_partially_erased_footer_without_scan(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    uint16_t data_off = 0;
+    uint16_t record_off = 0;
+    bool needs_footer = false;
+    uint16_t md_records = 0;
+
+    ASSERT_OK(new_backend_with_sector_size(&flash, &backend, 256, 16));
+    ASSERT_OK(fffs_format(&backend, &(struct fffs_format_options){
+                .index_sectors = 2,
+                .sector_size = FFFS_SECTOR_256,
+            }));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    uint16_t sector = fs.index_sectors;
+    size_t corrupt_off = (size_t)(sector + 1u) * fs.sector_size - 4u;
+    uint8_t tail[4] = {0xff, 0xff, 0x00, 0x00};
+    ASSERT_OK(flash_to_fs(ffsv_flash_program(flash, corrupt_off,
+                    tail, sizeof(tail), FFSV_CALLSITE)));
+
+    const struct ffsv_op_counts *before = ffsv_flash_counts(flash);
+    uint64_t read_bytes_before = before[FFSV_OP_READ].bytes;
+    ASSERT_EQ_INT(FFFS_ERR_NO_SPACE,
+            fffs_find_sector_free_window(&fs, sector, 1, 0,
+                &data_off, &record_off, &needs_footer, &md_records));
+    const struct ffsv_op_counts *after = ffsv_flash_counts(flash);
+    ASSERT_TRUE(after[FFSV_OP_READ].bytes - read_bytes_before ==
+            FFFS_MD_PRELOAD_MAX);
 
     fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
@@ -2643,7 +2683,8 @@ static int test_large_file_uses_contiguous_spans(void) {
 
     ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
     ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
-                NULL, NULL, &span_data_len, &span_next, &span_len, NULL));
+                NULL, NULL, &span_data_len, &span_next, &span_len, NULL,
+                NULL));
     ASSERT_TRUE(span_len > 1);
     ASSERT_TRUE(span_data_len > 0);
 
@@ -2700,13 +2741,13 @@ static int test_span_head_skips_contiguous_continuations(void) {
 
     ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
     ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
-                NULL, NULL, NULL, &root_next, &root_span_len, NULL));
+                NULL, NULL, NULL, &root_next, &root_span_len, NULL, NULL));
     ASSERT_TRUE(root_span_len > 1);
     ASSERT_TRUE(root_next == 0);
 
     ASSERT_OK(fffs_read_metadata_for_slot(&fs, (uint16_t)(file.head + 1u),
-                file.slot, NULL, NULL, NULL, &cont_next, &cont_span_len,
-                NULL));
+            file.slot, NULL, NULL, NULL, &cont_next, &cont_span_len,
+            NULL, NULL));
     ASSERT_TRUE(cont_span_len == 1);
     ASSERT_TRUE(cont_next == file.head + 2u);
     ASSERT_OK(fffs_close(&file));
@@ -2936,6 +2977,7 @@ int main(void) {
     failures += test_format_mount_write_read_remount();
     failures += test_partial_full_hint_does_not_invalidate_sector();
     failures += test_allocator_repairs_partial_full_hint_after_scan();
+    failures += test_free_window_rejects_partially_erased_footer_without_scan();
     failures += test_mount_requires_scratch();
     failures += test_overwrite_delete_and_remount();
     failures += test_fsinfo_refresh_and_cached_accounting();

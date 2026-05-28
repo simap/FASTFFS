@@ -230,9 +230,7 @@ void fffs_encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
 int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
         uint16_t *data_len, uint16_t *next, uint16_t *span_len,
-        struct fffs_read_cache_view *cache);
-int fffs_read_root_size_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot, uint32_t *size);
+        uint32_t *root_size, struct fffs_read_cache_view *cache);
 enum fffs_tombstone_accounting {
     FFFS_TOMBSTONE_NO_ACCOUNTING,
     FFFS_TOMBSTONE_COMMITTED_DELETE,

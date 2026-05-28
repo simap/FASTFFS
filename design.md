@@ -182,11 +182,14 @@ struct fffs_index_header_disk {
 
 The index count is 2-15. Version 1 uses 16-bit slots, 16-bit sector heads, and 4-byte index records. The encoded sector size applies to index sectors and data sectors. All valid index sectors in one image must agree on version, index count, and sector shift.
 
-The `flags` byte uses cleared bits for state:
+The `flags` byte uses mirrored lifecycle bits and policy bits:
 
-- clear `0x80`: header is committed/valid
+- clear `0x80`: header is committed
 - clear `0x40`: index sector is tombstoned
 - clear `0x20`: metadata CRC is required
+
+Committed and tombstoned are bit-level lifecycle states. Live means the
+committed bit pair is cleared and the tombstone bit pair is still set.
 
 Unknown cleared bits cause mount failure. Unknown bits still set are reserved.
 

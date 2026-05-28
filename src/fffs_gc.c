@@ -85,7 +85,7 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
         uint16_t next_sector;
         uint16_t span_len;
         int err = fffs_read_metadata_for_slot(fs, current, slot, NULL, NULL,
-                NULL, &next_sector, &span_len, NULL);
+                NULL, &next_sector, &span_len, NULL, NULL);
         if (err != FFFS_OK) {
             FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return err;

@@ -27,13 +27,13 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
         uint16_t span_len = 1;
         if (!have_next) {
             int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                    NULL, NULL, &current_next, &span_len, NULL);
+                    NULL, NULL, &current_next, &span_len, NULL, NULL);
             if (err != FFFS_OK) {
                 return false;
             }
         } else {
             int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                    NULL, NULL, NULL, &span_len, NULL);
+                    NULL, NULL, NULL, &span_len, NULL, NULL);
             if (err != FFFS_OK) {
                 return false;
             }
@@ -230,7 +230,7 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
 
     if (read) {
         err = fffs_read_metadata_for_slot(fs, head, slot, NULL, NULL, NULL,
-                NULL, &resolved_span_len, NULL);
+                NULL, &resolved_span_len, NULL, NULL);
         if (err != FFFS_OK) {
             return err;
         }
@@ -273,7 +273,7 @@ static int reset_read_position_to_root(struct fffs_file *file) {
     uint16_t next;
     uint16_t span_len;
     int err = fffs_read_metadata_for_slot(file->fs, file->head, file->slot,
-            NULL, &file->data_offset, &data_len, &next, &span_len, NULL);
+            NULL, &file->data_offset, &data_len, &next, &span_len, NULL, NULL);
     if (err != FFFS_OK) {
         return err;
     }
@@ -312,7 +312,7 @@ static int seek_from_current_position(struct fffs_file *file,
         uint16_t span_len;
         int err = fffs_read_metadata_for_slot(file->fs, next_sector,
                 file->slot, NULL, &file->data_offset, &data_len, &next,
-                &span_len, NULL);
+                &span_len, NULL, NULL);
         if (err != FFFS_OK) {
             return err;
         }
@@ -515,7 +515,8 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
             uint16_t span_len;
             int err = fffs_read_metadata_for_slot(file->fs,
                     next_sector, file->slot, NULL,
-                    &file->data_offset, &data_len, &next, &span_len, NULL);
+                    &file->data_offset, &data_len, &next, &span_len,
+                    NULL, NULL);
             if (err != FFFS_OK) {
                 FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
                 return err;
@@ -800,7 +801,7 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st) {
         return FFFS_OK;
     }
     return fffs_read_metadata_for_slot(file->fs, file->head, file->slot, st,
-            NULL, NULL, NULL, NULL, NULL);
+            NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
 int fffs_close(struct fffs_file *file) {
