@@ -49,8 +49,9 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
     return FFFS_OK;
 }
 
-static int sector_is_reachable_from_any_chain(struct fffs *fs, size_t sector,
-        bool *reachable) {
+#if FFFS_GC_PARANOID_REACHABILITY
+static int gc_paranoid_sector_is_reachable_from_any_chain(struct fffs *fs,
+        size_t sector, bool *reachable) {
     *reachable = false;
     struct fffs_index_iter iter = {
         .fs = fs,
@@ -66,6 +67,7 @@ static int sector_is_reachable_from_any_chain(struct fffs *fs, size_t sector,
     }
     return iter.status;
 }
+#endif
 
 static int gc_classify_record(struct fffs *fs, size_t sector,
         const struct fffs_md_record *record, bool *live) {
@@ -232,19 +234,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         return err;
     }
     if (walk_result == FFFS_MD_WALK_END_INVALID) {
-        uint8_t tombstone = FFFS_MD_FLAGS_TOMBSTONED;
-        err = fffs_flash_program_aligned(fs,
-                s * fs->sector_size + record.record_start,
-                &tombstone, sizeof(tombstone));
         fs->gc_md.active = false;
-        fs->gc_cursor = fffs_next_data_sector(fs, s);
-        if (err != FFFS_OK) {
-            return err;
+#if FFFS_GC_PARANOID_REACHABILITY
+        bool reachable_tail = false;
+        err = gc_paranoid_sector_is_reachable_from_any_chain(fs, s,
+                &reachable_tail);
+        if (err != FFFS_OK || reachable_tail) {
+            return err == FFFS_OK ? FFFS_ERR_CORRUPT : err;
         }
-        if (out_action) {
-            *out_action = FFFS_GC_TOMBSTONED;
-        }
-        return FFFS_OK;
+#endif
     }
     if (walk_result == FFFS_MD_WALK_RECORD) {
         bool record_live = false;
@@ -267,12 +265,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     }
 
     if (!fs->gc_md.live_seen) {
+#if FFFS_GC_PARANOID_REACHABILITY
         bool reachable_tail = false;
-        err = sector_is_reachable_from_any_chain(fs, s, &reachable_tail);
+        err = gc_paranoid_sector_is_reachable_from_any_chain(fs, s,
+                &reachable_tail);
         if (err != FFFS_OK) {
             return err;
         }
         fs->gc_md.live_seen = reachable_tail;
+#endif
     }
 
     if (fs->gc_md.live_seen) {

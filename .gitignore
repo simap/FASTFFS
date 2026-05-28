@@ -12,3 +12,6 @@ benchmarks/results/**/*.log
 crash_sweep_logs
 
 .DS_Store
+
+__pycache__/
+*.pyc

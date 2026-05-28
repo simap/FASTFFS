@@ -627,17 +627,22 @@ struct original_index_diag_ctx {
     uint16_t sector;
 };
 
-static const char *md_lifecycle_name(enum fffs_md_record_lifecycle lifecycle) {
-    switch (lifecycle) {
-    case FFFS_MD_RECORD_LIVE:
+static const char *md_record_state_name(const struct fffs_md_record *record) {
+    if (record->live) {
         return "live";
-    case FFFS_MD_RECORD_TOMBSTONED:
-        return "tombstoned";
-    case FFFS_MD_RECORD_PARTIAL_TOMBSTONE:
-        return "partial-tombstone";
-    default:
-        return "unknown";
     }
+
+    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(record->state);
+    enum fffs_bitmirror_state tombstone =
+        fffs_lifecycle_tombstone_pair(record->state);
+    if (valid == FFFS_BITMIRROR_CLEARED &&
+            tombstone == FFFS_BITMIRROR_CLEARED) {
+        return "tombstoned";
+    }
+    if (tombstone == FFFS_BITMIRROR_MIXED) {
+        return "partial-tombstone";
+    }
+    return "not-live";
 }
 
 static bool original_sector_reachable(struct fffs *fs, uint16_t slot,
@@ -645,15 +650,16 @@ static bool original_sector_reachable(struct fffs *fs, uint16_t slot,
     uint16_t current = head;
     *err_out = FFFS_OK;
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        if (current == sector) {
-            return true;
-        }
         uint16_t next = 0;
+        uint16_t span_len = 0;
         int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                NULL, NULL, &next, NULL);
+                NULL, NULL, &next, &span_len, NULL, NULL);
         if (err != FFFS_OK) {
             *err_out = err;
             return false;
+        }
+        if (sector >= current && sector < (size_t)current + span_len) {
+            return true;
         }
         current = next;
     }
@@ -672,8 +678,9 @@ static int original_index_diag_visitor(struct fffs *fs,
 
     struct fffs_stat md_st = {0};
     uint16_t next = 0;
+    uint16_t span_len = 0;
     int md_err = fffs_read_metadata_for_slot(fs, ctx->sector, record->slot,
-            &md_st, NULL, NULL, &next, NULL);
+            &md_st, NULL, NULL, &next, &span_len, NULL, NULL);
 
     bool exists = false;
     int exists_err = md_err == FFFS_OK ?
@@ -692,13 +699,14 @@ static int original_index_diag_visitor(struct fffs *fs,
 
     fprintf(ctx->out,
             "original-index sector=%u record_off=%u lifecycle=%s "
-            "slot=%u md_next=%u md_name=%s md_size=%u md_err=%s "
+            "slot=%u md_next=%u md_span=%u md_name=%s md_size=%u md_err=%s "
             "head_found=%d head=%u head_err=%s reachable=%d "
             "reach_err=%s exists=%d exists_err=%s stat_size=%u "
             "stat_err=%s\n",
             (unsigned)ctx->sector, (unsigned)record->record_start,
-            md_lifecycle_name(record->lifecycle), (unsigned)record->slot,
-            (unsigned)next, md_err == FFFS_OK ? md_st.name : "",
+            md_record_state_name(record), (unsigned)record->slot,
+            (unsigned)next, (unsigned)span_len,
+            md_err == FFFS_OK ? md_st.name : "",
             (unsigned)md_st.size, fffs_status_name(md_err), found,
             (unsigned)head, fffs_status_name(head_err), reachable,
             fffs_status_name(reach_err), exists, fffs_status_name(exists_err),
@@ -1095,6 +1103,17 @@ static int run_steps(struct ffsv_flash *flash, struct fffs_backend *backend,
                         "err=%s\n",
                         workload_id, i, (unsigned)steps[i].type,
                         fffs_status_name(err));
+                log_model(log, "expected-before", &before_model);
+                log_model(log, "expected-after", &after_model);
+                dump_failure_images(log, log_path, "apply",
+                        workload_id, i, 0, 0, base.flash, flash);
+                fprintf(log, "apply-before image diagnostics\n");
+                log_failure_image(log, &base.backend, &base.fs,
+                        before_hash, after_hash);
+                fprintf(log, "apply-after image diagnostics\n");
+                log_failure_image(log, backend, &fs, before_hash,
+                        after_hash);
+                fflush(log);
             }
             runtime_destroy(&base);
             break;

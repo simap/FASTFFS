@@ -142,6 +142,9 @@ static int decode_file_md_record(struct fffs *fs,
         return FFFS_ERR_CORRUPT;
     }
     size_t record_start = cursor - record_len;
+    record->type = type;
+    record->record_start = record_start;
+    record->record_len = record_len;
 
     if (type == FFFS_MD_TYPE_FILE_ROOT_V1 ||
             type == FFFS_MD_TYPE_FILE_CONT_V1) {
@@ -166,11 +169,6 @@ static int decode_file_md_record(struct fffs *fs,
     enum fffs_bitmirror_state tombstone =
         fffs_lifecycle_tombstone_pair(buf[0]);
     bool live = fffs_lifecycle_is_live(valid, tombstone);
-    if (buf[0] != 0xff && !live && valid != FFFS_BITMIRROR_CLEARED) {
-        return FFFS_OK;
-    }
-
-    record->type = type;
     record->state = buf[0];
     record->live = live;
     record->slot = fffs_load_le16(buf + 1);
@@ -179,8 +177,9 @@ static int decode_file_md_record(struct fffs *fs,
     record->data_off = fffs_load_le16(buf + 7);
     record->data_len = fffs_load_le16(buf + 9);
     record->size_or_offset = fffs_load_le32(buf + 11);
-    record->record_start = record_start;
-    record->record_len = record_len;
+    if (buf[0] != 0xff && !live && valid != FFFS_BITMIRROR_CLEARED) {
+        return FFFS_OK;
+    }
 
     bool uncommitted = buf[0] == 0xff;
     if ((size_t)record->data_off + record->data_len > record_start) {

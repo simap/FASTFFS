@@ -128,7 +128,8 @@ static void fill_write_event(const bench_churn_model_t *model,
     if (event->replacing) {
         snprintf(event->name, sizeof(event->name), "%s", slot->name);
     } else {
-        snprintf(event->name, sizeof(event->name), "w%04d.bin", model->pending_slot);
+        snprintf(event->name, sizeof(event->name), "w%04d-%08x.bin",
+                 model->pending_slot, event->write_seed);
     }
 }
 

@@ -44,6 +44,13 @@
 #define TEST_ALLOC_MAP_WORDS 256
 #define TEST_SCRATCH_SIZE 4096
 #define TEST_INDEX_HEADER_SIZE 8
+#define TEST_SECTOR_FOOTER_SIZE 10u
+#define TEST_MD_FILE_RECORD_SIZE 16u
+#define TEST_MD_FLAGS_VALID 0x7eu
+#define TEST_MD_FLAGS_TOMBSTONED 0x3cu
+#define TEST_MD_TYPE_UNKNOWN 0x13u
+#define TEST_SECTOR_TYPE_FILE 0x01u
+#define TEST_SECTOR_FLAGS_VALID 0x7eu
 #define TEST_INDEX_CACHE_WORDS \
     (((FFFS_INDEX_CACHE_BYTES(TEST_INDEX_HASH_TABLE_SIZE) + \
        sizeof(uint32_t) - 1u) / sizeof(uint32_t)) ? \
@@ -918,6 +925,101 @@ static int test_gc_erases_dirty_sector_with_erased_footer(void) {
     ASSERT_TRUE(action == FFFS_GC_ERASED);
     ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash,
                 10 * FFFS_DEFAULT_SECTOR_SIZE, FFFS_DEFAULT_SECTOR_SIZE));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_tombstones_sector_with_invalid_unknown_md(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const uint16_t sector = 10;
+    size_t base = (size_t)sector * FFFS_DEFAULT_SECTOR_SIZE;
+    size_t footer_off = FFFS_DEFAULT_SECTOR_SIZE - TEST_SECTOR_FOOTER_SIZE;
+    size_t record_off = footer_off - TEST_MD_FILE_RECORD_SIZE;
+    uint8_t footer[TEST_SECTOR_FOOTER_SIZE] = {
+        0x7b, 0x00, 0x00, 0x00,
+        TEST_SECTOR_TYPE_FILE,
+        TEST_SECTOR_FLAGS_VALID,
+        'F', 'F', 'S', 'D',
+    };
+    uint8_t type = TEST_MD_TYPE_UNKNOWN;
+    enum fffs_gc_action action;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_corrupt(flash, base + footer_off,
+                    footer, sizeof(footer), FFSV_CALLSITE)));
+    ASSERT_OK(flash_to_fs(ffsv_flash_corrupt(flash,
+                    base + record_off + TEST_MD_FILE_RECORD_SIZE - 1u,
+                    &type, sizeof(type), FFSV_CALLSITE)));
+
+    fs.gc_cursor = sector;
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_EQ_INT(FFFS_GC_TOMBSTONED, action);
+    ASSERT_TRUE(ffsv_flash_image_byte(flash, base + footer_off + 5u) ==
+            TEST_MD_FLAGS_TOMBSTONED);
+    ASSERT_TRUE(ffsv_flash_image_byte(flash, base + record_off) == 0xff);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_gc_tombstones_sector_with_reachable_invalid_metadata_normally(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const uint8_t data[] = "committed";
+    uint8_t bad_span[2] = {0x00, 0x00};
+    uint16_t head;
+    uint16_t record_off;
+    enum fffs_gc_action action;
+    size_t written = 0;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    ASSERT_OK(fffs_open(&fs, &file, "reachable-bad-md",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, &written));
+    ASSERT_TRUE(written == sizeof(data) - 1);
+    head = file.head;
+    record_off = file.current_metadata_offset;
+    ASSERT_OK(fffs_close(&file));
+
+    ASSERT_OK(flash_to_fs(ffsv_flash_corrupt(flash,
+                    (size_t)head * fs.sector_size + record_off + 5u,
+                    bad_span, sizeof(bad_span), FFSV_CALLSITE)));
+    ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                (size_t)head * fs.sector_size + record_off) ==
+            TEST_MD_FLAGS_VALID);
+
+    fs.gc_cursor = head;
+#if FFFS_GC_PARANOID_REACHABILITY
+    ASSERT_EQ_INT(FFFS_ERR_CORRUPT, fffs_gc_step(&fs, &action));
+    ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                (size_t)head * fs.sector_size + record_off) ==
+            TEST_MD_FLAGS_VALID);
+#else
+    ASSERT_OK(fffs_gc_step(&fs, &action));
+    ASSERT_EQ_INT(FFFS_GC_TOMBSTONED, action);
+    ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                (size_t)head * fs.sector_size + record_off) ==
+            TEST_MD_FLAGS_VALID);
+    ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                (size_t)head * fs.sector_size + fs.sector_size -
+                    TEST_SECTOR_FOOTER_SIZE + 5u) ==
+            TEST_MD_FLAGS_TOMBSTONED);
+#endif
 
     fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
@@ -2988,6 +3090,9 @@ int main(void) {
         test_non_strict_mount_does_not_clobber_nonterminal_index_record();
     failures += test_gc_reclaims_unindexed_orphan_sector();
     failures += test_gc_erases_dirty_sector_with_erased_footer();
+    failures += test_gc_tombstones_sector_with_invalid_unknown_md();
+    failures +=
+        test_gc_tombstones_sector_with_reachable_invalid_metadata_normally();
     failures += test_gc_skips_open_writer_dirty_root_sector();
     failures += test_gc_skips_multiple_open_writer_dirty_sectors();
     failures += test_gc_skips_open_writer_root_and_current_extents();
