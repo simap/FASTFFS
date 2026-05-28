@@ -45,18 +45,18 @@ static int backend_read(const struct fffs_backend *backend, size_t offset,
                 buffer, size));
 }
 
-static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
+static bool valid_footer(const struct fffs_sector_footer *footer,
         uint32_t *serial) {
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0 ||
-            (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
-             footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED)) {
+    bool live = fffs_lifecycle_is_live(footer->valid_bits,
+            footer->tombstone_bits);
+    bool tombstoned = footer->valid_bits != FFFS_BITMIRROR_MIXED &&
+        footer->tombstone_bits == FFFS_BITMIRROR_CLEARED;
+    if (footer->type != FFFS_SECTOR_TYPE_FILE || !footer->magic_valid ||
+            (!live && !tombstoned)) {
         return false;
     }
     if (serial) {
-        *serial = fffs_load_le32(footer);
+        *serial = footer->serial;
     }
     return true;
 }
@@ -290,7 +290,9 @@ static int read_decoded_md(const struct fffs_backend *backend,
     if (err != FFFS_OK) {
         return err;
     }
-    if (!valid_footer(footer, NULL)) {
+    struct fffs_sector_footer view;
+    fffs_decode_sector_footer(footer, &view);
+    if (!valid_footer(&view, NULL)) {
         *state = MD_CORRUPT;
         return FFFS_OK;
     }
@@ -423,15 +425,16 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             return err;
         }
 
-        if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
+        struct fffs_sector_footer view;
+        fffs_decode_sector_footer(footer, &view);
+        if (view.erased) {
             summary->data_sectors_erased += 1;
             continue;
         }
-        if (!valid_footer(footer, NULL)) {
+        if (!valid_footer(&view, NULL)) {
             continue;
         }
-        if (fffs_lifecycle_decode_footer(footer[5]) ==
-                FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
+        if (view.tombstone_bits == FFFS_BITMIRROR_CLEARED) {
             summary->data_sectors_tombstoned += 1;
             summary->md_tombstoned += 1;
             continue;
@@ -623,12 +626,14 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
         if (err != FFFS_OK) {
             return err;
         }
-        if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
+        struct fffs_sector_footer view;
+        fffs_decode_sector_footer(footer, &view);
+        if (view.erased) {
             continue;
         }
 
         uint32_t serial = 0;
-        if (!valid_footer(footer, &serial)) {
+        if (!valid_footer(&view, &serial)) {
             fprintf(out, "sector=%zu invalid-footer\n", sector);
             continue;
         }

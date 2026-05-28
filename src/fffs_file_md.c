@@ -120,14 +120,6 @@ static int file_md_reader_view(struct fffs *fs,
     return FFFS_OK;
 }
 
-static bool validate_live_file_footer(const uint8_t *footer) {
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    return footer[4] == FFFS_SECTOR_TYPE_FILE &&
-        memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) == 0 &&
-        footer_state == FFFS_LIFECYCLE_OBJECT_LIVE;
-}
-
 static int decode_file_md_record(struct fffs *fs,
         struct fffs_md_read_window *reader, size_t cursor,
         struct fffs_md_record *record, enum fffs_md_walk_result *result) {
@@ -291,19 +283,15 @@ int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
     if (err != FFFS_OK) {
         return err;
     }
-    if (!validate_live_file_footer(footer)) {
-        enum fffs_lifecycle_object_state footer_state =
-            fffs_lifecycle_decode_footer(footer[5]);
-        if (footer[4] == FFFS_SECTOR_TYPE_FILE &&
-                memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) == 0 &&
-                footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
-            walk->cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-            walk->claimed_data_end = 0;
-            walk->sector = sector;
-            walk->live_seen = false;
-            walk->active = false;
-            return FFFS_OK;
-        }
+    struct fffs_sector_footer view;
+    fffs_decode_sector_footer(footer, &view);
+    if (view.type != FFFS_SECTOR_TYPE_FILE || !view.magic_valid) {
+        return FFFS_ERR_CORRUPT;
+    }
+    bool live = fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits);
+    bool tombstoned = view.valid_bits != FFFS_BITMIRROR_MIXED &&
+        view.tombstone_bits == FFFS_BITMIRROR_CLEARED;
+    if (!live && !tombstoned) {
         return FFFS_ERR_CORRUPT;
     }
 
@@ -311,7 +299,7 @@ int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
     walk->claimed_data_end = 0;
     walk->sector = sector;
     walk->live_seen = false;
-    walk->active = true;
+    walk->active = live;
     return FFFS_OK;
 }
 
@@ -519,7 +507,9 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     }
 
     size_t footer_off = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-    if (fffs_flash_bytes_erased(footer, FFFS_SECTOR_FOOTER_SIZE)) {
+    struct fffs_sector_footer view;
+    fffs_decode_sector_footer(footer, &view);
+    if (view.erased) {
         err = fffs_flash_span_is_erased(fs, (size_t)sector * fs->sector_size,
                 fs->sector_size);
         if (err != FFFS_OK) {
@@ -536,15 +526,11 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         return FFFS_OK;
     }
 
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0 ||
-            footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
+    if (view.type != FFFS_SECTOR_TYPE_FILE || !view.magic_valid ||
+            !fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits)) {
         return FFFS_ERR_NO_SPACE;
     }
-    if (fffs_lifecycle_hint_pair(footer[5]) ==
-            FFFS_BITMIRROR_CLEARED) {
+    if (view.full_bits == FFFS_BITMIRROR_CLEARED) {
         return FFFS_ERR_NO_SPACE;
     }
 

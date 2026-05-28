@@ -9,60 +9,6 @@
 
 #include "fffs_internal.h"
 
-enum gc_sector_state {
-    GC_SECTOR_BLANK,
-    GC_SECTOR_DIRTY_NO_FOOTER,
-    GC_SECTOR_VALID,
-    GC_SECTOR_TOMBSTONED,
-};
-
-static int sector_footer_state(struct fffs *fs, size_t sector,
-        enum gc_sector_state *state, bool *full_hint) {
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    *full_hint = false;
-    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_FOOTER_STATE);
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs,
-                (uint16_t)sector), footer, sizeof(footer));
-    FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_FOOTER_STATE);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
-        err = fffs_flash_span_is_erased(fs, sector * fs->sector_size,
-                fs->sector_size);
-        if (err == FFFS_OK) {
-            *state = GC_SECTOR_BLANK;
-            return FFFS_OK;
-        }
-        if (err == FFFS_ERR_NO_SPACE) {
-            *state = GC_SECTOR_DIRTY_NO_FOOTER;
-            return FFFS_OK;
-        }
-        return err;
-    }
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            footer[6] != 'F' || footer[7] != 'F' ||
-            footer[8] != 'S' || footer[9] != 'D' ||
-            footer_state == FFFS_LIFECYCLE_OBJECT_INVALID ||
-            footer_state == FFFS_LIFECYCLE_OBJECT_ERASED) {
-        *state = GC_SECTOR_DIRTY_NO_FOOTER;
-        return FFFS_OK;
-    }
-    if (footer_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
-        *state = GC_SECTOR_TOMBSTONED;
-        return FFFS_OK;
-    }
-    if (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE) {
-        return FFFS_ERR_CORRUPT;
-    }
-    *full_hint = fffs_lifecycle_hint_pair(footer[5]) ==
-        FFFS_BITMIRROR_CLEARED;
-    *state = GC_SECTOR_VALID;
-    return FFFS_OK;
-}
-
 static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
         return fs->index_sectors;
@@ -182,21 +128,48 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    enum gc_sector_state state;
-    bool full_hint;
-    int err = sector_footer_state(fs, s, &state, &full_hint);
+    uint8_t footer_bytes[FFFS_SECTOR_FOOTER_SIZE];
+    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_FOOTER_STATE);
+    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, (uint16_t)s),
+            footer_bytes, sizeof(footer_bytes));
+    FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_FOOTER_STATE);
     if (err != FFFS_OK) {
         return err;
     }
-    if (state == GC_SECTOR_BLANK) {
-        fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
-        fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_md.live_seen = false;
-        if (out_action) {
-            *out_action = FFFS_GC_SCANNED;
+
+    struct fffs_sector_footer footer;
+    fffs_decode_sector_footer(footer_bytes, &footer);
+    bool erase_sector = false;
+    bool full_hint = false;
+    if (footer.erased) {
+        err = fffs_flash_span_is_erased(fs, s * fs->sector_size,
+                fs->sector_size);
+        if (err == FFFS_OK) {
+            fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
+            fs->gc_cursor = fffs_next_data_sector(fs, s);
+            fs->gc_md.live_seen = false;
+            if (out_action) {
+                *out_action = FFFS_GC_SCANNED;
+            }
+            return FFFS_OK;
         }
-        return FFFS_OK;
+        if (err != FFFS_ERR_NO_SPACE) {
+            return err;
+        }
+        erase_sector = true;
+    } else if (footer.type != FFFS_SECTOR_TYPE_FILE || !footer.magic_valid ||
+            footer.valid_bits == FFFS_BITMIRROR_MIXED ||
+            footer.tombstone_bits == FFFS_BITMIRROR_MIXED ||
+            footer.state == 0xff ||
+            footer.tombstone_bits == FFFS_BITMIRROR_CLEARED) {
+        erase_sector = true;
+    } else if (!fffs_lifecycle_is_live(footer.valid_bits,
+                footer.tombstone_bits)) {
+        return FFFS_ERR_CORRUPT;
+    } else {
+        full_hint = footer.full_bits == FFFS_BITMIRROR_CLEARED;
     }
+
     if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.live_seen = true;
@@ -206,8 +179,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    if (state == GC_SECTOR_TOMBSTONED ||
-            state == GC_SECTOR_DIRTY_NO_FOOTER) {
+    if (erase_sector) {
         err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
                     s * fs->sector_size, fs->sector_size));
 #if FFFS_PROFILE_TRACE

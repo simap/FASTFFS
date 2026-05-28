@@ -29,6 +29,20 @@ size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector) {
     return fffs_sector_footer_offset(fs, sector) - FFFS_MD_FILE_RECORD_SIZE;
 }
 
+void fffs_decode_sector_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
+        struct fffs_sector_footer *view) {
+    *view = (struct fffs_sector_footer){
+        .serial = fffs_load_le32(footer),
+        .type = footer[4],
+        .state = footer[5],
+        .erased = fffs_flash_bytes_erased(footer, FFFS_SECTOR_FOOTER_SIZE),
+        .magic_valid = memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) == 0,
+        .valid_bits = fffs_lifecycle_valid_pair(footer[5]),
+        .tombstone_bits = fffs_lifecycle_tombstone_pair(footer[5]),
+        .full_bits = fffs_lifecycle_hint_pair(footer[5]),
+    };
+}
+
 int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t *serial) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
@@ -41,18 +55,19 @@ int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
     if (err != FFFS_OK) {
         return err;
     }
-    enum fffs_lifecycle_object_state footer_state =
-        fffs_lifecycle_decode_footer(footer[5]);
-    if (footer[4] != FFFS_SECTOR_TYPE_FILE ||
-            memcmp(footer + 6, FFFS_SECTOR_MAGIC, 4) != 0) {
+    struct fffs_sector_footer view;
+    fffs_decode_sector_footer(footer, &view);
+    if (view.type != FFFS_SECTOR_TYPE_FILE || !view.magic_valid) {
         return FFFS_ERR_NO_SPACE;
     }
-    if (footer_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
-            footer_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
+    bool live = fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits);
+    bool tombstoned = view.valid_bits != FFFS_BITMIRROR_MIXED &&
+        view.tombstone_bits == FFFS_BITMIRROR_CLEARED;
+    if (!live && !tombstoned) {
         return FFFS_ERR_NO_SPACE;
     }
     if (serial) {
-        *serial = fffs_load_le32(footer);
+        *serial = view.serial;
     }
     return FFFS_OK;
 }

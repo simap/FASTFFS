@@ -90,13 +90,6 @@ static inline void fffs_store_le32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v >> 24);
 }
 
-enum fffs_lifecycle_object_state {
-    FFFS_LIFECYCLE_OBJECT_INVALID,
-    FFFS_LIFECYCLE_OBJECT_ERASED,
-    FFFS_LIFECYCLE_OBJECT_LIVE,
-    FFFS_LIFECYCLE_OBJECT_TOMBSTONED,
-};
-
 static inline enum fffs_bitmirror_state fffs_lifecycle_valid_pair(
         uint8_t state) {
     return fffs_bitmirror_state(state, 0x81);
@@ -117,27 +110,6 @@ static inline bool fffs_lifecycle_is_live(
         enum fffs_bitmirror_state tombstone_bits) {
     return valid_bits == FFFS_BITMIRROR_CLEARED &&
         tombstone_bits == FFFS_BITMIRROR_SET;
-}
-
-static inline enum fffs_lifecycle_object_state fffs_lifecycle_decode_footer(
-        uint8_t state) {
-    enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
-    enum fffs_bitmirror_state tombstone =
-        fffs_lifecycle_tombstone_pair(state);
-    if (valid == FFFS_BITMIRROR_MIXED ||
-            tombstone == FFFS_BITMIRROR_MIXED) {
-        return FFFS_LIFECYCLE_OBJECT_INVALID;
-    }
-    if (tombstone == FFFS_BITMIRROR_CLEARED) {
-        return FFFS_LIFECYCLE_OBJECT_TOMBSTONED;
-    }
-    if (valid == FFFS_BITMIRROR_CLEARED) {
-        return FFFS_LIFECYCLE_OBJECT_LIVE;
-    }
-    if (state == 0xff) {
-        return FFFS_LIFECYCLE_OBJECT_ERASED;
-    }
-    return FFFS_LIFECYCLE_OBJECT_INVALID;
 }
 
 int fffs_map_backend_status(int status);
@@ -204,6 +176,18 @@ int fffs_replay_index(struct fffs *fs);
 size_t fffs_max_file_data_size(const struct fffs *fs);
 
 /* Sector footer and metadata helpers for FASTFFS-owned data sectors. */
+struct fffs_sector_footer {
+    uint32_t serial;
+    uint8_t type;
+    uint8_t state;
+    bool erased;
+    bool magic_valid;
+    enum fffs_bitmirror_state valid_bits;
+    enum fffs_bitmirror_state tombstone_bits;
+    enum fffs_bitmirror_state full_bits;
+};
+void fffs_decode_sector_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
+        struct fffs_sector_footer *view);
 int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t *serial);
 int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
