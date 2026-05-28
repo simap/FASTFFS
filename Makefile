@@ -15,6 +15,7 @@ LINK.o = $(CC) $(CFLAGS) $(LDFLAGS)
 
 CORE_SRCS = \
 	src/fastffs.c \
+	src/fffs_file.c \
 	src/fffs_flash.c \
 	src/fffs_index_log.c \
 	src/fffs_sector.c \

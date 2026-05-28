@@ -269,6 +269,7 @@ void bench_churn_model_apply(bench_churn_model_t *model,
         slot->live = 1;
         slot->cls = event->cls;
         slot->size = event->size;
+        slot->write_seed = event->write_seed;
         snprintf(slot->name, sizeof(slot->name), "%s", event->name);
         if (event->cls == BENCH_CHURN_CLASS_LARGE &&
             model->protected_large_slot < 0) {

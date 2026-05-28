@@ -177,6 +177,37 @@ static int adapter_read(void *ctx, void *file, void *buf, size_t len,
     return BENCHFS_OK;
 }
 
+static int adapter_seek(void *ctx, void *file, int32_t offset,
+                        benchfs_seek_whence_t whence, uint32_t *pos)
+{
+    (void)ctx;
+    int origin;
+    switch (whence) {
+    case BENCHFS_SEEK_SET:
+        origin = SEEK_SET;
+        break;
+    case BENCHFS_SEEK_CUR:
+        origin = SEEK_CUR;
+        break;
+    case BENCHFS_SEEK_END:
+        origin = SEEK_END;
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (fseek((FILE *)file, offset, origin) != 0) {
+        return errno_to_benchfs(errno ? errno : EIO);
+    }
+    long here = ftell((FILE *)file);
+    if (here < 0) {
+        return errno_to_benchfs(errno ? errno : EIO);
+    }
+    if (pos) {
+        *pos = (uint32_t)here;
+    }
+    return BENCHFS_OK;
+}
+
 static int adapter_fstat(void *ctx, void *file, uint32_t *size)
 {
     (void)ctx;
@@ -391,6 +422,7 @@ void run_vfs_benchmarks(void)
         .open = adapter_open,
         .write = adapter_write,
         .read = adapter_read,
+        .seek = adapter_seek,
         .fstat = adapter_fstat,
         .close = adapter_close,
         .delete_file = adapter_delete_file,

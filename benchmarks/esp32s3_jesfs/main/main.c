@@ -189,6 +189,46 @@ static int adapter_read(void *ctx, void *file, void *buf, size_t len,
     return BENCHFS_OK;
 }
 
+static int adapter_seek(void *ctx, void *file, int32_t offset,
+                        benchfs_seek_whence_t whence, uint32_t *pos)
+{
+    (void)ctx;
+    FS_DESC *f = file;
+    int64_t base = 0;
+    if (whence == BENCHFS_SEEK_CUR) {
+        base = f->file_pos;
+    } else if (whence == BENCHFS_SEEK_END) {
+        base = f->file_len;
+    } else if (whence != BENCHFS_SEEK_SET) {
+        return -1;
+    }
+
+    int64_t target = base + offset;
+    if (target < 0 || target > (int64_t)f->file_len) {
+        return -1;
+    }
+    if (target < (int64_t)f->file_pos) {
+        int rc = fs_rewind(f);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    uint32_t delta = (uint32_t)target - f->file_pos;
+    if (delta != 0) {
+        int32_t rc = fs_read(f, NULL, delta);
+        if (rc < 0) {
+            return (int)rc;
+        }
+        if ((uint32_t)rc != delta) {
+            return -1;
+        }
+    }
+    if (pos) {
+        *pos = f->file_pos;
+    }
+    return BENCHFS_OK;
+}
+
 static int adapter_fstat(void *ctx, void *file, uint32_t *size)
 {
     (void)ctx;
@@ -315,6 +355,7 @@ void app_main(void)
         .open = adapter_open,
         .write = adapter_write,
         .read = adapter_read,
+        .seek = adapter_seek,
         .fstat = adapter_fstat,
         .close = adapter_close,
         .delete_file = adapter_delete_file,

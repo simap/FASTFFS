@@ -162,7 +162,8 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         uint16_t md_payload_data_len;
         uint16_t md_next;
         err = fffs_read_metadata_for_slot(fs, candidate_head, candidate, &st,
-                &md_payload_data_off, &md_payload_data_len, &md_next, cache);
+                &md_payload_data_off, &md_payload_data_len, &md_next, NULL,
+                cache);
         if (err != FFFS_OK) {
             return err;
         }
@@ -207,7 +208,7 @@ bool fffs_index_dir_read(struct fffs_dir *dir, struct fffs_stat *st) {
 
         struct fffs_stat candidate;
         int err = fffs_read_metadata_for_slot(dir->fs, bucket.head,
-                bucket.slot, &candidate, NULL, NULL, NULL, NULL);
+                bucket.slot, &candidate, NULL, NULL, NULL, NULL, NULL);
         if (err != FFFS_OK) {
             dir->status = err;
             return false;

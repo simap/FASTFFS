@@ -82,17 +82,23 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
     uint16_t current = head;
     FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_REACHABILITY);
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        if (current == sector) {
-            *reachable = true;
-            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
-            return FFFS_OK;
-        }
         uint16_t next_sector;
+        uint16_t span_len;
         int err = fffs_read_metadata_for_slot(fs, current, slot, NULL, NULL,
-                NULL, &next_sector, NULL);
+                NULL, &next_sector, &span_len, NULL);
         if (err != FFFS_OK) {
             FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return err;
+        }
+        size_t span_end = (size_t)current + span_len;
+        if (span_end > fs->sector_count) {
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
+            return FFFS_ERR_CORRUPT;
+        }
+        if (sector >= current && sector < span_end) {
+            *reachable = true;
+            FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
+            return FFFS_OK;
         }
         current = next_sector;
     }
@@ -102,6 +108,24 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
     }
     FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
     return FFFS_OK;
+}
+
+static int sector_is_reachable_from_any_chain(struct fffs *fs, size_t sector,
+        bool *reachable) {
+    *reachable = false;
+    struct fffs_index_iter iter = {
+        .fs = fs,
+    };
+    uint16_t slot;
+    uint16_t head;
+    while (fffs_index_iter_read(&iter, &slot, &head)) {
+        int err = sector_is_reachable_from_chain(fs, slot, head, sector,
+                reachable);
+        if (err != FFFS_OK || *reachable) {
+            return err;
+        }
+    }
+    return iter.status;
 }
 
 static int gc_classify_record(struct fffs *fs, size_t sector,
@@ -275,6 +299,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
                 !fs->gc_md.live_seen ? FFFS_GC_TOMBSTONED : FFFS_GC_SCANNED;
         }
         return FFFS_OK;
+    }
+
+    if (!fs->gc_md.live_seen) {
+        bool reachable_tail = false;
+        err = sector_is_reachable_from_any_chain(fs, s, &reachable_tail);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        fs->gc_md.live_seen = reachable_tail;
     }
 
     if (fs->gc_md.live_seen) {

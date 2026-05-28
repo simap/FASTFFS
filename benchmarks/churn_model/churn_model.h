@@ -35,6 +35,7 @@ typedef struct {
     uint8_t live;
     bench_churn_class_t cls;
     uint32_t size;
+    uint32_t write_seed;
     char name[BENCH_CHURN_NAME_LEN];
 } bench_churn_slot_t;
 

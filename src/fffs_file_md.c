@@ -28,6 +28,7 @@ struct decoded_file_md {
 enum decoded_file_md_state {
     FFFS_DECODED_MD_ERASED,
     FFFS_DECODED_MD_INVALID,
+    FFFS_DECODED_MD_UNCOMMITTED,
     FFFS_DECODED_MD_LIVE,
     FFFS_DECODED_MD_PARTIAL_TOMBSTONE,
     FFFS_DECODED_MD_TOMBSTONED,
@@ -43,6 +44,9 @@ static bool erased_bytes(const uint8_t *p, size_t size) {
 }
 
 static enum decoded_file_md_state decode_file_md_lifecycle(uint8_t state) {
+    if (state == 0xff) {
+        return FFFS_DECODED_MD_UNCOMMITTED;
+    }
     enum fffs_bitmirror_state valid = fffs_lifecycle_valid_pair(state);
     enum fffs_bitmirror_state tombstone =
         fffs_lifecycle_tombstone_pair(state);
@@ -231,15 +235,23 @@ static int decode_file_md_record(struct fffs *fs,
     out->span_len = fffs_load_le16(buf + 5);
     out->data_off = fffs_load_le16(buf + 7);
     out->data_len = fffs_load_le16(buf + 9);
-    if (out->span_len == 0 ||
-            (size_t)out->data_off + out->data_len > record_start) {
+    bool uncommitted = *state == FFFS_DECODED_MD_UNCOMMITTED;
+    if ((size_t)out->data_off + out->data_len > record_start) {
         *state = FFFS_DECODED_MD_INVALID;
         return FFFS_OK;
     }
-    if (out->next != 0 &&
-            (out->next < fs->index_sectors || out->next >= fs->sector_count)) {
-        *state = FFFS_DECODED_MD_INVALID;
-        return FFFS_OK;
+    if (!uncommitted) {
+        if (out->span_len == 0 ||
+                (size_t)reader->sector + out->span_len > fs->sector_count) {
+            *state = FFFS_DECODED_MD_INVALID;
+            return FFFS_OK;
+        }
+        if (out->next != 0 &&
+                (out->next < fs->index_sectors ||
+                 out->next >= fs->sector_count)) {
+            *state = FFFS_DECODED_MD_INVALID;
+            return FFFS_OK;
+        }
     }
     if (type == FFFS_MD_TYPE_FILE_ROOT_V1) {
         out->size = fffs_load_le32(buf + 11);
@@ -256,6 +268,8 @@ static void md_record_from_decoded(const struct decoded_file_md *md,
         lifecycle = FFFS_MD_RECORD_TOMBSTONED;
     } else if (state == FFFS_DECODED_MD_PARTIAL_TOMBSTONE) {
         lifecycle = FFFS_MD_RECORD_PARTIAL_TOMBSTONE;
+    } else if (state == FFFS_DECODED_MD_UNCOMMITTED) {
+        lifecycle = FFFS_MD_RECORD_UNCOMMITTED;
     }
     *record = (struct fffs_md_record){
         .type = md->type,
@@ -370,7 +384,8 @@ int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
 static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st,
         uint16_t *data_off, uint16_t *data_len,
-        uint16_t *next, struct fffs_read_cache_view *cache) {
+        uint16_t *next, uint16_t *span_len,
+        struct fffs_read_cache_view *cache) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
         return FFFS_ERR_CORRUPT;
     }
@@ -442,6 +457,9 @@ static int read_metadata_for_slot_impl(struct fffs *fs, uint16_t sector,
         }
         if (next) {
             *next = record.next;
+        }
+        if (span_len) {
+            *span_len = record.span_len;
         }
         return FFFS_OK;
     }
@@ -586,10 +604,47 @@ int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
 
 int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
-        uint16_t *data_len, uint16_t *next,
+        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
         struct fffs_read_cache_view *cache) {
     return read_metadata_for_slot_impl(fs, sector, want_slot, st,
-            data_off, data_len, next, cache);
+            data_off, data_len, next, span_len, cache);
+}
+
+static int read_uncommitted_metadata_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_md_record *out) {
+    if (!out || sector < fs->index_sectors || sector >= fs->sector_count) {
+        return FFFS_ERR_INVALID;
+    }
+
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_md_read_window window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+    };
+    struct fffs_md_walk walk;
+    int err = fffs_md_walk_init(fs, &walk, sector, &window);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    bool found = false;
+    while (walk.active) {
+        struct fffs_md_record record;
+        enum fffs_md_walk_result result;
+        err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (result != FFFS_MD_WALK_RECORD) {
+            break;
+        }
+        if (record.lifecycle == FFFS_MD_RECORD_UNCOMMITTED &&
+                record.slot == want_slot) {
+            *out = record;
+            found = true;
+        }
+    }
+    return found ? FFFS_OK : FFFS_ERR_NOT_FOUND;
 }
 
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
@@ -704,26 +759,35 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     return FFFS_OK;
 }
 
-int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
+static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint32_t total_size,
-        uint16_t next, uint32_t file_offset, bool commit_index) {
+        bool write_footer, uint16_t data_len, uint16_t span_len,
+        uint32_t total_size, uint16_t next, uint32_t file_offset,
+        bool is_root, bool live) {
     struct fffs *fs = file->fs;
     uint8_t tail[FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE];
     uint8_t *md = tail;
     uint8_t *footer = tail + FFFS_MD_FILE_RECORD_SIZE;
     memset(tail, 0xff, sizeof(tail));
-    md[0] = FFFS_MD_FLAGS_VALID;
+    if (live) {
+        md[0] = FFFS_MD_FLAGS_VALID;
+        fffs_store_le16(md + 3, next);
+        fffs_store_le16(md + 5, span_len);
+    }
     fffs_store_le16(md + 1, file->slot);
-    fffs_store_le16(md + 3, next);
-    fffs_store_le16(md + 5, 1);
     fffs_store_le16(md + 7, data_off);
-    fffs_store_le16(md + 9, commit_index ?
+    fffs_store_le16(md + 9, is_root ?
             (uint16_t)(file->root_payload_offset + data_len) : data_len);
-    fffs_store_le32(md + 11, commit_index ? total_size : file_offset);
-    md[15] = commit_index ? FFFS_MD_TYPE_FILE_ROOT_V1 :
+    if (is_root) {
+        if (live) {
+            fffs_store_le32(md + 11, total_size);
+        }
+    } else {
+        fffs_store_le32(md + 11, file_offset);
+    }
+    md[15] = is_root ? FFFS_MD_TYPE_FILE_ROOT_V1 :
         FFFS_MD_TYPE_FILE_CONT_V1;
-    fffs_encode_sector_footer(footer, serial, false);
+    fffs_encode_sector_footer(footer, serial, true);
 
     size_t off = (size_t)sector * fs->sector_size + record_off;
     int err = write_footer ?
@@ -732,16 +796,7 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
     if (err != FFFS_OK) {
         return err;
     }
-    if (write_footer) {
-        uint8_t state = FFFS_SECTOR_FLAGS_VALID;
-        err = fffs_flash_program_aligned(fs,
-                fffs_sector_footer_offset(fs, sector) + 5u,
-                &state, sizeof(state));
-        if (err != FFFS_OK) {
-            return err;
-        }
-    }
-    size_t logical_data_len = commit_index ?
+    size_t logical_data_len = is_root ?
         (size_t)file->root_payload_offset + data_len : data_len;
     if ((size_t)data_off + logical_data_len >= record_off) {
         err = fffs_mark_sector_full(fs, sector);
@@ -750,6 +805,76 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         }
         fffs_alloc_map_mark_used(fs, sector);
     }
-    return commit_index ? fffs_append_index_record(fs, file->slot, file->head)
-        : FFFS_OK;
+    return FFFS_OK;
+}
+
+int fffs_begin_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint32_t serial, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint32_t file_offset) {
+    bool is_root = sector == file->head;
+    return program_extent_metadata(file, sector, serial, data_off, record_off,
+            write_footer, data_len, 0, 0, 0, file_offset, is_root, false);
+}
+
+int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint16_t next, uint16_t span_len, uint32_t total_size,
+        bool write_size, bool make_live, bool commit_index) {
+    struct fffs_md_record record;
+    int err = read_uncommitted_metadata_for_slot(file->fs, sector,
+            file->slot, &record);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    size_t off = (size_t)sector * file->fs->sector_size + record.record_start;
+    uint8_t link[4];
+    fffs_store_le16(link, next);
+    fffs_store_le16(link + 2, span_len);
+    err = fffs_flash_program_aligned(file->fs, off + 3u, link, sizeof(link));
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (write_size) {
+        uint8_t size_buf[4];
+        fffs_store_le32(size_buf, total_size);
+        err = fffs_flash_program_aligned(file->fs, off + 11u,
+                size_buf, sizeof(size_buf));
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+    if (make_live) {
+        uint8_t state = FFFS_MD_FLAGS_VALID;
+        err = fffs_flash_program_aligned(file->fs, off, &state,
+                sizeof(state));
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+    return commit_index ? fffs_append_index_record(file->fs, file->slot,
+            file->head) : FFFS_OK;
+}
+
+int fffs_finish_deferred_root_metadata(struct fffs_file *file) {
+    struct fffs_md_record root;
+    int err = read_uncommitted_metadata_for_slot(file->fs, file->head,
+            file->slot, &root);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    return fffs_finish_extent_metadata(file, file->head, root.next,
+            root.span_len, file->size, true, true, true);
+}
+
+int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint32_t serial, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint16_t span_len,
+        uint32_t total_size, uint16_t next, uint32_t file_offset,
+        bool commit_index) {
+    bool is_root = sector == file->head;
+    int err = program_extent_metadata(file, sector, serial, data_off,
+            record_off, write_footer, data_len, span_len, total_size, next,
+            file_offset, is_root, true);
+    return err == FFFS_OK && commit_index ?
+        fffs_append_index_record(file->fs, file->slot, file->head) : err;
 }

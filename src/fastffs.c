@@ -4,15 +4,13 @@
  * Copyright (c) 2026 Ben Hencke
  *
  * FASTFFS core API implementation: formatting, mounting, namespace lookup,
- * file streaming, stat/delete operations, and prefix directory iteration.
+ * stat/delete operations, fsinfo, and prefix directory iteration.
  */
 
 #include "fffs_internal.h"
 
 #include <stdbool.h>
 #include <string.h>
-
-#define FFFS_SECTORS_PER_FILE_Q8_ONE 256u
 
 static int format_sector_shift(enum fffs_sector_size sector_size,
         uint8_t *sector_shift) {
@@ -28,14 +26,14 @@ static int format_sector_shift(enum fffs_sector_size sector_size,
     return FFFS_ERR_INVALID;
 }
 
-static void fsinfo_invalidate_committed(struct fffs *fs) {
+void fffs_fsinfo_invalidate_committed(struct fffs *fs) {
     fs->fsinfo_valid_flags &= ~(uint32_t)(
             FFFS_FSINFO_COMMITTED_FILES_VALID |
             FFFS_FSINFO_COMMITTED_BYTES_VALID |
             FFFS_FSINFO_METADATA_ESTIMATE_VALID);
 }
 
-static bool fsinfo_committed_valid(const struct fffs *fs) {
+bool fffs_fsinfo_committed_valid(const struct fffs *fs) {
     return (fs->fsinfo_valid_flags &
             (FFFS_FSINFO_COMMITTED_FILES_VALID |
              FFFS_FSINFO_COMMITTED_BYTES_VALID)) ==
@@ -43,8 +41,8 @@ static bool fsinfo_committed_valid(const struct fffs *fs) {
          FFFS_FSINFO_COMMITTED_BYTES_VALID);
 }
 
-static void fsinfo_note_committed_add(struct fffs *fs, uint32_t size) {
-    if (!fsinfo_committed_valid(fs)) {
+void fffs_fsinfo_note_committed_add(struct fffs *fs, uint32_t size) {
+    if (!fffs_fsinfo_committed_valid(fs)) {
         return;
     }
     fs->committed_file_count += 1;
@@ -53,11 +51,11 @@ static void fsinfo_note_committed_add(struct fffs *fs, uint32_t size) {
 }
 
 void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size) {
-    if (!fsinfo_committed_valid(fs)) {
+    if (!fffs_fsinfo_committed_valid(fs)) {
         return;
     }
     if (fs->committed_file_count == 0 || fs->committed_data_bytes < size) {
-        fsinfo_invalidate_committed(fs);
+        fffs_fsinfo_invalidate_committed(fs);
         return;
     }
     fs->committed_file_count -= 1;
@@ -65,149 +63,6 @@ void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size) {
     fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
 }
 
-static bool invalidate_old_chain(struct fffs *fs, uint16_t slot,
-        uint16_t head, uint16_t next, bool tombstone,
-        bool *root_accounted) {
-    uint16_t current = head;
-    uint16_t current_next = next;
-    bool have_next = true;
-    size_t visited = 0;
-    if (root_accounted) {
-        *root_accounted = false;
-    }
-
-    for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        if (!have_next) {
-            int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                    NULL, NULL, &current_next, NULL);
-            if (err != FFFS_OK) {
-                return false;
-            }
-        }
-        fffs_alloc_map_mark_unknown(fs, current);
-        visited += 1;
-#if !FFFS_LAZY_DELETE_TOMBSTONES
-        if (tombstone) {
-            bool accounted = false;
-            int err = fffs_tombstone_metadata_for_slot(fs, current, slot,
-                    FFFS_TOMBSTONE_COMMITTED_DELETE,
-                    depth == 0 ? &accounted : NULL);
-            if (err != FFFS_OK) {
-                return false;
-            }
-            if (depth == 0 && root_accounted) {
-                *root_accounted = accounted;
-            }
-        }
-#else
-        (void)tombstone;
-#endif
-        current = current_next;
-        have_next = false;
-    }
-    if (current != 0) {
-        return false;
-    }
-    if (visited > 0) {
-        uint32_t sample = (uint32_t)(visited * FFFS_SECTORS_PER_FILE_Q8_ONE);
-        fs->avg_sectors_per_file_q8 =
-            (uint16_t)(((uint32_t)fs->avg_sectors_per_file_q8 * 7u +
-                    sample) / 8u);
-        fs->fsinfo_valid_flags &= ~FFFS_FSINFO_METADATA_ESTIMATE_VALID;
-    }
-    return true;
-}
-
-static uint32_t claim_sector_serial(struct fffs *fs) {
-    uint32_t serial = fs->next_sector_serial++;
-    if (fs->next_sector_serial == 0) {
-        fs->next_sector_serial = 1;
-    }
-    return serial;
-}
-
-static int assigned_sector_serial(struct fffs_file *file, uint32_t *serial) {
-    if (file->current_needs_footer) {
-        *serial = claim_sector_serial(file->fs);
-        return FFFS_OK;
-    }
-    return fffs_read_sector_footer(file->fs, file->current, serial);
-}
-
-static void register_inflight_writer(struct fffs_file *file) {
-    if (file->inflight_registered) {
-        return;
-    }
-    file->inflight_next = file->fs->inflight_writers;
-    file->fs->inflight_writers = file;
-    file->inflight_registered = true;
-}
-
-static void unregister_inflight_writer(struct fffs_file *file) {
-    if (!file->inflight_registered || !file->fs) {
-        return;
-    }
-    struct fffs_file **p = &file->fs->inflight_writers;
-    while (*p) {
-        if (*p == file) {
-            *p = file->inflight_next;
-            break;
-        }
-        p = &(*p)->inflight_next;
-    }
-    file->inflight_next = NULL;
-    file->inflight_registered = false;
-}
-
-static size_t root_payload_offset_for_name(const char *name) {
-    return 1u + strlen(name) + 1u;
-}
-
-static void stage_root_prefix(struct fffs_file *file, const char *name) {
-    size_t name_len = strlen(name);
-    file->root_payload_offset = (uint16_t)root_payload_offset_for_name(name);
-    file->cache[0] = (uint8_t)name_len;
-    memcpy(file->cache + 1, name, name_len);
-    file->cache[1u + name_len] = 0;
-    file->cache_len = file->root_payload_offset;
-}
-
-static size_t current_extent_capacity(const struct fffs_file *file) {
-    size_t data_off = file->data_offset;
-    size_t record_off = file->current_metadata_offset;
-    size_t prefix = file->current == file->head ?
-        file->root_payload_offset : 0;
-    if (record_off <= data_off + prefix) {
-        return 0;
-    }
-    return record_off - data_off - prefix;
-}
-
-bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector) {
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
-        if (file->closed || (file->flags & FFFS_O_WRONLY) == 0) {
-            continue;
-        }
-        if (file->head == sector || file->current == sector) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot) {
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
-        if (file->closed || (file->flags & FFFS_O_WRONLY) == 0) {
-            continue;
-        }
-        if (file->slot == slot) {
-            return true;
-        }
-    }
-    return false;
-}
 
 int fffs_format(const struct fffs_backend *backend,
         const struct fffs_format_options *options) {
@@ -341,387 +196,6 @@ void fffs_unmount(struct fffs *fs) {
     *fs = (struct fffs){0};
 }
 
-int fffs_open(struct fffs *fs, struct fffs_file *file,
-        const char *name, uint32_t flags) {
-    if (!fs || !file || !name) {
-        return FFFS_ERR_INVALID;
-    }
-    *file = (struct fffs_file){0};
-    bool read = (flags & FFFS_O_RDONLY) != 0;
-    bool write = (flags & FFFS_O_WRONLY) != 0;
-    if (read == write || (flags & ~(uint32_t)(FFFS_O_RDONLY |
-                    FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC |
-                    FFFS_O_EXCL)) != 0) {
-        return FFFS_ERR_INVALID;
-    }
-
-    uint16_t slot;
-    uint16_t head;
-    bool found;
-    struct fffs_stat resolved_st;
-    uint16_t resolved_payload_data_off = 0;
-    uint16_t resolved_payload_data_len = 0;
-    uint16_t resolved_next = 0;
-    struct fffs_read_cache_view read_cache = {
-        .data = file->cache,
-        .capacity = sizeof(file->cache),
-    };
-    FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_INDEX_RESOLVE);
-    int err = fffs_index_resolve(fs, name, &slot, &head, &found, &resolved_st,
-            &resolved_payload_data_off, &resolved_payload_data_len,
-            &resolved_next, read ? &read_cache : NULL);
-    FFFS_PROFILE_POP(fs, FFFS_PROFILE_INDEX_RESOLVE);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    if (read && !found) {
-        return FFFS_ERR_NOT_FOUND;
-    }
-    if (write && !found && (flags & FFFS_O_CREATE) == 0) {
-        return FFFS_ERR_NOT_FOUND;
-    }
-    if (write && found && (flags & FFFS_O_EXCL) != 0) {
-        return FFFS_ERR_EXISTS;
-    }
-    if (write && found && (flags & FFFS_O_TRUNC) == 0) {
-        return FFFS_ERR_EXISTS;
-    }
-
-    file->fs = fs;
-    file->flags = flags;
-    file->slot = slot;
-    file->head = head;
-    file->found = found;
-
-    if (read) {
-        file->cache_len = read_cache.len;
-        file->cache_data_pos = read_cache.data_pos;
-        file->data_offset = resolved_payload_data_off;
-        file->size = resolved_st.size;
-        file->current = head;
-        file->current_data_len = resolved_payload_data_len;
-        file->current_next = resolved_next;
-        memcpy(file->name, resolved_st.name, strlen(resolved_st.name) + 1);
-    } else {
-        uint16_t sector;
-        if (found) {
-            file->old_head = head;
-            file->old_next = resolved_next;
-        }
-        err = fffs_alloc_next_sector(file, &sector);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        file->head = sector;
-        file->current = sector;
-        err = assigned_sector_serial(file, &file->current_sector_serial);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        file->root_sector_serial = file->current_sector_serial;
-        memcpy(file->name, name, strlen(name) + 1);
-        stage_root_prefix(file, name);
-        register_inflight_writer(file);
-    }
-
-    return FFFS_OK;
-}
-
-static bool read_cache_has_remaining(const struct fffs_file *file) {
-    return file->cache_len != 0 &&
-        file->current_data_pos >= file->cache_data_pos &&
-        file->current_data_pos < file->cache_data_pos + file->cache_len;
-}
-
-static int fill_read_cache(struct fffs_file *file) {
-    size_t remaining = file->current_data_len - file->current_data_pos;
-    size_t n = remaining < sizeof(file->cache) ? remaining :
-        sizeof(file->cache);
-    int err = fffs_flash_read(file->fs, (size_t)file->current *
-            file->fs->sector_size + file->data_offset + file->current_data_pos,
-            file->cache, n);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    file->cache_data_pos = file->current_data_pos;
-    file->cache_len = n;
-    return FFFS_OK;
-}
-
-int fffs_read(struct fffs_file *file, void *buffer, size_t size,
-        size_t *out_read) {
-    if (!file || file->closed || (!buffer && size) ||
-            (file->flags & FFFS_O_RDONLY) == 0) {
-        return FFFS_ERR_INVALID;
-    }
-    size_t total = 0;
-    uint8_t *dst = buffer;
-    size_t remaining = file->size - file->pos;
-    size_t want = size < remaining ? size : remaining;
-    if (out_read) {
-        *out_read = 0;
-    }
-    if (want == 0) {
-        return FFFS_OK;
-    }
-
-    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_READ);
-    while (total < want) {
-        if (file->current_data_pos >= file->current_data_len) {
-            if (file->current_next == 0) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
-                return FFFS_ERR_CORRUPT;
-            }
-            uint16_t data_len;
-            uint16_t next;
-            int err = fffs_read_metadata_for_slot(file->fs,
-                    file->current_next, file->slot, NULL,
-                    &file->data_offset, &data_len, &next, NULL);
-            if (err != FFFS_OK) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
-                return err;
-            }
-            file->current = file->current_next;
-            file->current_data_len = data_len;
-            file->current_next = next;
-            file->current_data_pos = 0;
-            file->cache_len = 0;
-        }
-
-        size_t in_current_data = file->current_data_len -
-            file->current_data_pos;
-        size_t n = want - total < in_current_data ? want - total :
-            in_current_data;
-        if (read_cache_has_remaining(file)) {
-            size_t cache_pos = file->current_data_pos - file->cache_data_pos;
-            size_t cached = file->cache_len - cache_pos;
-            if (n > cached) {
-                n = cached;
-            }
-            memcpy(dst + total, file->cache + cache_pos, n);
-        } else if (n < sizeof(file->cache)) {
-            int err = fill_read_cache(file);
-            if (err != FFFS_OK) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
-                return err;
-            }
-            n = want - total < file->cache_len ? want - total :
-                file->cache_len;
-            memcpy(dst + total, file->cache, n);
-        } else {
-            file->cache_len = 0;
-            int err = fffs_flash_read(file->fs, (size_t)file->current *
-                    file->fs->sector_size + file->data_offset +
-                    file->current_data_pos, dst + total, n);
-            if (err != FFFS_OK) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
-                return err;
-            }
-        }
-        file->current_data_pos += (uint32_t)n;
-        file->pos += (uint32_t)n;
-        total += n;
-    }
-    if (out_read) {
-        *out_read = total;
-    }
-    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
-    return FFFS_OK;
-}
-
-static int flush_write_cache(struct fffs_file *file, bool final) {
-    size_t granule = file->fs->backend.program_granule;
-    if (file->cache_len == 0) {
-        return FFFS_OK;
-    }
-    if (!final && file->cache_len < granule) {
-        return FFFS_OK;
-    }
-    size_t n = file->cache_len - (file->cache_len % granule);
-    if (final && n != file->cache_len) {
-        n = ((file->cache_len + granule - 1) / granule) * granule;
-        memset(file->cache + file->cache_len, 0xff, n - file->cache_len);
-    }
-    if (n == 0) {
-        return FFFS_OK;
-    }
-    int err = fffs_flash_program_aligned(file->fs, (size_t)file->current *
-            file->fs->sector_size + file->current_write_offset,
-            file->cache, n);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    file->current_write_offset += (uint16_t)n;
-    if (n < file->cache_len) {
-        memmove(file->cache, file->cache + n, file->cache_len - n);
-    }
-    file->cache_len -= n < file->cache_len ? n : file->cache_len;
-    return FFFS_OK;
-}
-
-static int start_next_extent(struct fffs_file *file) {
-    int err = flush_write_cache(file, true);
-    if (err != FFFS_OK) {
-        return err;
-    }
-
-    uint16_t old_sector = file->current;
-    uint16_t old_data_off = file->data_offset;
-    uint16_t old_record_off = file->current_metadata_offset;
-    bool old_needs_footer = file->current_needs_footer;
-    uint16_t old_data_len = file->current_data_len;
-    uint32_t old_serial = file->current_sector_serial;
-    uint32_t old_file_offset = file->current_file_offset;
-    bool old_is_root = file->current == file->head;
-
-    uint16_t next_sector;
-    err = fffs_alloc_next_sector(file, &next_sector);
-    if (err != FFFS_OK) {
-        return err;
-    }
-
-    if (old_is_root) {
-        file->root_data_len = old_data_len;
-        file->root_data_offset = old_data_off;
-        file->root_metadata_offset = old_record_off;
-        file->root_needs_footer = old_needs_footer;
-        file->root_next = next_sector;
-        file->root_sector_serial = old_serial;
-        file->root_deferred = true;
-        file->current_file_offset = file->root_data_len;
-    } else {
-        err = fffs_write_extent_metadata(file, old_sector, old_serial,
-                old_data_off, old_record_off, old_needs_footer,
-                old_data_len, 0, next_sector, old_file_offset, false);
-        if (err != FFFS_OK) {
-            return err;
-        }
-        file->current_file_offset = old_file_offset + old_data_len;
-    }
-
-    file->current = next_sector;
-    err = assigned_sector_serial(file, &file->current_sector_serial);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    file->current_data_len = 0;
-    file->current_next = 0;
-    file->cache_len = 0;
-    return FFFS_OK;
-}
-
-int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
-        size_t *out_written) {
-    if (!file || file->closed || (!buffer && size) ||
-            (file->flags & FFFS_O_WRONLY) == 0) {
-        return FFFS_ERR_INVALID;
-    }
-    const uint8_t *src = buffer;
-    size_t remaining = size;
-    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_WRITE);
-    while (remaining > 0) {
-        size_t capacity = current_extent_capacity(file);
-        if (file->current_data_len >= capacity) {
-            int err = start_next_extent(file);
-            if (err != FFFS_OK) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
-                return err;
-            }
-            capacity = current_extent_capacity(file);
-        }
-
-        size_t extent_space = capacity - file->current_data_len;
-        size_t buffer_space = sizeof(file->cache) - file->cache_len;
-        size_t space = extent_space < buffer_space ? extent_space :
-            buffer_space;
-        size_t n = remaining < space ? remaining : space;
-        memcpy(file->cache + file->cache_len, src, n);
-        file->cache_len += n;
-        file->current_data_len += (uint16_t)n;
-        file->size += (uint32_t)n;
-        src += n;
-        remaining -= n;
-        if (file->cache_len == sizeof(file->cache)) {
-            int err = flush_write_cache(file, false);
-            if (err != FFFS_OK) {
-                FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
-                return err;
-            }
-        }
-    }
-    if (out_written) {
-        *out_written = size;
-    }
-    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
-    return FFFS_OK;
-}
-
-int fffs_fstat(struct fffs_file *file, struct fffs_stat *st) {
-    if (!file || file->closed || !st) {
-        return FFFS_ERR_INVALID;
-    }
-    memset(st, 0, sizeof(*st));
-    if ((file->flags & FFFS_O_WRONLY) != 0) {
-        memcpy(st->name, file->name, strlen(file->name) + 1);
-        st->size = file->size;
-        return FFFS_OK;
-    }
-    return fffs_read_metadata_for_slot(file->fs, file->head, file->slot, st,
-            NULL, NULL, NULL, NULL);
-}
-
-int fffs_close(struct fffs_file *file) {
-    if (!file || file->closed) {
-        return FFFS_ERR_INVALID;
-    }
-    int err = FFFS_OK;
-    FFFS_PROFILE_PUSH(file->fs, FFFS_PROFILE_CLOSE);
-    if ((file->flags & FFFS_O_WRONLY) != 0) {
-        err = flush_write_cache(file, true);
-        if (err == FFFS_OK) {
-            if (file->current != file->head) {
-                err = fffs_write_extent_metadata(file, file->current,
-                        file->current_sector_serial, file->data_offset,
-                        file->current_metadata_offset,
-                        file->current_needs_footer, file->current_data_len,
-                        0, 0, file->current_file_offset, false);
-            }
-        }
-        if (err == FFFS_OK) {
-            uint16_t root_len = file->root_deferred ?
-                file->root_data_len : file->current_data_len;
-            uint16_t root_next = file->root_deferred ? file->root_next : 0;
-            uint32_t root_serial = file->root_deferred ?
-                file->root_sector_serial : file->current_sector_serial;
-            uint16_t root_data_off = file->root_deferred ?
-                file->root_data_offset : file->data_offset;
-            uint16_t root_record_off = file->root_deferred ?
-                file->root_metadata_offset : file->current_metadata_offset;
-            bool root_needs_footer = file->root_deferred ?
-                file->root_needs_footer : file->current_needs_footer;
-            err = fffs_write_extent_metadata(file, file->head, root_serial,
-                    root_data_off, root_record_off, root_needs_footer,
-                    root_len, file->size, root_next, 0, true);
-            if (err == FFFS_OK) {
-                fsinfo_note_committed_add(file->fs, file->size);
-            }
-            if (err == FFFS_OK && file->old_head != 0) {
-                bool root_accounted = false;
-                (void)invalidate_old_chain(file->fs, file->slot,
-                        file->old_head, file->old_next, true,
-                        &root_accounted);
-                if (fsinfo_committed_valid(file->fs) && !root_accounted) {
-                    fsinfo_invalidate_committed(file->fs);
-                }
-            }
-        }
-        fffs_alloc_release_reservation(file);
-        unregister_inflight_writer(file);
-    }
-    file->closed = true;
-    FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_CLOSE);
-    return err;
-}
 
 int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st) {
     if (!fs || !name || !st) {
@@ -787,9 +261,10 @@ int fffs_delete_file(struct fffs *fs, const char *name) {
         return err;
     }
     bool root_accounted = false;
-    (void)invalidate_old_chain(fs, slot, head, next, true, &root_accounted);
-    if (fsinfo_committed_valid(fs) && !root_accounted) {
-        fsinfo_invalidate_committed(fs);
+    (void)fffs_invalidate_old_chain(fs, slot, head, next, true,
+            &root_accounted);
+    if (fffs_fsinfo_committed_valid(fs) && !root_accounted) {
+        fffs_fsinfo_invalidate_committed(fs);
     }
     FFFS_PROFILE_POP(fs, FFFS_PROFILE_DELETE);
     return FFFS_OK;
@@ -805,7 +280,7 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
     bool refresh_committed =
         (flags & FFFS_FSINFO_REFRESH_COMMITTED) != 0 ||
         ((flags & FFFS_FSINFO_REFRESH_IF_NEEDED) != 0 &&
-         !fsinfo_committed_valid(fs));
+         !fffs_fsinfo_committed_valid(fs));
     if (refresh_committed) {
         uint32_t file_count = 0;
         uint32_t byte_count = 0;
@@ -818,14 +293,14 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
             uint32_t size;
             int err = fffs_read_root_size_for_slot(fs, head, slot, &size);
             if (err != FFFS_OK) {
-                fsinfo_invalidate_committed(fs);
+                fffs_fsinfo_invalidate_committed(fs);
                 return err;
             }
             file_count += 1;
             byte_count += size;
         }
         if (iter.status != FFFS_OK) {
-            fsinfo_invalidate_committed(fs);
+            fffs_fsinfo_invalidate_committed(fs);
             return iter.status;
         }
 
@@ -850,7 +325,7 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
     }
     info->valid_flags |= FFFS_FSINFO_INFLIGHT_VALID;
 
-    if (fsinfo_committed_valid(fs)) {
+    if (fffs_fsinfo_committed_valid(fs)) {
         info->committed_file_count = fs->committed_file_count;
         info->committed_data_bytes = fs->committed_data_bytes;
         info->valid_flags |= FFFS_FSINFO_COMMITTED_FILES_VALID |
@@ -858,7 +333,7 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
     }
 
     if ((flags & FFFS_FSINFO_ESTIMATE_METADATA) != 0 &&
-            fsinfo_committed_valid(fs)) {
+            fffs_fsinfo_committed_valid(fs)) {
         uint32_t estimated = (fs->committed_file_count *
                 (uint32_t)FFFS_MD_FILE_RECORD_SIZE *
                 (uint32_t)fs->avg_sectors_per_file_q8) /

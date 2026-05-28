@@ -296,6 +296,27 @@ static int adapter_read(void *ctx, void *file, void *buf, size_t len,
     return fffs_read((struct fffs_file *)file, buf, len, read_len);
 }
 
+static int adapter_seek(void *ctx, void *file, int32_t offset,
+                        benchfs_seek_whence_t whence, uint32_t *pos)
+{
+    (void)ctx;
+    enum fffs_seek_whence fffs_whence;
+    switch (whence) {
+    case BENCHFS_SEEK_SET:
+        fffs_whence = FFFS_SEEK_SET;
+        break;
+    case BENCHFS_SEEK_CUR:
+        fffs_whence = FFFS_SEEK_CUR;
+        break;
+    case BENCHFS_SEEK_END:
+        fffs_whence = FFFS_SEEK_END;
+        break;
+    default:
+        return FFFS_ERR_INVALID;
+    }
+    return fffs_seek((struct fffs_file *)file, offset, fffs_whence, pos);
+}
+
 static int adapter_fstat(void *ctx, void *file, uint32_t *size)
 {
     (void)ctx;
@@ -672,6 +693,7 @@ void app_main(void)
         .open = adapter_open,
         .write = adapter_write,
         .read = adapter_read,
+        .seek = adapter_seek,
         .fstat = adapter_fstat,
         .close = adapter_close,
         .delete_file = adapter_delete_file,

@@ -63,6 +63,7 @@ struct fffs_read_cache_view {
 #define FFFS_SECTOR_FLAGS_TOMBSTONED FFFS_LIFECYCLE_TOMBSTONED
 #define FFFS_SECTOR_FLAGS_FULL FFFS_LIFECYCLE_FULL
 #define FFFS_SECTOR_TYPE_FILE 0x01
+#define FFFS_SECTORS_PER_FILE_Q8_ONE 256u
 
 #if FFFS_MD_PRELOAD_MAX < FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE
 #error "FFFS_MD_PRELOAD_MAX must fit at least one metadata record and footer"
@@ -228,7 +229,7 @@ void fffs_encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t serial, bool valid);
 int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
-        uint16_t *data_len, uint16_t *next,
+        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
         struct fffs_read_cache_view *cache);
 int fffs_read_root_size_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, uint32_t *size);
@@ -242,8 +243,16 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
 void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size);
 int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint32_t total_size,
-        uint16_t next, uint32_t file_offset, bool commit_index);
+        bool write_footer, uint16_t data_len, uint16_t span_len,
+        uint32_t total_size, uint16_t next, uint32_t file_offset,
+        bool commit_index);
+int fffs_begin_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint32_t serial, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint32_t file_offset);
+int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
+        uint16_t next, uint16_t span_len, uint32_t total_size,
+        bool write_size, bool make_live, bool commit_index);
+int fffs_finish_deferred_root_metadata(struct fffs_file *file);
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
         uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
@@ -257,6 +266,7 @@ enum fffs_md_record_lifecycle {
     FFFS_MD_RECORD_LIVE,
     FFFS_MD_RECORD_TOMBSTONED,
     FFFS_MD_RECORD_PARTIAL_TOMBSTONE,
+    FFFS_MD_RECORD_UNCOMMITTED,
 };
 struct fffs_md_record {
     uint8_t type;
@@ -360,6 +370,12 @@ int fffs_index_record_is_current(struct fffs *fs,
 bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector);
 bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot);
 size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
+bool fffs_fsinfo_committed_valid(const struct fffs *fs);
+void fffs_fsinfo_invalidate_committed(struct fffs *fs);
+void fffs_fsinfo_note_committed_add(struct fffs *fs, uint32_t size);
+bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
+        uint16_t head, uint16_t next, bool tombstone,
+        bool *root_accounted);
 
 /* Allocation and GC helpers for erased data sectors. */
 int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size);

@@ -23,6 +23,7 @@ struct decoded_md {
     uint16_t data_off;
     uint16_t data_len;
     uint16_t next;
+    uint16_t span_len;
     uint32_t size;
     char name[FFFS_MAX_NAME + 1];
 };
@@ -32,6 +33,7 @@ enum md_state {
     MD_VALID = 1,
     MD_TOMBSTONED = 2,
     MD_CORRUPT = 3,
+    MD_UNCOMMITTED = 4,
 };
 
 static int backend_read(const struct fffs_backend *backend, size_t offset,
@@ -69,24 +71,28 @@ static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
 }
 
 static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
-        size_t data_limit, struct decoded_md *out) {
+        size_t data_limit, size_t sector_size, struct decoded_md *out) {
     if (span_erased(md, FFFS_MD_SIZE)) {
         return MD_ERASED;
     }
     enum fffs_lifecycle_object_state md_state =
         fffs_lifecycle_decode_md(md[0]);
-    if (md_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
-            md_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED) {
-        return MD_CORRUPT;
-    }
     if (md[15] != FFFS_MD_TYPE_FILE_ROOT_V1 &&
             md[15] != FFFS_MD_TYPE_FILE_CONT_V1) {
         return MD_CORRUPT;
     }
+    if (md_state != FFFS_LIFECYCLE_OBJECT_LIVE &&
+            md_state != FFFS_LIFECYCLE_OBJECT_TOMBSTONED &&
+            md_state != FFFS_LIFECYCLE_OBJECT_ERASED) {
+        return MD_CORRUPT;
+    }
     uint16_t data_off = fffs_load_le16(md + 7);
     uint16_t data_len = fffs_load_le16(md + 9);
+    uint16_t span_len = fffs_load_le16(md + 5);
+    (void)sector_size;
+    bool uncommitted = md_state == FFFS_LIFECYCLE_OBJECT_ERASED;
     if ((size_t)data_off + data_len > data_limit ||
-            fffs_load_le16(md + 5) == 0) {
+            (!uncommitted && span_len == 0)) {
         return MD_CORRUPT;
     }
 
@@ -98,9 +104,13 @@ static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
         out->data_off = data_off;
         out->data_len = data_len;
         out->next = fffs_load_le16(md + 3);
+        out->span_len = span_len;
         if (md[15] == FFFS_MD_TYPE_FILE_ROOT_V1) {
             out->size = fffs_load_le32(md + 11);
         }
+    }
+    if (uncommitted) {
+        return MD_UNCOMMITTED;
     }
     return md_state == FFFS_LIFECYCLE_OBJECT_TOMBSTONED ?
         MD_TOMBSTONED : MD_VALID;
@@ -166,7 +176,7 @@ static int read_record_before(const struct fffs_backend *backend,
     if (err != FFFS_OK) {
         return err;
     }
-    *state = decode_md(md, start, decoded);
+    *state = decode_md(md, start, summary->sector_size, decoded);
     if (record_start) {
         *record_start = start;
     }
@@ -309,7 +319,8 @@ static int read_decoded_md(const struct fffs_backend *backend,
         if (data_end > claimed_data_end) {
             claimed_data_end = data_end;
         }
-        if (*state == MD_TOMBSTONED || decoded->slot != want_slot) {
+        if (*state == MD_TOMBSTONED || *state == MD_UNCOMMITTED ||
+                decoded->slot != want_slot) {
             if (cursor <= claimed_data_end) {
                 break;
             }
@@ -332,11 +343,6 @@ static int record_reachable_for_slot(const struct fffs_backend *backend,
                 current >= summary->sector_count) {
             return FFFS_OK;
         }
-        if (current == sector) {
-            *reachable = true;
-            return FFFS_OK;
-        }
-
         struct decoded_md decoded;
         enum md_state state;
         int err = read_decoded_md(backend, summary, current, slot,
@@ -347,6 +353,11 @@ static int record_reachable_for_slot(const struct fffs_backend *backend,
         if (state != MD_VALID || decoded.slot != slot) {
             return FFFS_OK;
         }
+        if (sector >= current &&
+                sector < (size_t)current + decoded.span_len) {
+            *reachable = true;
+            return FFFS_OK;
+        }
         current = decoded.next;
     }
     return FFFS_OK;
@@ -354,7 +365,7 @@ static int record_reachable_for_slot(const struct fffs_backend *backend,
 
 static int mark_live_chains(const struct fffs_backend *backend,
         struct fffs_inspect_summary *summary, const uint16_t *live_heads,
-        bool *reachable, bool *seen_root) {
+        bool *reachable, bool *span_heads, bool *seen_root) {
     for (size_t slot = 0; slot < FFFS_SLOT_COUNT; slot++) {
         uint16_t head = live_heads[slot];
         if (head == 0) {
@@ -382,7 +393,18 @@ static int mark_live_chains(const struct fffs_backend *backend,
                 break;
             }
 
-            reachable[current] = true;
+            span_heads[current] = true;
+            for (uint16_t i = 0; i < decoded.span_len; i++) {
+                size_t owned = (size_t)current + i;
+                if (owned >= summary->sector_count) {
+                    corrupt = true;
+                    break;
+                }
+                reachable[owned] = true;
+            }
+            if (corrupt) {
+                break;
+            }
             if (current == head) {
                 seen_root[slot] = true;
             }
@@ -396,7 +418,8 @@ static int mark_live_chains(const struct fffs_backend *backend,
 }
 
 static int inspect_data_sectors(const struct fffs_backend *backend,
-        struct fffs_inspect_summary *summary, const uint16_t *live_heads) {
+        struct fffs_inspect_summary *summary, const uint16_t *live_heads,
+        const bool *reachable, const bool *span_heads) {
     for (size_t sector = summary->index_sectors;
             sector < summary->sector_count; sector++) {
         uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
@@ -421,6 +444,9 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             continue;
         }
         summary->data_sectors_owned += 1;
+        if (reachable[sector] && !span_heads[sector]) {
+            continue;
+        }
 
         size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
         size_t claimed_data_end = 0;
@@ -450,6 +476,13 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
                     break;
                 }
                 summary->md_tombstoned += 1;
+                continue;
+            }
+            if (state == MD_UNCOMMITTED) {
+                if (cursor <= claimed_data_end) {
+                    break;
+                }
+                summary->md_obsolete_orphaned += 1;
                 continue;
             }
 
@@ -487,7 +520,9 @@ int fffs_inspect_check(const struct fffs_backend *backend,
     uint16_t *live_heads = calloc(FFFS_SLOT_COUNT, sizeof(*live_heads));
     bool *seen_root = calloc(FFFS_SLOT_COUNT, sizeof(*seen_root));
     bool *reachable = calloc(tmp.sector_count, sizeof(*reachable));
-    if (!live_heads || !seen_root || !reachable) {
+    bool *span_heads = calloc(tmp.sector_count, sizeof(*span_heads));
+    if (!live_heads || !seen_root || !reachable || !span_heads) {
+        free(span_heads);
         free(reachable);
         free(seen_root);
         free(live_heads);
@@ -497,12 +532,15 @@ int fffs_inspect_check(const struct fffs_backend *backend,
     err = inspect_index(backend, &tmp, live_heads);
     if (err == FFFS_OK) {
         err = mark_live_chains(backend, &tmp, live_heads, reachable,
+                span_heads,
                 seen_root);
     }
     if (err == FFFS_OK) {
-        err = inspect_data_sectors(backend, &tmp, live_heads);
+        err = inspect_data_sectors(backend, &tmp, live_heads, reachable,
+                span_heads);
     }
 
+    free(span_heads);
     free(reachable);
     free(seen_root);
     free(live_heads);
@@ -523,6 +561,8 @@ static const char *md_state_name(enum md_state state, bool live) {
         return "tombstoned";
     case MD_CORRUPT:
         return "corrupt";
+    case MD_UNCOMMITTED:
+        return "uncommitted";
     default:
         return "unknown";
     }
@@ -579,7 +619,8 @@ static int dump_active_index(const struct fffs_backend *backend, FILE *out,
 
 static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
         const struct fffs_inspect_summary *summary,
-        const uint16_t *live_heads) {
+        const uint16_t *live_heads, const bool *reachable,
+        const bool *span_heads) {
     for (size_t sector = summary->index_sectors;
             sector < summary->sector_count; sector++) {
         uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
@@ -602,6 +643,11 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
         size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
         size_t claimed_data_end = 0;
         bool printed_any = false;
+        if (reachable[sector] && !span_heads[sector]) {
+            fprintf(out, "sector=%zu serial=%" PRIu32 " md=span-tail\n",
+                    sector, serial);
+            continue;
+        }
         while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
             struct decoded_md decoded;
             enum md_state state;
@@ -624,7 +670,8 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
             }
             fprintf(out, "sector=%zu serial=%" PRIu32 " md=%s",
                     sector, serial, md_state_name(state, live));
-            if (state == MD_VALID || state == MD_TOMBSTONED) {
+            if (state == MD_VALID || state == MD_TOMBSTONED ||
+                    state == MD_UNCOMMITTED) {
                 fprintf(out, " slot=%u size=%" PRIu32 " name=%s",
                         (unsigned)decoded.slot, decoded.size, decoded.name);
             }
@@ -663,7 +710,9 @@ int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out) {
     uint16_t *live_heads = calloc(FFFS_SLOT_COUNT, sizeof(*live_heads));
     bool *seen_root = calloc(FFFS_SLOT_COUNT, sizeof(*seen_root));
     bool *reachable = calloc(summary.sector_count, sizeof(*reachable));
-    if (!live_heads || !seen_root || !reachable) {
+    bool *span_heads = calloc(summary.sector_count, sizeof(*span_heads));
+    if (!live_heads || !seen_root || !reachable || !span_heads) {
+        free(span_heads);
         free(reachable);
         free(seen_root);
         free(live_heads);
@@ -671,14 +720,17 @@ int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out) {
     }
     err = replay_active_index(backend, &summary, live_heads);
     if (err != FFFS_OK) {
+        free(span_heads);
         free(reachable);
         free(seen_root);
         free(live_heads);
         return err;
     }
     err = mark_live_chains(backend, &summary, live_heads, reachable,
+            span_heads,
             seen_root);
     if (err != FFFS_OK) {
+        free(span_heads);
         free(reachable);
         free(seen_root);
         free(live_heads);
@@ -703,9 +755,11 @@ int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out) {
         err = dump_active_index(backend, out, &summary);
     }
     if (err == FFFS_OK) {
-        err = dump_data_sectors(backend, out, &summary, live_heads);
+        err = dump_data_sectors(backend, out, &summary, live_heads,
+                reachable, span_heads);
     }
 
+    free(span_heads);
     free(reachable);
     free(seen_root);
     free(live_heads);

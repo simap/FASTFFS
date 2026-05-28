@@ -9,6 +9,7 @@ idf_component_register(
         "${BENCHFS}/benchfs_esp.c"
         "${CHURN_MODEL}/churn_model.c"
         "${FASTFFS_ROOT}/src/fastffs.c"
+        "${FASTFFS_ROOT}/src/fffs_file.c"
         "${FASTFFS_ROOT}/src/fffs_alloc.c"
         "${FASTFFS_ROOT}/src/fffs_alloc_map.c"
         "${FASTFFS_ROOT}/src/fffs_bitset.c"

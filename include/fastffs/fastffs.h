@@ -41,6 +41,12 @@ enum fffs_open_flags {
     FFFS_O_EXCL = 0x10,
 };
 
+enum fffs_seek_whence {
+    FFFS_SEEK_SET = 0,
+    FFFS_SEEK_CUR = 1,
+    FFFS_SEEK_END = 2,
+};
+
 enum fffs_gc_action {
     FFFS_GC_IDLE = 0,
     FFFS_GC_SCANNED = 1,
@@ -231,11 +237,9 @@ struct fffs_file {
     uint16_t current_next;
     uint16_t current_write_offset;
     uint16_t current_metadata_offset;
-    uint16_t root_data_len;
-    uint16_t root_data_offset;
-    uint16_t root_metadata_offset;
     uint16_t root_payload_offset;
-    uint16_t root_next;
+    uint16_t span_head;
+    uint16_t span_len;
     uint16_t old_head;
     uint16_t old_next;
     uint16_t reserve_first;
@@ -246,14 +250,10 @@ struct fffs_file {
     uint32_t cache_data_pos;
     uint32_t current_file_offset;
     uint32_t current_sector_serial;
-    uint32_t root_sector_serial;
     size_t cache_len;
     char name[FFFS_MAX_NAME + 1];
     uint8_t cache[FFFS_FILE_CACHE_SIZE];
     bool current_needs_footer;
-    bool root_needs_footer;
-    bool root_deferred;
-    bool found;
     bool closed;
     bool inflight_registered;
 };
@@ -284,6 +284,8 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
 int fffs_close(struct fffs_file *file);
 int fffs_read(struct fffs_file *file, void *buffer, size_t size,
         size_t *out_read);
+int fffs_seek(struct fffs_file *file, int32_t offset,
+        enum fffs_seek_whence whence, uint32_t *out_pos);
 int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
         size_t *out_written);
 int fffs_fstat(struct fffs_file *file, struct fffs_stat *st);

@@ -39,6 +39,14 @@ typedef struct {
 } exists_stats_t;
 
 typedef struct {
+    uint32_t ops;
+    uint32_t bytes;
+    int64_t seek_us;
+    int64_t read_us;
+    int64_t total_us;
+} seek_stats_t;
+
+typedef struct {
     uint32_t files;
     uint32_t bytes;
     uint32_t min_size;
@@ -190,6 +198,13 @@ static void fill_pattern(uint8_t *dst, size_t len, uint32_t seed)
     for (size_t i = 0; i < len; ++i) {
         dst[i] = (uint8_t)(seed + i * 33u + (i >> 3));
     }
+}
+
+static uint8_t pattern_byte_at(uint32_t seed, uint32_t offset)
+{
+    uint32_t chunk_base = offset - (offset % BENCHFS_BUF_SIZE);
+    uint32_t chunk_off = offset - chunk_base;
+    return (uint8_t)(seed + chunk_base + chunk_off * 33u + (chunk_off >> 3));
 }
 
 static const char *class_name(benchfs_size_class_t cls)
@@ -570,6 +585,193 @@ static void log_exists_stats(benchfs_t *b, const char *label,
          (long long)(s->probes ? s->total_us / s->probes : 0));
 }
 
+static void log_seek_stats(benchfs_t *b, const char *label,
+                           const seek_stats_t *s)
+{
+    blog(b, BENCHFS_LOG_INFO,
+         "%s ops=%lu bytes=%lu total_us=%lld avg_total_us=%lld seek_us=%lld avg_seek_us=%lld read_us=%lld avg_read_us=%lld",
+         label, (unsigned long)s->ops, (unsigned long)s->bytes,
+         (long long)s->total_us,
+         (long long)(s->ops ? s->total_us / s->ops : 0),
+         (long long)s->seek_us,
+         (long long)(s->ops ? s->seek_us / s->ops : 0),
+         (long long)s->read_us,
+         (long long)(s->ops ? s->read_us / s->ops : 0));
+}
+
+static void record_seek_read(benchfs_t *b, void *file, const char *name,
+                             uint32_t seed, uint32_t target,
+                             seek_stats_t *stats)
+{
+    uint32_t pos = 0;
+    int64_t t0 = now_us(b);
+    int rc = b->ops->seek(b->ctx, file, (int32_t)target, BENCHFS_SEEK_SET,
+                          &pos);
+    int64_t seek_us = now_us(b) - t0;
+    if (rc != BENCHFS_OK) {
+        blog(b, BENCHFS_LOG_ERROR,
+             "seek %s offset=%lu failed rc=%s", name,
+             (unsigned long)target, err_name(b, rc));
+        return;
+    }
+    if (pos != target) {
+        blog(b, BENCHFS_LOG_ERROR,
+             "seek %s offset=%lu landed=%lu", name,
+             (unsigned long)target, (unsigned long)pos);
+        return;
+    }
+
+    uint8_t got = 0;
+    size_t rd = 0;
+    t0 = now_us(b);
+    rc = b->ops->read(b->ctx, file, &got, sizeof(got), &rd);
+    int64_t read_us = now_us(b) - t0;
+    if (rc != BENCHFS_OK || rd != sizeof(got)) {
+        blog(b, BENCHFS_LOG_ERROR,
+             "seek read %s offset=%lu failed rc=%s rd=%lu", name,
+             (unsigned long)target, err_name(b, rc), (unsigned long)rd);
+        return;
+    }
+    uint8_t expected = pattern_byte_at(seed, target);
+    if (got != expected) {
+        blog(b, BENCHFS_LOG_ERROR,
+             "seek read %s offset=%lu got=0x%02x expected=0x%02x",
+             name, (unsigned long)target, got, expected);
+        return;
+    }
+
+    stats->ops++;
+    stats->bytes += (uint32_t)rd;
+    stats->seek_us += seek_us;
+    stats->read_us += read_us;
+    stats->total_us += seek_us + read_us;
+}
+
+static void bench_seek_file(benchfs_t *b, const char *label_prefix,
+                            const char *name, uint32_t seed)
+{
+    if (!b->ops->seek) {
+        blog(b, BENCHFS_LOG_INFO, "%s skipped supported=0", label_prefix);
+        return;
+    }
+
+    void *file = NULL;
+    int rc = b->ops->open(b->ctx, name, BENCHFS_OPEN_READ, &file);
+    if (rc != BENCHFS_OK) {
+        blog(b, BENCHFS_LOG_ERROR, "%s open %s failed rc=%s", label_prefix, name,
+             err_name(b, rc));
+        return;
+    }
+
+    uint32_t size = 0;
+    rc = b->ops->fstat(b->ctx, file, &size);
+    if (rc != BENCHFS_OK || size < 2) {
+        blog(b, BENCHFS_LOG_ERROR, "%s fstat %s failed rc=%s size=%lu",
+             label_prefix, name, err_name(b, rc), (unsigned long)size);
+        (void)b->ops->close(b->ctx, file);
+        return;
+    }
+    blog(b, BENCHFS_LOG_INFO, "%s file=%s size=%lu seed=%lu", label_prefix,
+         name, (unsigned long)size, (unsigned long)seed);
+
+    seek_stats_t near = {0};
+    seek_stats_t forward = {0};
+    seek_stats_t random = {0};
+    seek_stats_t from_end = {0};
+
+    uint32_t near_window = size < 512u ? size : 512u;
+    for (uint32_t i = 0; i < 64; ++i) {
+        uint32_t target = near_window <= 1u ? 0 :
+            ((i * 53u + 7u) % (near_window - 1u));
+        record_seek_read(b, file, name, seed, target, &near);
+    }
+
+    uint32_t forward_ops = 128;
+    uint32_t max_target = size - 1u;
+    for (uint32_t i = 0; i < forward_ops; ++i) {
+        uint32_t target = (uint32_t)(((uint64_t)i * max_target) /
+                                     forward_ops);
+        record_seek_read(b, file, name, seed, target, &forward);
+    }
+
+    for (uint32_t i = 0; i < 128; ++i) {
+        uint32_t target = (i * 7919u + 123u) % max_target;
+        record_seek_read(b, file, name, seed, target, &random);
+    }
+
+    for (uint32_t i = 0; i < 64; ++i) {
+        uint32_t back = 1u + ((i * 97u) % max_target);
+        uint32_t pos = 0;
+        int64_t t0 = now_us(b);
+        rc = b->ops->seek(b->ctx, file, -(int32_t)back, BENCHFS_SEEK_END,
+                          &pos);
+        int64_t seek_us = now_us(b) - t0;
+        if (rc != BENCHFS_OK || pos != size - back) {
+            blog(b, BENCHFS_LOG_ERROR,
+                 "seek end %s back=%lu failed rc=%s pos=%lu", name,
+                 (unsigned long)back, err_name(b, rc), (unsigned long)pos);
+            continue;
+        }
+        uint8_t got = 0;
+        size_t rd = 0;
+        t0 = now_us(b);
+        rc = b->ops->read(b->ctx, file, &got, sizeof(got), &rd);
+        int64_t read_us = now_us(b) - t0;
+        if (rc != BENCHFS_OK || rd != sizeof(got) ||
+            got != pattern_byte_at(seed, pos)) {
+            blog(b, BENCHFS_LOG_ERROR,
+                 "seek end read %s pos=%lu failed rc=%s rd=%lu got=0x%02x",
+                 name, (unsigned long)pos, err_name(b, rc),
+                 (unsigned long)rd, got);
+            continue;
+        }
+        from_end.ops++;
+        from_end.bytes += (uint32_t)rd;
+        from_end.seek_us += seek_us;
+        from_end.read_us += read_us;
+        from_end.total_us += seek_us + read_us;
+    }
+
+    char label[80];
+    snprintf(label, sizeof(label), "%s near", label_prefix);
+    log_seek_stats(b, label, &near);
+    snprintf(label, sizeof(label), "%s forward", label_prefix);
+    log_seek_stats(b, label, &forward);
+    snprintf(label, sizeof(label), "%s random", label_prefix);
+    log_seek_stats(b, label, &random);
+    snprintf(label, sizeof(label), "%s from_end", label_prefix);
+    log_seek_stats(b, label, &from_end);
+    rc = b->ops->close(b->ctx, file);
+    if (rc != BENCHFS_OK) {
+        blog(b, BENCHFS_LOG_ERROR, "%s close %s failed rc=%s", label_prefix,
+             name, err_name(b, rc));
+    }
+}
+
+static void bench_seek_medium(benchfs_t *b)
+{
+    if (b->cfg->medium_files == 0 || b->cfg->medium_size < 2) {
+        blog(b, BENCHFS_LOG_INFO, "seek medium skipped medium_files=%lu size=%lu",
+             (unsigned long)b->cfg->medium_files,
+             (unsigned long)b->cfg->medium_size);
+        return;
+    }
+    bench_seek_file(b, "seek medium", "m000.bin", 0x1000u);
+}
+
+static void bench_seek_churn_large(benchfs_t *b)
+{
+    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+        if (b->churn_files[i].live &&
+            b->churn_files[i].cls == BENCH_CHURN_CLASS_LARGE) {
+            bench_seek_file(b, "seek churn large", b->churn_files[i].name,
+                            b->churn_files[i].write_seed);
+            return;
+        }
+    }
+    blog(b, BENCHFS_LOG_INFO, "seek churn large skipped no_live_large=1");
+}
+
 static void bench_tiny_position_stats(benchfs_t *b)
 {
     const struct {
@@ -836,6 +1038,7 @@ static void run_churn_workload(benchfs_t *b)
         b->churn_files[event.slot].live = 1;
         b->churn_files[event.slot].cls = event.cls;
         b->churn_files[event.slot].size = event.size;
+        b->churn_files[event.slot].write_seed = event.write_seed;
         snprintf(b->churn_files[event.slot].name,
                  sizeof(b->churn_files[event.slot].name), "%s", event.name);
         op++;
@@ -913,6 +1116,7 @@ static void run_churn_workload(benchfs_t *b)
     log_gc_stats(b, "churn total", &b->gc_total);
     log_live_distribution(b);
     bench_list(b);
+    bench_seek_churn_large(b);
     run_churn_cold_reads(b);
 }
 
@@ -1028,6 +1232,7 @@ static void run_baseline(benchfs_t *b)
          (long long)elapsed, (unsigned long long)bytes_per_s(bytes, elapsed));
     log_read_stats(b, "read medium split", &med);
 
+    bench_seek_medium(b);
     bench_list(b);
     bench_tiny_position_stats(b);
     bench_exists_baseline(b);
@@ -1152,6 +1357,33 @@ static int noop_read(void *ctx, void *file, void *buf, size_t len,
     size_t got = len < remaining ? len : remaining;
     n->read_pos += (uint32_t)got;
     *read_len = got;
+    return BENCHFS_OK;
+}
+
+static int noop_seek(void *ctx, void *file, int32_t offset,
+                     benchfs_seek_whence_t whence, uint32_t *pos)
+{
+    (void)file;
+    noop_ctx_t *n = ctx;
+    if (!n->open || n->writing) {
+        return -1;
+    }
+    int64_t base = 0;
+    if (whence == BENCHFS_SEEK_CUR) {
+        base = n->read_pos;
+    } else if (whence == BENCHFS_SEEK_END) {
+        base = n->open_size;
+    } else if (whence != BENCHFS_SEEK_SET) {
+        return -1;
+    }
+    int64_t target = base + offset;
+    if (target < 0 || target > (int64_t)n->open_size) {
+        return -1;
+    }
+    n->read_pos = (uint32_t)target;
+    if (pos) {
+        *pos = n->read_pos;
+    }
     return BENCHFS_OK;
 }
 
@@ -1294,6 +1526,7 @@ int benchfs_run_noop(const benchfs_config_t *cfg,
         .open = noop_open,
         .write = noop_write,
         .read = noop_read,
+        .seek = noop_seek,
         .fstat = noop_fstat,
         .close = noop_close,
         .delete_file = noop_delete_file,
@@ -1310,7 +1543,7 @@ int benchfs_run(const benchfs_config_t *cfg, const benchfs_ops_t *ops,
 {
     if (!cfg || !ops || !ops->now_us || !ops->vlog || !ops->setup ||
         !ops->format || !ops->mount || !ops->unmount || !ops->open ||
-        !ops->write || !ops->read || !ops->fstat || !ops->close ||
+        !ops->write || !ops->read || !ops->seek || !ops->fstat || !ops->close ||
         !ops->delete_file || !ops->exists || !ops->list_count) {
         return -1;
     }

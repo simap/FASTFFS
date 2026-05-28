@@ -32,6 +32,12 @@ typedef enum {
 } benchfs_open_flags_t;
 
 typedef enum {
+    BENCHFS_SEEK_SET = 0,
+    BENCHFS_SEEK_CUR = 1,
+    BENCHFS_SEEK_END = 2,
+} benchfs_seek_whence_t;
+
+typedef enum {
     BENCHFS_CHURN_EVENT_DELETE = 0,
     BENCHFS_CHURN_EVENT_WRITE = 1,
 } benchfs_churn_event_t;
@@ -103,6 +109,8 @@ typedef struct {
     int (*open)(void *ctx, const char *name, uint32_t flags, void **file);
     int (*write)(void *ctx, void *file, const void *buf, size_t len);
     int (*read)(void *ctx, void *file, void *buf, size_t len, size_t *read_len);
+    int (*seek)(void *ctx, void *file, int32_t offset,
+                benchfs_seek_whence_t whence, uint32_t *pos);
     int (*fstat)(void *ctx, void *file, uint32_t *size);
     int (*close)(void *ctx, void *file);
     int (*delete_file)(void *ctx, const char *name);

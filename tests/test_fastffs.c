@@ -67,6 +67,11 @@ enum fffs_tombstone_accounting {
 int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, enum fffs_tombstone_accounting accounting,
         bool *accounted);
+struct fffs_read_cache_view;
+int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
+        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
+        struct fffs_read_cache_view *cache);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -1026,11 +1031,9 @@ static int test_gc_skips_open_writer_middle_extent(void) {
         ASSERT_OK(fffs_write(&file, data, n, &written));
         ASSERT_TRUE(written == n);
     }
-    ASSERT_TRUE(file.root_deferred);
-    ASSERT_TRUE(file.root_next != 0);
+    ASSERT_TRUE(file.current - file.span_head + 1u > 1);
     ASSERT_TRUE(file.current != file.head);
-    ASSERT_TRUE(file.current != file.root_next);
-    middle = file.root_next;
+    middle = (uint16_t)(file.head + 1u);
 
     fs.gc_cursor = middle;
     ASSERT_OK(fffs_gc_step(&fs, &action));
@@ -1054,7 +1057,6 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
     enum fffs_gc_action action;
     size_t written = 0;
     uint16_t second_middle;
-    uint8_t md[64];
 
     memset(data, 0x72, sizeof(data));
     ASSERT_OK(new_backend(&flash, &backend));
@@ -1071,19 +1073,10 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
         ASSERT_OK(fffs_write(&file, data, n, &written));
         ASSERT_TRUE(written == n);
     }
-    ASSERT_TRUE(file.root_deferred);
-    ASSERT_TRUE(file.root_next != 0);
+    ASSERT_TRUE(file.current - file.span_head + 1u > 2);
     ASSERT_TRUE(file.current != file.head);
-    ASSERT_TRUE(file.current != file.root_next);
-
-    ASSERT_OK(flash_to_fs(ffsv_flash_read(flash,
-                    (size_t)file.root_next * fs.sector_size +
-                    fs.sector_size - 10 - sizeof(md),
-                    md, sizeof(md), FFSV_CALLSITE)));
-    second_middle = (uint16_t)(md[12] | ((uint16_t)md[13] << 8));
-    ASSERT_TRUE(second_middle != 0);
+    second_middle = (uint16_t)(file.head + 2u);
     ASSERT_TRUE(second_middle != file.current);
-    ASSERT_TRUE(second_middle != file.root_next);
 
     fs.gc_cursor = second_middle;
     ASSERT_OK(fffs_gc_step(&fs, &action));
@@ -2624,6 +2617,225 @@ static int test_large_file_uses_noncontiguous_extents(void) {
     return 0;
 }
 
+static int test_large_file_uses_contiguous_spans(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const size_t large_size = 32u * 1024u;
+    uint8_t *large = malloc(large_size);
+    uint8_t out[16] = {0};
+    size_t nread = 0;
+    uint32_t pos = 0;
+    uint16_t span_len = 0;
+    uint16_t span_data_len = 0;
+    uint16_t span_next = 0;
+    struct fffs_inspect_summary inspect;
+
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
+
+    ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
+                NULL, NULL, &span_data_len, &span_next, &span_len, NULL));
+    ASSERT_TRUE(span_len > 1);
+    ASSERT_TRUE(span_data_len > 0);
+
+    uint32_t target = 8192u + 17u;
+    ASSERT_TRUE(target < large_size);
+    uint64_t reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, (int32_t)target, FFFS_SEEK_SET, &pos));
+    ASSERT_TRUE(pos == target);
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls <=
+            reads_before + 3u);
+    ASSERT_OK(fffs_read(&file, out, sizeof(out), &nread));
+    ASSERT_TRUE(nread == sizeof(out));
+    ASSERT_TRUE(memcmp(out, large + target, nread) == 0);
+
+    target += 4096u;
+    ASSERT_TRUE(target < large_size);
+    reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, (int32_t)target, FFFS_SEEK_SET, &pos));
+    ASSERT_TRUE(pos == target);
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls <=
+            reads_before + 3u);
+    ASSERT_OK(fffs_close(&file));
+
+    ASSERT_OK(fffs_inspect_check(&backend, &inspect));
+    ASSERT_TRUE(inspect.live_entries_corrupt == 0);
+    ASSERT_TRUE(inspect.md_corrupt == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_span_head_skips_contiguous_continuations(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const size_t large_size = 24u * 1024u;
+    uint8_t *large = malloc(large_size);
+    uint16_t root_span_len = 0;
+    uint16_t root_next = 0xffff;
+    uint16_t cont_span_len = 0;
+    uint16_t cont_next = 0xffff;
+
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
+
+    ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
+                NULL, NULL, NULL, &root_next, &root_span_len, NULL));
+    ASSERT_TRUE(root_span_len > 1);
+    ASSERT_TRUE(root_next == 0);
+
+    ASSERT_OK(fffs_read_metadata_for_slot(&fs, (uint16_t)(file.head + 1u),
+                file.slot, NULL, NULL, NULL, &cont_next, &cont_span_len,
+                NULL));
+    ASSERT_TRUE(cont_span_len == 1);
+    ASSERT_TRUE(cont_next == file.head + 2u);
+    ASSERT_OK(fffs_close(&file));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_read_seek_single_extent(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const uint8_t data[] = "abcdefghijklmnopqrstuvwxyz";
+    uint8_t out[8] = {0};
+    size_t nread = 0;
+    uint32_t pos = 0;
+
+    ASSERT_OK(new_backend(&flash, &backend));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "letters", data, sizeof(data) - 1));
+
+    ASSERT_OK(fffs_open(&fs, &file, "letters", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read(&file, out, 5, &nread));
+    ASSERT_TRUE(nread == 5);
+    ASSERT_TRUE(memcmp(out, "abcde", 5) == 0);
+
+    uint64_t reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, 10, FFFS_SEEK_SET, &pos));
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls ==
+            reads_before);
+    ASSERT_TRUE(pos == 10);
+    ASSERT_OK(fffs_read(&file, out, 4, &nread));
+    ASSERT_TRUE(nread == 4);
+    ASSERT_TRUE(memcmp(out, "klmn", 4) == 0);
+
+    reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, -2, FFFS_SEEK_CUR, &pos));
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls ==
+            reads_before);
+    ASSERT_TRUE(pos == 12);
+    ASSERT_OK(fffs_read(&file, out, 3, &nread));
+    ASSERT_TRUE(nread == 3);
+    ASSERT_TRUE(memcmp(out, "mno", 3) == 0);
+
+    ASSERT_OK(fffs_seek(&file, -3, FFFS_SEEK_END, &pos));
+    ASSERT_TRUE(pos == 23);
+    ASSERT_OK(fffs_read(&file, out, sizeof(out), &nread));
+    ASSERT_TRUE(nread == 3);
+    ASSERT_TRUE(memcmp(out, "xyz", 3) == 0);
+    ASSERT_EQ_INT(FFFS_ERR_RANGE,
+            fffs_seek(&file, -27, FFFS_SEEK_END, NULL));
+    ASSERT_EQ_INT(FFFS_ERR_RANGE,
+            fffs_seek(&file, 1, FFFS_SEEK_END, NULL));
+    ASSERT_OK(fffs_close(&file));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
+static int test_read_seek_across_extents(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const size_t large_size = 12u * 1024u;
+    uint8_t *large = malloc(large_size);
+    uint8_t out[64] = {0};
+    size_t nread = 0;
+    uint32_t pos = 0;
+
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 16));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
+
+    ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
+    ASSERT_TRUE(file.current_data_len > 16);
+    ASSERT_TRUE(file.current_data_len < large_size);
+    uint32_t target = file.current_data_len - 7u;
+    ASSERT_OK(fffs_seek(&file, (int32_t)target, FFFS_SEEK_SET, &pos));
+    ASSERT_TRUE(pos == target);
+    ASSERT_OK(fffs_read(&file, out, 32, &nread));
+    ASSERT_TRUE(nread == 32);
+    ASSERT_TRUE(memcmp(out, large + target, nread) == 0);
+
+    ASSERT_OK(fffs_seek(&file, -10, FFFS_SEEK_CUR, &pos));
+    ASSERT_TRUE(pos == target + 22u);
+    ASSERT_OK(fffs_read(&file, out, 17, &nread));
+    ASSERT_TRUE(nread == 17);
+    ASSERT_TRUE(memcmp(out, large + pos, nread) == 0);
+
+    uint32_t same_span_target = file.current_file_offset + 4096u + 5u;
+    ASSERT_TRUE(same_span_target < large_size);
+    uint64_t reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, (int32_t)(same_span_target - file.pos),
+                FFFS_SEEK_CUR, &pos));
+    ASSERT_TRUE(pos == same_span_target);
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls <=
+            reads_before + 3u);
+    ASSERT_OK(fffs_read(&file, out, 11, &nread));
+    ASSERT_TRUE(nread == 11);
+    ASSERT_TRUE(memcmp(out, large + same_span_target, nread) == 0);
+
+    reads_before = ffsv_flash_counts(flash)[FFSV_OP_READ].calls;
+    ASSERT_OK(fffs_seek(&file, 11, FFFS_SEEK_SET, &pos));
+    ASSERT_TRUE(ffsv_flash_counts(flash)[FFSV_OP_READ].calls <=
+            reads_before + 3u);
+    ASSERT_TRUE(pos == 11);
+    ASSERT_OK(fffs_read(&file, out, 19, &nread));
+    ASSERT_TRUE(nread == 19);
+    ASSERT_TRUE(memcmp(out, large + 11, nread) == 0);
+    ASSERT_OK(fffs_close(&file));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
 static int test_inspect_classifies_live_and_orphaned_metadata(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -2769,6 +2981,10 @@ int main(void) {
     failures += test_index_header_discovery_without_sector_zero();
     failures += test_uncommitted_index_header_is_not_discovered();
     failures += test_large_file_uses_noncontiguous_extents();
+    failures += test_large_file_uses_contiguous_spans();
+    failures += test_span_head_skips_contiguous_continuations();
+    failures += test_read_seek_single_extent();
+    failures += test_read_seek_across_extents();
     failures += test_inspect_classifies_live_and_orphaned_metadata();
     failures += test_inspect_reports_corrupt_live_head();
     failures += test_workload_generator_runs_deterministically();
