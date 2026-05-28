@@ -34,15 +34,6 @@ enum decoded_file_md_state {
     FFFS_DECODED_MD_TOMBSTONED,
 };
 
-static bool erased_bytes(const uint8_t *p, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        if (p[i] != 0xff) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static enum decoded_file_md_state decode_file_md_lifecycle(uint8_t state) {
     if (state == 0xff) {
         return FFFS_DECODED_MD_UNCOMMITTED;
@@ -219,7 +210,7 @@ static int decode_file_md_record(struct fffs *fs,
     if (err != FFFS_OK) {
         return err;
     }
-    if (erased_bytes(buf, record_len)) {
+    if (fffs_flash_bytes_erased(buf, record_len)) {
         *state = FFFS_DECODED_MD_ERASED;
         return FFFS_OK;
     }
@@ -614,7 +605,7 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     }
 
     size_t footer_off = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
-    if (erased_bytes(footer, FFFS_SECTOR_FOOTER_SIZE)) {
+    if (fffs_flash_bytes_erased(footer, FFFS_SECTOR_FOOTER_SIZE)) {
         err = fffs_flash_span_is_erased(fs, (size_t)sector * fs->sector_size,
                 fs->sector_size);
         if (err != FFFS_OK) {

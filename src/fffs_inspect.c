@@ -45,15 +45,6 @@ static int backend_read(const struct fffs_backend *backend, size_t offset,
                 buffer, size));
 }
 
-static bool span_erased(const uint8_t *p, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        if (p[i] != 0xff) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t *serial) {
     enum fffs_lifecycle_object_state footer_state =
@@ -72,7 +63,7 @@ static bool valid_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
 
 static enum md_state decode_md(const uint8_t md[FFFS_MD_SIZE],
         size_t data_limit, size_t sector_size, struct decoded_md *out) {
-    if (span_erased(md, FFFS_MD_SIZE)) {
+    if (fffs_flash_bytes_erased(md, FFFS_MD_SIZE)) {
         return MD_ERASED;
     }
     enum fffs_lifecycle_object_state md_state =
@@ -430,7 +421,7 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
             return err;
         }
 
-        if (span_erased(footer, sizeof(footer))) {
+        if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
             summary->data_sectors_erased += 1;
             continue;
         }
@@ -584,7 +575,7 @@ static int dump_index_headers(const struct fffs_backend *backend, FILE *out,
             fprintf(out, "index sector=%zu serial=%u active=%s\n",
                     sector, (unsigned)serial,
                     sector == summary->active_index_sector ? "yes" : "no");
-        } else if (span_erased(hdr, sizeof(hdr))) {
+        } else if (fffs_flash_bytes_erased(hdr, sizeof(hdr))) {
             fprintf(out, "index sector=%zu erased\n", sector);
         } else {
             fprintf(out, "index sector=%zu invalid\n", sector);
@@ -630,7 +621,7 @@ static int dump_data_sectors(const struct fffs_backend *backend, FILE *out,
         if (err != FFFS_OK) {
             return err;
         }
-        if (span_erased(footer, sizeof(footer))) {
+        if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
             continue;
         }
 

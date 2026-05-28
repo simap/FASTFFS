@@ -160,6 +160,7 @@ uint16_t fffs_hash16(const char *name);
 uint16_t fffs_normalize_slot_base(uint16_t slot);
 uint16_t fffs_next_slot(uint16_t slot);
 
+bool fffs_flash_bytes_erased(const void *bytes, size_t size);
 int fffs_flash_read(struct fffs *fs, size_t offset,
         void *buffer, size_t size);
 int fffs_flash_program(struct fffs *fs, size_t offset,

@@ -319,15 +319,6 @@ static int clobber_or_reject_active_tail(struct fffs *fs, size_t rec_off,
     return clobber_active_tail(fs, rec_off);
 }
 
-static bool index_bytes_erased(const uint8_t *bytes, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        if (bytes[i] != 0xff) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static int index_flash_span_erased(struct fffs *fs, size_t offset,
         size_t size, bool *erased) {
     uint8_t buf[32];
@@ -338,7 +329,7 @@ static int index_flash_span_erased(struct fffs *fs, size_t offset,
         if (err != FFFS_OK) {
             return err;
         }
-        if (!index_bytes_erased(buf, n)) {
+        if (!fffs_flash_bytes_erased(buf, n)) {
             *erased = false;
             return FFFS_OK;
         }
@@ -366,14 +357,14 @@ static int active_index_record_is_terminal(struct fffs *fs, size_t rec_off,
             return err;
         }
     }
-    if (!index_bytes_erased(next_rec, sizeof(next_rec))) {
+    if (!fffs_flash_bytes_erased(next_rec, sizeof(next_rec))) {
         return FFFS_OK;
     }
 
     size_t rest_off = rec_off + 8;
     size_t chunk_end = rec_off + (nread - pos);
     if (rest_off < chunk_end) {
-        if (!index_bytes_erased(chunk + pos + 8, chunk_end - rest_off)) {
+        if (!fffs_flash_bytes_erased(chunk + pos + 8, chunk_end - rest_off)) {
             return FFFS_OK;
         }
         rest_off = chunk_end;

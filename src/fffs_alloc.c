@@ -21,10 +21,8 @@ int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size) {
             return err;
         }
         fffs_scratch_bump(fs);
-        for (size_t i = 0; i < n; i++) {
-            if (chunk[i] != 0xff) {
-                return FFFS_ERR_NO_SPACE;
-            }
+        if (!fffs_flash_bytes_erased(chunk, n)) {
+            return FFFS_ERR_NO_SPACE;
         }
         offset += n;
         size -= n;

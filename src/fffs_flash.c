@@ -24,6 +24,16 @@ bool fffs_valid_backend(const struct fffs_backend *backend) {
         backend->read && backend->program && backend->erase;
 }
 
+bool fffs_flash_bytes_erased(const void *bytes, size_t size) {
+    const uint8_t *p = bytes;
+    for (size_t i = 0; i < size; i++) {
+        if (p[i] != 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
 #if FFFS_PROFILE_TRACE
 void fffs_profile_push(struct fffs *fs, enum fffs_profile_scope scope) {
     if (!fs || fs->profile_depth >=

@@ -27,14 +27,7 @@ static int sector_footer_state(struct fffs *fs, size_t sector,
     if (err != FFFS_OK) {
         return err;
     }
-    bool footer_erased = true;
-    for (size_t i = 0; i < sizeof(footer); i++) {
-        if (footer[i] != 0xff) {
-            footer_erased = false;
-            break;
-        }
-    }
-    if (footer_erased) {
+    if (fffs_flash_bytes_erased(footer, sizeof(footer))) {
         err = fffs_flash_span_is_erased(fs, sector * fs->sector_size,
                 fs->sector_size);
         if (err == FFFS_OK) {
