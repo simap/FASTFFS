@@ -291,7 +291,7 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
         uint16_t head;
         while (fffs_index_iter_read(&iter, &slot, &head)) {
             uint32_t size;
-            int err = fffs_read_metadata_for_slot(fs, head, slot, NULL,
+            int err = fffs_read_file_root_md(fs, head, slot, NULL,
                     NULL, NULL, NULL, NULL, &size, NULL);
             if (err != FFFS_OK) {
                 fffs_fsinfo_invalidate_committed(fs);

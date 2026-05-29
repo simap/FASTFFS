@@ -21,15 +21,13 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
     uint16_t current = head;
     FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_REACHABILITY);
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        uint16_t next_sector;
-        uint16_t span_len;
-        int err = fffs_read_metadata_for_slot(fs, current, slot, NULL, NULL,
-                NULL, &next_sector, &span_len, NULL, NULL);
+        struct fffs_md_record record;
+        int err = fffs_read_md_for_slot(fs, current, slot, &record);
         if (err != FFFS_OK) {
             FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return err;
         }
-        size_t span_end = (size_t)current + span_len;
+        size_t span_end = (size_t)current + record.span_len;
         if (span_end > fs->sector_count) {
             FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return FFFS_ERR_CORRUPT;
@@ -39,7 +37,7 @@ static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
             FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
             return FFFS_OK;
         }
-        current = next_sector;
+        current = record.next;
     }
     if (current != 0) {
         FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_REACHABILITY);
@@ -211,13 +209,9 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
 
     enum fffs_md_walk_result walk_result;
     if (!fs->gc_md.active || fs->gc_md.sector != s) {
-        err = fffs_md_walk_init(fs, &fs->gc_md, (uint16_t)s, &window,
-                &walk_result);
+        err = fffs_md_walk_init(fs, &fs->gc_md, (uint16_t)s, &window);
         if (err != FFFS_OK) {
             return err;
-        }
-        if (walk_result != FFFS_MD_WALK_RECORD) {
-            return FFFS_ERR_CORRUPT;
         }
     }
 

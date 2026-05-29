@@ -198,10 +198,6 @@ size_t fffs_sector_metadata_offset(struct fffs *fs, uint16_t sector);
 size_t fffs_sector_footer_offset(struct fffs *fs, uint16_t sector);
 void fffs_encode_sector_footer(uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         uint32_t serial, bool valid);
-int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
-        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
-        uint32_t *root_size, struct fffs_read_cache_view *cache);
 enum fffs_tombstone_accounting {
     FFFS_TOMBSTONE_NO_ACCOUNTING,
     FFFS_TOMBSTONE_COMMITTED_DELETE,
@@ -244,6 +240,12 @@ struct fffs_md_record {
     size_t record_start;
     size_t record_len;
 };
+int fffs_read_md_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_md_record *out);
+int fffs_read_file_root_md(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
+        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
+        uint32_t *root_size, struct fffs_read_cache_view *cache);
 struct fffs_sector_reader {
     uint8_t *data;
     size_t capacity;
@@ -255,13 +257,8 @@ struct fffs_sector_reader {
 int fffs_sector_reader_view(struct fffs *fs,
         struct fffs_sector_reader *reader, uint16_t sector, size_t offset,
         size_t size, const uint8_t **out);
-typedef int (*fffs_md_record_visitor)(struct fffs *fs,
-        const struct fffs_md_record *record, void *ctx);
-int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
-        fffs_md_record_visitor visitor, void *ctx);
 int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
-        uint16_t sector, struct fffs_sector_reader *window,
-        enum fffs_md_walk_result *result);
+        uint16_t sector, struct fffs_sector_reader *window);
 int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
         struct fffs_sector_reader *window, struct fffs_md_record *record,
         enum fffs_md_walk_result *result);

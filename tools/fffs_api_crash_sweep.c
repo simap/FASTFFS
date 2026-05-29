@@ -650,18 +650,16 @@ static bool original_sector_reachable(struct fffs *fs, uint16_t slot,
     uint16_t current = head;
     *err_out = FFFS_OK;
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        uint16_t next = 0;
-        uint16_t span_len = 0;
-        int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                NULL, NULL, &next, &span_len, NULL, NULL);
+        struct fffs_md_record record;
+        int err = fffs_read_md_for_slot(fs, current, slot, &record);
         if (err != FFFS_OK) {
             *err_out = err;
             return false;
         }
-        if (sector >= current && sector < (size_t)current + span_len) {
+        if (sector >= current && sector < (size_t)current + record.span_len) {
             return true;
         }
-        current = next;
+        current = record.next;
     }
     if (current != 0) {
         *err_out = FFFS_ERR_CORRUPT;
@@ -677,10 +675,13 @@ static int original_index_diag_visitor(struct fffs *fs,
     int head_err = fffs_index_head_for_slot(fs, record->slot, &head, &found);
 
     struct fffs_stat md_st = {0};
-    uint16_t next = 0;
-    uint16_t span_len = 0;
-    int md_err = fffs_read_metadata_for_slot(fs, ctx->sector, record->slot,
-            &md_st, NULL, NULL, &next, &span_len, NULL, NULL);
+    uint16_t next = record->next;
+    uint16_t span_len = record->span_len;
+    int md_err = FFFS_OK;
+    if (record->type == FFFS_MD_TYPE_FILE_ROOT_V1) {
+        md_err = fffs_read_file_root_md(fs, ctx->sector, record->slot,
+                &md_st, NULL, NULL, NULL, NULL, NULL, NULL);
+    }
 
     bool exists = false;
     int exists_err = md_err == FFFS_OK ?
@@ -729,8 +730,39 @@ static void log_original_index_view(FILE *out, struct fffs *fs,
         .out = out,
         .sector = sector,
     };
-    int err = fffs_visit_metadata_records(fs, sector,
-            original_index_diag_visitor, &ctx);
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_sector_reader window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+        .reverse = true,
+    };
+    const uint8_t *footer_bytes;
+    int err = fffs_sector_reader_view(fs, &window, sector,
+            fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE, &footer_bytes);
+    if (err == FFFS_OK) {
+        struct fffs_sector_footer footer;
+        fffs_decode_sector_footer(footer_bytes, &footer);
+        if (footer.erased || footer.type != FFFS_SECTOR_TYPE_FILE ||
+                !footer.magic_valid ||
+                !fffs_lifecycle_is_live(footer.valid_bits,
+                    footer.tombstone_bits)) {
+            fprintf(out, "original-index visit_err=%s\n",
+                    fffs_status_name(FFFS_OK));
+            return;
+        }
+        struct fffs_md_walk walk;
+        err = fffs_md_walk_init(fs, &walk, sector, &window);
+        while (err == FFFS_OK && walk.active) {
+            struct fffs_md_record record;
+            enum fffs_md_walk_result result;
+            err = fffs_md_walk_next(fs, &walk, &window, &record, &result);
+            if (err != FFFS_OK || result != FFFS_MD_WALK_RECORD) {
+                break;
+            }
+            err = original_index_diag_visitor(fs, &record, &ctx);
+        }
+    }
     fprintf(out, "original-index visit_err=%s\n", fffs_status_name(err));
 }
 

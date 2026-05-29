@@ -75,18 +75,24 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, enum fffs_tombstone_accounting accounting,
         bool *accounted);
 struct fffs_read_cache_view;
-struct fffs_md_record;
-typedef int (*fffs_md_record_visitor)(struct fffs *fs,
-        const struct fffs_md_record *record, void *ctx);
-int fffs_read_metadata_for_slot(struct fffs *fs, uint16_t sector,
-        uint16_t want_slot, struct fffs_stat *st, uint16_t *data_off,
-        uint16_t *data_len, uint16_t *next, uint16_t *span_len,
-        uint32_t *root_size, struct fffs_read_cache_view *cache);
+struct fffs_md_record {
+    uint8_t type;
+    uint8_t state;
+    bool live;
+    uint16_t slot;
+    uint16_t next;
+    uint16_t span_len;
+    uint16_t data_off;
+    uint16_t data_len;
+    uint32_t size_or_offset;
+    size_t record_start;
+    size_t record_len;
+};
+int fffs_read_md_for_slot(struct fffs *fs, uint16_t sector,
+        uint16_t want_slot, struct fffs_md_record *out);
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
         uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
         uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
-int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
-        fffs_md_record_visitor visitor, void *ctx);
 
 struct measured_ops {
     uint64_t calls[FFSV_OP_COUNT];
@@ -930,35 +936,6 @@ static int test_gc_erases_dirty_sector_with_erased_footer(void) {
     ASSERT_TRUE(action == FFFS_GC_ERASED);
     ASSERT_TRUE(ffsv_flash_image_span_is_erased(flash,
                 10 * FFFS_DEFAULT_SECTOR_SIZE, FFFS_DEFAULT_SECTOR_SIZE));
-
-    fffs_unmount(&fs);
-    ffsv_flash_destroy(flash);
-    return 0;
-}
-
-static int count_md_records(struct fffs *fs,
-        const struct fffs_md_record *record, void *ctx) {
-    (void)fs;
-    (void)record;
-    size_t *count = ctx;
-    *count += 1;
-    return FFFS_OK;
-}
-
-static int test_metadata_visit_tolerates_erased_sector(void) {
-    struct ffsv_flash *flash = NULL;
-    struct fffs_backend backend;
-    struct fffs fs;
-    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
-    size_t count = 0;
-
-    ASSERT_OK(new_backend(&flash, &backend));
-    ASSERT_OK(fffs_format(&backend, NULL));
-    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
-
-    ASSERT_OK(fffs_visit_metadata_records(&fs, (uint16_t)fs.index_sectors,
-                count_md_records, &count));
-    ASSERT_TRUE(count == 0);
 
     fffs_unmount(&fs);
     ffsv_flash_destroy(flash);
@@ -2804,9 +2781,7 @@ static int test_large_file_uses_contiguous_spans(void) {
     uint8_t out[16] = {0};
     size_t nread = 0;
     uint32_t pos = 0;
-    uint16_t span_len = 0;
-    uint16_t span_data_len = 0;
-    uint16_t span_next = 0;
+    struct fffs_md_record span_record;
     struct fffs_inspect_summary inspect;
 
     ASSERT_TRUE(large != NULL);
@@ -2818,11 +2793,10 @@ static int test_large_file_uses_contiguous_spans(void) {
     ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
 
     ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
-    ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
-                NULL, NULL, &span_data_len, &span_next, &span_len, NULL,
-                NULL));
-    ASSERT_TRUE(span_len > 1);
-    ASSERT_TRUE(span_data_len > 0);
+    ASSERT_OK(fffs_read_md_for_slot(&fs, file.head, file.slot,
+                &span_record));
+    ASSERT_TRUE(span_record.span_len > 1);
+    ASSERT_TRUE(span_record.data_len > 0);
 
     uint32_t target = 8192u + 17u;
     ASSERT_TRUE(target < large_size);
@@ -2862,10 +2836,8 @@ static int test_span_head_skips_contiguous_continuations(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     const size_t large_size = 24u * 1024u;
     uint8_t *large = malloc(large_size);
-    uint16_t root_span_len = 0;
-    uint16_t root_next = 0xffff;
-    uint16_t cont_span_len = 0;
-    uint16_t cont_next = 0xffff;
+    struct fffs_md_record root_record;
+    struct fffs_md_record cont_record;
 
     ASSERT_TRUE(large != NULL);
     fill_large_pattern(large, large_size);
@@ -2876,16 +2848,15 @@ static int test_span_head_skips_contiguous_continuations(void) {
     ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
 
     ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
-    ASSERT_OK(fffs_read_metadata_for_slot(&fs, file.head, file.slot,
-                NULL, NULL, NULL, &root_next, &root_span_len, NULL, NULL));
-    ASSERT_TRUE(root_span_len > 1);
-    ASSERT_TRUE(root_next == 0);
+    ASSERT_OK(fffs_read_md_for_slot(&fs, file.head, file.slot,
+                &root_record));
+    ASSERT_TRUE(root_record.span_len > 1);
+    ASSERT_TRUE(root_record.next == 0);
 
-    ASSERT_OK(fffs_read_metadata_for_slot(&fs, (uint16_t)(file.head + 1u),
-            file.slot, NULL, NULL, NULL, &cont_next, &cont_span_len,
-            NULL, NULL));
-    ASSERT_TRUE(cont_span_len == 1);
-    ASSERT_TRUE(cont_next == file.head + 2u);
+    ASSERT_OK(fffs_read_md_for_slot(&fs, (uint16_t)(file.head + 1u),
+            file.slot, &cont_record));
+    ASSERT_TRUE(cont_record.span_len == 1);
+    ASSERT_TRUE(cont_record.next == file.head + 2u);
     ASSERT_OK(fffs_close(&file));
 
     fffs_unmount(&fs);
@@ -3124,7 +3095,6 @@ int main(void) {
         test_non_strict_mount_does_not_clobber_nonterminal_index_record();
     failures += test_gc_reclaims_unindexed_orphan_sector();
     failures += test_gc_erases_dirty_sector_with_erased_footer();
-    failures += test_metadata_visit_tolerates_erased_sector();
     failures += test_gc_tombstones_sector_with_invalid_unknown_md();
     failures +=
         test_gc_tombstones_sector_with_reachable_invalid_metadata_normally();

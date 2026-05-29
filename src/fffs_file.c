@@ -24,22 +24,16 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
     }
 
     for (size_t depth = 0; current != 0 && depth < fs->sector_count; depth++) {
-        uint16_t span_len = 1;
-        if (!have_next) {
-            int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                    NULL, NULL, &current_next, &span_len, NULL, NULL);
-            if (err != FFFS_OK) {
-                return false;
-            }
-        } else {
-            int err = fffs_read_metadata_for_slot(fs, current, slot, NULL,
-                    NULL, NULL, NULL, &span_len, NULL, NULL);
-            if (err != FFFS_OK) {
-                return false;
-            }
+        struct fffs_md_record record;
+        int err = fffs_read_md_for_slot(fs, current, slot, &record);
+        if (err != FFFS_OK) {
+            return false;
         }
-        fffs_alloc_map_mark_range_unknown(fs, current, span_len);
-        visited += span_len;
+        if (!have_next) {
+            current_next = record.next;
+        }
+        fffs_alloc_map_mark_range_unknown(fs, current, record.span_len);
+        visited += record.span_len;
 #if !FFFS_LAZY_DELETE_TOMBSTONES
         if (tombstone) {
             bool accounted = false;
@@ -229,11 +223,12 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
     file->head = head;
 
     if (read) {
-        err = fffs_read_metadata_for_slot(fs, head, slot, NULL, NULL, NULL,
-                NULL, &resolved_span_len, NULL, NULL);
+        struct fffs_md_record root;
+        err = fffs_read_md_for_slot(fs, head, slot, &root);
         if (err != FFFS_OK) {
             return err;
         }
+        resolved_span_len = root.span_len;
         file->cache_len = read_cache.len;
         file->cache_data_pos = read_cache.data_pos;
         file->data_offset = resolved_payload_data_off;
@@ -272,8 +267,9 @@ static int reset_read_position_to_root(struct fffs_file *file) {
     uint16_t data_len;
     uint16_t next;
     uint16_t span_len;
-    int err = fffs_read_metadata_for_slot(file->fs, file->head, file->slot,
-            NULL, &file->data_offset, &data_len, &next, &span_len, NULL, NULL);
+    int err = fffs_read_file_root_md(file->fs, file->head, file->slot,
+            NULL, &file->data_offset, &data_len, &next, &span_len, NULL,
+            NULL);
     if (err != FFFS_OK) {
         return err;
     }
@@ -310,12 +306,16 @@ static int seek_from_current_position(struct fffs_file *file,
         uint16_t data_len;
         uint16_t next;
         uint16_t span_len;
-        int err = fffs_read_metadata_for_slot(file->fs, next_sector,
-                file->slot, NULL, &file->data_offset, &data_len, &next,
-                &span_len, NULL, NULL);
+        struct fffs_md_record record;
+        int err = fffs_read_md_for_slot(file->fs, next_sector, file->slot,
+                &record);
         if (err != FFFS_OK) {
             return err;
         }
+        file->data_offset = record.data_off;
+        data_len = record.data_len;
+        next = record.next;
+        span_len = record.span_len;
         file->current = next_sector;
         file->current_data_len = data_len;
         file->span_len = span_len;
@@ -330,54 +330,16 @@ static int seek_from_current_position(struct fffs_file *file,
     return FFFS_OK;
 }
 
-struct seek_md_record {
-    uint16_t slot;
-    uint16_t data_off;
-    uint16_t data_len;
-    uint16_t next;
-    uint16_t span_len;
-    uint32_t file_offset;
-    bool found;
-};
-
-static int seek_md_visitor(struct fffs *fs,
-        const struct fffs_md_record *record, void *ctx) {
-    (void)fs;
-    struct seek_md_record *out = ctx;
-    if (!record->live || record->slot != out->slot) {
-        return FFFS_OK;
-    }
-    out->data_off = record->data_off;
-    out->data_len = record->data_len;
-    out->next = record->next;
-    out->span_len = record->span_len;
-    out->file_offset = record->type == FFFS_MD_TYPE_FILE_ROOT_V1 ?
-        0 : record->size_or_offset;
-    out->found = true;
-    return FFFS_OK;
-}
-
-static int read_seek_md_record(struct fffs_file *file, uint16_t sector,
-        struct seek_md_record *out) {
-    memset(out, 0, sizeof(*out));
-    out->slot = file->slot;
-    int err = fffs_visit_metadata_records(file->fs, sector, seek_md_visitor,
-            out);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    return out->found ? FFFS_OK : FFFS_ERR_CORRUPT;
-}
-
 static void apply_seek_md_record(struct fffs_file *file, uint16_t sector,
-        const struct seek_md_record *record, uint32_t target) {
+        const struct fffs_md_record *record, uint32_t file_offset,
+        uint32_t target) {
     file->current = sector;
     file->data_offset = record->data_off;
     file->current_data_len = record->data_len;
     file->span_len = record->span_len;
     file->current_next = record->next;
-    file->current_file_offset = record->file_offset;
-    file->current_data_pos = target - record->file_offset;
+    file->current_file_offset = file_offset;
+    file->current_data_pos = target - file_offset;
     file->pos = target;
     file->cache_len = 0;
 }
@@ -408,18 +370,20 @@ static int hunt_current_span(struct fffs_file *file, uint32_t target,
         }
 
         uint16_t sector = (uint16_t)(file->current + guess);
-        struct seek_md_record record;
-        int err = read_seek_md_record(file, sector, &record);
+        struct fffs_md_record record;
+        int err = fffs_read_md_for_slot(file->fs, sector, file->slot, &record);
         if (err != FFFS_OK) {
             return err;
         }
-        if (target < record.file_offset) {
+        uint32_t file_offset = record.type == FFFS_MD_TYPE_FILE_ROOT_V1 ?
+            0 : record.size_or_offset;
+        if (target < file_offset) {
             if (guess == 0) {
                 break;
             }
             high = (uint16_t)(guess - 1u);
-        } else if (target <= record.file_offset + record.data_len) {
-            apply_seek_md_record(file, sector, &record, target);
+        } else if (target <= file_offset + record.data_len) {
+            apply_seek_md_record(file, sector, &record, file_offset, target);
             *found = true;
             return FFFS_OK;
         } else {
@@ -512,14 +476,17 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
             uint16_t data_len;
             uint16_t next;
             uint16_t span_len;
-            int err = fffs_read_metadata_for_slot(file->fs,
-                    next_sector, file->slot, NULL,
-                    &file->data_offset, &data_len, &next, &span_len,
-                    NULL, NULL);
+            struct fffs_md_record record;
+            int err = fffs_read_md_for_slot(file->fs, next_sector,
+                    file->slot, &record);
             if (err != FFFS_OK) {
                 FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
                 return err;
             }
+            file->data_offset = record.data_off;
+            data_len = record.data_len;
+            next = record.next;
+            span_len = record.span_len;
             file->current = next_sector;
             file->current_data_len = data_len;
             file->span_len = span_len;
@@ -799,7 +766,7 @@ int fffs_fstat(struct fffs_file *file, struct fffs_stat *st) {
         st->size = file->size;
         return FFFS_OK;
     }
-    return fffs_read_metadata_for_slot(file->fs, file->head, file->slot, st,
+    return fffs_read_file_root_md(file->fs, file->head, file->slot, st,
             NULL, NULL, NULL, NULL, NULL, NULL);
 }
 
