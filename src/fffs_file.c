@@ -74,14 +74,6 @@ static uint32_t claim_sector_serial(struct fffs *fs) {
     return serial;
 }
 
-static int assigned_sector_serial(struct fffs_file *file, uint32_t *serial) {
-    if (file->current_needs_footer) {
-        *serial = claim_sector_serial(file->fs);
-        return FFFS_OK;
-    }
-    return fffs_read_sector_serial(file->fs, file->current, serial);
-}
-
 static void register_inflight_writer(struct fffs_file *file) {
     if (file->inflight_registered) {
         return;
@@ -107,13 +99,9 @@ static void unregister_inflight_writer(struct fffs_file *file) {
     file->inflight_registered = false;
 }
 
-static size_t root_payload_offset_for_name(const char *name) {
-    return 1u + strlen(name) + 1u;
-}
-
 static void stage_root_prefix(struct fffs_file *file, const char *name) {
     size_t name_len = strlen(name);
-    file->root_payload_offset = (uint16_t)root_payload_offset_for_name(name);
+    file->root_payload_offset = (uint16_t)(1u + name_len + 1u);
     file->cache[0] = (uint8_t)name_len;
     memcpy(file->cache + 1, name, name_len);
     file->cache[1u + name_len] = 0;
@@ -129,11 +117,6 @@ static size_t current_extent_capacity(const struct fffs_file *file) {
         return 0;
     }
     return record_off - data_off - prefix;
-}
-
-static void start_pending_span(struct fffs_file *file) {
-    file->span_head = file->current;
-    file->span_len = 0;
 }
 
 static uint16_t pending_span_len(const struct fffs_file *file) {
@@ -250,13 +233,19 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
         }
         file->head = sector;
         file->current = sector;
-        err = assigned_sector_serial(file, &file->current_sector_serial);
-        if (err != FFFS_OK) {
-            return err;
+        if (file->current_needs_footer) {
+            file->current_sector_serial = claim_sector_serial(file->fs);
+        } else {
+            err = fffs_read_sector_serial(file->fs, file->current,
+                    &file->current_sector_serial);
+            if (err != FFFS_OK) {
+                return err;
+            }
         }
         memcpy(file->name, name, strlen(name) + 1);
         stage_root_prefix(file, name);
-        start_pending_span(file);
+        file->span_head = file->current;
+        file->span_len = 0;
         register_inflight_writer(file);
     }
 
@@ -614,15 +603,6 @@ static int flush_write_cache(struct fffs_file *file, bool final) {
     return FFFS_OK;
 }
 
-static int write_continuation_metadata(struct fffs_file *file,
-        uint16_t sector, uint32_t serial, uint16_t data_offset,
-        uint16_t metadata_offset, bool needs_footer, uint16_t data_len,
-        uint32_t file_offset, uint16_t next_sector) {
-    return fffs_write_extent_metadata(file, sector, serial, data_offset,
-            metadata_offset, needs_footer, data_len, 1, 0, next_sector,
-            file_offset, false);
-}
-
 static int flush_pending_span_head(struct fffs_file *file, uint16_t next_sector,
         bool final) {
     if (file->span_head == 0) {
@@ -681,9 +661,9 @@ static int start_next_extent(struct fffs_file *file) {
             return err;
         }
     } else {
-        err = write_continuation_metadata(file, old_sector, old_sector_serial,
+        err = fffs_write_extent_metadata(file, old_sector, old_sector_serial,
                 old_data_offset, old_metadata_offset, old_needs_footer,
-                old_data_len, old_file_offset, next_sector);
+                old_data_len, 1, 0, next_sector, old_file_offset, false);
         if (err != FFFS_OK) {
             return err;
         }
@@ -696,16 +676,22 @@ static int start_next_extent(struct fffs_file *file) {
     }
 
     file->current = next_sector;
-    err = assigned_sector_serial(file, &file->current_sector_serial);
-    if (err != FFFS_OK) {
-        return err;
+    if (file->current_needs_footer) {
+        file->current_sector_serial = claim_sector_serial(file->fs);
+    } else {
+        err = fffs_read_sector_serial(file->fs, file->current,
+                &file->current_sector_serial);
+        if (err != FFFS_OK) {
+            return err;
+        }
     }
     file->current_data_len = 0;
     file->current_next = 0;
     file->current_file_offset = next_file_offset;
     file->cache_len = 0;
     if (!can_extend_span) {
-        start_pending_span(file);
+        file->span_head = file->current;
+        file->span_len = 0;
     }
     return FFFS_OK;
 }
@@ -786,11 +772,11 @@ int fffs_close(struct fffs_file *file) {
                         file->current_needs_footer, file->current_data_len,
                         file->current_file_offset);
             } else {
-                err = write_continuation_metadata(file, file->current,
+                err = fffs_write_extent_metadata(file, file->current,
                         file->current_sector_serial, file->data_offset,
                         file->current_metadata_offset,
                         file->current_needs_footer, file->current_data_len,
-                        file->current_file_offset, 0);
+                        1, 0, 0, file->current_file_offset, false);
             }
         }
         if (err == FFFS_OK) {
