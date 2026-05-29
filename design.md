@@ -660,7 +660,33 @@ Continuation metadata still carries the resolved slot so GC can check liveness a
 
 Additional owner identity, such as root head, generation, or span ordinal, is not part of the baseline. Liveness is validated by starting at the current index entry for the slot and walking the current root span chain. A continuation with the same slot but not reachable from that chain is dead.
 
-Metadata CRC support is optional, but if enabled it is a format-level policy advertised in index sector headers. A CRC-required image must not accept metadata records without valid CRC coverage as non-CRC records. CRC is not part of the 4-byte index record because that would destroy the compact index density.
+Metadata CRC support is optional, but it is a format-time runtime policy
+advertised in index sector headers. Once mounted, the image policy determines
+the physical metadata record size, validation rules, and allocation capacity
+calculations for every file metadata record in that image.
+
+CRC does not define a separate root or continuation metadata type. The terminal
+type byte still identifies the logical metadata shape. When metadata CRC is
+required, the physical record form is:
+
+```text
+[crc32][lifecycle][body...][type]
+```
+
+A reverse scanner reads the terminal type first, derives the base record size
+from the type, then adds the CRC prefix size required by the mounted image
+policy.
+
+A CRC-required image must not accept the non-CRC physical length of a record as
+valid metadata. A non-CRC image must not reinterpret a CRC-prefixed physical
+record as current metadata. Mixed CRC/non-CRC metadata within one mounted image
+is not a baseline format.
+
+Metadata CRC32 excludes the stored CRC field and excludes the lifecycle byte,
+because lifecycle is programmed after the immutable body and may later be
+tombstoned. It covers the record's claimed sector-local data bytes and the
+immutable metadata body through the terminal type byte. CRC is not part of the
+4-byte index record because that would destroy compact index density.
 
 ## Local Tombstones
 
@@ -956,6 +982,7 @@ Several parts of the design can be optional or compile-time/runtime configuratio
 | skip boot scan and blank-check on allocation | Faster boot; bitmap may be stale until writes complete |
 | sector size | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |
 | backend erase unit | Runtime backend constraint; must divide FASTFFS sector size |
+| metadata CRC32 | Runtime format-time image policy; adds 4 bytes to file metadata records and enforces CRC validation on mount/read/GC paths |
 | minimum first-write threshold | Avoids starting files in sectors with too little data space |
 | packed small files | Baseline density feature for tiny files |
 | sector-local tombstones | Baseline physical hint for GC/defrag; not required for namespace correctness |
