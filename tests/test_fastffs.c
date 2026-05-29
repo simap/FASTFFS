@@ -586,6 +586,74 @@ static int test_overwrite_delete_and_remount(void) {
     return 0;
 }
 
+static int test_delete_tombstones_each_sector_in_contiguous_span(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const size_t large_size = 24u * 1024u;
+    uint8_t *large = malloc(large_size);
+    struct fffs_md_record root_record;
+    size_t record_starts[16] = {0};
+    uint16_t head;
+    uint16_t slot;
+    uint16_t span_len;
+    struct fffs_stat st;
+    struct fffs_inspect_summary summary;
+
+    ASSERT_TRUE(large != NULL);
+    for (size_t i = 0; i < large_size; i++) {
+        large[i] = (uint8_t)(i * 17u + (i >> 4));
+    }
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    ASSERT_OK(write_chunks(&fs, "large.bin", large, large_size));
+
+    ASSERT_OK(fffs_open(&fs, &file, "large.bin", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read_md_for_slot(&fs, file.head, file.slot, &root_record));
+    ASSERT_TRUE(root_record.span_len > 1);
+    ASSERT_TRUE(root_record.span_len <=
+            sizeof(record_starts) / sizeof(record_starts[0]));
+    head = file.head;
+    slot = file.slot;
+    span_len = root_record.span_len;
+    ASSERT_OK(fffs_close(&file));
+
+    for (uint16_t i = 0; i < span_len; i++) {
+        struct fffs_md_record record;
+        ASSERT_OK(fffs_read_md_for_slot(&fs, (uint16_t)(head + i), slot,
+                    &record));
+        record_starts[i] = record.record_start;
+    }
+
+    ASSERT_OK(fffs_delete_file(&fs, "large.bin"));
+    ASSERT_EQ_INT(FFFS_ERR_NOT_FOUND, fffs_stat(&fs, "large.bin", &st));
+    ASSERT_OK(fffs_inspect_check(&backend, &summary));
+#if FFFS_LAZY_DELETE_TOMBSTONES
+    ASSERT_TRUE(summary.md_tombstoned == 0);
+    for (uint16_t i = 0; i < span_len; i++) {
+        ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                    (size_t)(head + i) * fs.sector_size + record_starts[i]) ==
+                TEST_MD_FLAGS_VALID);
+    }
+#else
+    ASSERT_TRUE(summary.md_tombstoned == span_len);
+    for (uint16_t i = 0; i < span_len; i++) {
+        ASSERT_TRUE(ffsv_flash_image_byte(flash,
+                    (size_t)(head + i) * fs.sector_size + record_starts[i]) ==
+                TEST_MD_FLAGS_TOMBSTONED);
+    }
+#endif
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
 static int test_fsinfo_refresh_and_cached_accounting(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -3054,6 +3122,7 @@ int main(void) {
     failures += test_free_window_rejects_partially_erased_footer_without_scan();
     failures += test_mount_requires_scratch();
     failures += test_overwrite_delete_and_remount();
+    failures += test_delete_tombstones_each_sector_in_contiguous_span();
     failures += test_fsinfo_refresh_and_cached_accounting();
     failures += test_reserved_hash_slots_are_skipped();
     failures += test_replay_skips_reused_stale_index_heads();

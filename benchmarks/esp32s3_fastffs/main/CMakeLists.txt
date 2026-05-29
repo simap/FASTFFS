@@ -21,6 +21,7 @@ idf_component_register(
         "${FASTFFS_ROOT}/src/fffs_nocache_index.c"
         "${FASTFFS_ROOT}/src/fffs_ram_index.c"
         "${FASTFFS_ROOT}/src/fffs_sector.c"
+        "${FASTFFS_ROOT}/src/fffs_sector_reader.c"
     INCLUDE_DIRS
         "."
         "${BENCHFS}"

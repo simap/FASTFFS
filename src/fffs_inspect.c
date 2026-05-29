@@ -468,17 +468,17 @@ static int inspect_data_sectors(const struct fffs_backend *backend,
                 claimed_data_end = data_end;
             }
             if (state == MD_TOMBSTONED) {
+                summary->md_tombstoned += 1;
                 if (cursor <= claimed_data_end) {
                     break;
                 }
-                summary->md_tombstoned += 1;
                 continue;
             }
             if (state == MD_UNCOMMITTED) {
+                summary->md_obsolete_orphaned += 1;
                 if (cursor <= claimed_data_end) {
                     break;
                 }
-                summary->md_obsolete_orphaned += 1;
                 continue;
             }
 

@@ -32,19 +32,30 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
         if (!have_next) {
             current_next = record.next;
         }
+        if ((size_t)current + record.span_len > fs->sector_count) {
+            return false;
+        }
         fffs_alloc_map_mark_range_unknown(fs, current, record.span_len);
         visited += record.span_len;
 #if !FFFS_LAZY_DELETE_TOMBSTONES
         if (tombstone) {
-            bool accounted = false;
-            int err = fffs_tombstone_metadata_for_slot(fs, current, slot,
-                    FFFS_TOMBSTONE_COMMITTED_DELETE,
-                    depth == 0 ? &accounted : NULL);
-            if (err != FFFS_OK) {
-                return false;
-            }
-            if (depth == 0 && root_accounted) {
-                *root_accounted = accounted;
+            for (uint16_t i = 0; i < record.span_len; i++) {
+                bool accounted = false;
+                enum fffs_tombstone_accounting accounting =
+                    depth == 0 && i == 0 ?
+                    FFFS_TOMBSTONE_COMMITTED_DELETE :
+                    FFFS_TOMBSTONE_NO_ACCOUNTING;
+                int err = fffs_tombstone_metadata_for_slot(fs,
+                        (uint16_t)(current + i), slot, accounting,
+                        accounting == FFFS_TOMBSTONE_COMMITTED_DELETE ?
+                        &accounted : NULL);
+                if (err != FFFS_OK) {
+                    return false;
+                }
+                if (accounting == FFFS_TOMBSTONE_COMMITTED_DELETE &&
+                        root_accounted) {
+                    *root_accounted = accounted;
+                }
             }
         }
 #else
