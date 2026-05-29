@@ -280,13 +280,11 @@ static int adapter_open(void *ctx, const char *name, uint32_t flags, void **file
 static int adapter_write(void *ctx, void *file, const void *buf, size_t len)
 {
     (void)ctx;
-    size_t written = 0;
-    int rc = fffs_write((struct fffs_file *)file, buf, len, &written);
+    int rc = fffs_write((struct fffs_file *)file, buf, len);
     if (rc == FFFS_ERR_NO_SPACE) {
         return BENCHFS_ERR_NO_SPACE;
     }
-    return rc == FFFS_OK && written == len ? FFFS_OK :
-        (rc == FFFS_OK ? FFFS_ERR_IO : rc);
+    return rc;
 }
 
 static int adapter_read(void *ctx, void *file, void *buf, size_t len,

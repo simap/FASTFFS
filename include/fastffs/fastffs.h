@@ -286,8 +286,7 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
         size_t *out_read);
 int fffs_seek(struct fffs_file *file, int32_t offset,
         enum fffs_seek_whence whence, uint32_t *out_pos);
-int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
-        size_t *out_written);
+int fffs_write(struct fffs_file *file, const void *buffer, size_t size);
 int fffs_fstat(struct fffs_file *file, struct fffs_stat *st);
 
 int fffs_stat(struct fffs *fs, const char *name, struct fffs_stat *st);

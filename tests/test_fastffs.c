@@ -302,13 +302,11 @@ static int test_mount_requires_scratch(void) {
 static int write_chunks(struct fffs *fs, const char *name,
         const uint8_t *data, size_t size) {
     struct fffs_file file;
-    size_t written = 0;
     ASSERT_OK(fffs_open(fs, &file, name,
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
     for (size_t off = 0; off < size; off += 3) {
         size_t n = size - off < 3 ? size - off : 3;
-        ASSERT_OK(fffs_write(&file, data + off, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, data + off, n));
     }
     return fffs_close(&file);
 }
@@ -595,7 +593,6 @@ static int test_fsinfo_refresh_and_cached_accounting(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     struct fffs_fsinfo info;
     struct fffs_file writer;
-    size_t written = 0;
     const char *alpha = "abc";
     const char *beta = "12345";
     const char *gamma = "payload";
@@ -637,8 +634,7 @@ static int test_fsinfo_refresh_and_cached_accounting(void) {
 
     ASSERT_OK(fffs_open(&fs, &writer, "gamma",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&writer, gamma, strlen(gamma), &written));
-    ASSERT_TRUE(written == strlen(gamma));
+    ASSERT_OK(fffs_write(&writer, gamma, strlen(gamma)));
     ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
     ASSERT_TRUE(info.committed_file_count == 2);
     ASSERT_TRUE(info.committed_data_bytes == strlen(alpha) + strlen(beta));
@@ -776,7 +772,7 @@ static int test_non_strict_mount_skips_invalid_active_index_tail(void) {
 
     ASSERT_OK(fffs_open(&fs, &file, name,
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, NULL));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1));
     uint16_t head = file.head;
     ASSERT_OK(fffs_close(&file));
     size_t torn_offset = fs.next_index_offset;
@@ -811,7 +807,7 @@ static int test_non_strict_mount_skips_invalid_active_index_tail(void) {
     ASSERT_TRUE(st.size == sizeof(data) - 1);
     ASSERT_OK(fffs_open(&remounted, &next_file, "after-tail",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&next_file, data, sizeof(data) - 1, NULL));
+    ASSERT_OK(fffs_write(&next_file, data, sizeof(data) - 1));
     ASSERT_OK(fffs_close(&next_file));
     ASSERT_OK(fffs_stat(&remounted, "after-tail", &st));
     ASSERT_TRUE(st.size == sizeof(data) - 1);
@@ -839,7 +835,7 @@ static int test_non_strict_mount_does_not_clobber_nonterminal_index_record(
 
     ASSERT_OK(fffs_open(&fs, &file, name,
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, NULL));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1));
     ASSERT_OK(fffs_close(&file));
     size_t bad_offset = fs.next_index_offset;
 
@@ -993,16 +989,13 @@ static int test_gc_tombstones_sector_with_reachable_invalid_metadata_normally(vo
     uint16_t head;
     uint16_t record_off;
     enum fffs_gc_action action;
-    size_t written = 0;
-
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
     ASSERT_OK(fffs_open(&fs, &file, "reachable-bad-md",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1, &written));
-    ASSERT_TRUE(written == sizeof(data) - 1);
+    ASSERT_OK(fffs_write(&file, data, sizeof(data) - 1));
     head = file.head;
     record_off = file.current_metadata_offset;
     ASSERT_OK(fffs_close(&file));
@@ -1045,8 +1038,6 @@ static int test_gc_skips_open_writer_dirty_root_sector(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
-
     memset(data, 0x5a, sizeof(data));
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1054,8 +1045,7 @@ static int test_gc_skips_open_writer_dirty_root_sector(void) {
 
     ASSERT_OK(fffs_open(&fs, &file, "stream",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&file, data, sizeof(data), &written));
-    ASSERT_TRUE(written == sizeof(data));
+    ASSERT_OK(fffs_write(&file, data, sizeof(data)));
     ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
                 (size_t)file.head * fs.sector_size, fs.sector_size));
 
@@ -1080,8 +1070,6 @@ static int test_gc_skips_multiple_open_writer_dirty_sectors(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
-
     memset(data, 0x33, sizeof(data));
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1089,12 +1077,10 @@ static int test_gc_skips_multiple_open_writer_dirty_sectors(void) {
 
     ASSERT_OK(fffs_open(&fs, &first, "first",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&first, data, sizeof(data), &written));
-    ASSERT_TRUE(written == sizeof(data));
+    ASSERT_OK(fffs_write(&first, data, sizeof(data)));
     ASSERT_OK(fffs_open(&fs, &second, "second",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_OK(fffs_write(&second, data, sizeof(data), &written));
-    ASSERT_TRUE(written == sizeof(data));
+    ASSERT_OK(fffs_write(&second, data, sizeof(data)));
 
     fs.gc_cursor = first.head;
     ASSERT_OK(fffs_gc_step(&fs, &action));
@@ -1123,8 +1109,6 @@ static int test_gc_skips_open_writer_root_and_current_extents(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
-
     memset(data, 0xc3, sizeof(data));
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1136,8 +1120,7 @@ static int test_gc_skips_open_writer_root_and_current_extents(void) {
             sizeof(data); off += sizeof(data)) {
         size_t remaining = test_max_file_data_size(&fs) + sizeof(data) - off;
         size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
-        ASSERT_OK(fffs_write(&file, data, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, data, n));
     }
     ASSERT_TRUE(file.current != file.head);
 
@@ -1166,7 +1149,6 @@ static int test_gc_skips_open_writer_middle_extent(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
     uint16_t middle;
 
     memset(data, 0x9c, sizeof(data));
@@ -1181,8 +1163,7 @@ static int test_gc_skips_open_writer_middle_extent(void) {
         size_t remaining = test_max_file_data_size(&fs) * 2 +
             sizeof(data) - off;
         size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
-        ASSERT_OK(fffs_write(&file, data, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, data, n));
     }
     ASSERT_TRUE(file.current - file.span_head + 1u > 1);
     ASSERT_TRUE(file.current != file.head);
@@ -1208,7 +1189,6 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
     uint16_t second_middle;
 
     memset(data, 0x72, sizeof(data));
@@ -1223,8 +1203,7 @@ static int test_gc_skips_open_writer_deep_middle_extent(void) {
         size_t remaining = test_max_file_data_size(&fs) * 3 +
             sizeof(data) - off;
         size_t n = remaining < sizeof(data) ? remaining : sizeof(data);
-        ASSERT_OK(fffs_write(&file, data, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, data, n));
     }
     ASSERT_TRUE(file.current - file.span_head + 1u > 2);
     ASSERT_TRUE(file.current != file.head);
@@ -1253,7 +1232,6 @@ static int test_gc_reclaims_failed_open_writer_after_remount(void) {
     static test_index_cache_t remount_index_heads[TEST_INDEX_CACHE_WORDS];
     uint8_t data[FFFS_FILE_WRITE_BUFFER];
     enum fffs_gc_action action;
-    size_t written = 0;
     uint16_t head;
 
     memset(data, 0xe1, sizeof(data));
@@ -1265,8 +1243,7 @@ static int test_gc_reclaims_failed_open_writer_after_remount(void) {
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
     head = file.head;
     inject_next(flash, FFSV_OP_PROGRAM, FFSV_FAIL_MIDDLE, 16);
-    ASSERT_EQ_INT(FFFS_ERR_IO, fffs_write(&file, data, sizeof(data),
-                &written));
+    ASSERT_EQ_INT(FFFS_ERR_IO, fffs_write(&file, data, sizeof(data)));
     ASSERT_TRUE(!ffsv_flash_image_span_is_erased(flash,
                 (size_t)head * fs.sector_size, fs.sector_size));
 
@@ -1440,7 +1417,6 @@ static int test_alloc_uses_owner_reservation_for_next_extent(void) {
     struct fffs_file file;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
-    size_t written = 0;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1453,9 +1429,7 @@ static int test_alloc_uses_owner_reservation_for_next_extent(void) {
     size_t first_capacity = file.current_metadata_offset -
         file.data_offset - file.root_payload_offset;
 
-    ASSERT_OK(fffs_write(&file, payload,
-                first_capacity + 1, &written));
-    ASSERT_TRUE(written == first_capacity + 1);
+    ASSERT_OK(fffs_write(&file, payload, first_capacity + 1));
     ASSERT_TRUE(file.current != file.head);
 
     ASSERT_OK(fffs_close(&file));
@@ -1476,7 +1450,6 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
     uint8_t dirty[FFFS_FILE_WRITE_BUFFER];
-    size_t written = 0;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1493,8 +1466,7 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
                     FFSV_CALLSITE)));
 
     ASSERT_OK(fffs_write(&file, payload,
-                test_max_file_data_size(&fs) + 1, &written));
-    ASSERT_TRUE(written == test_max_file_data_size(&fs) + 1);
+                test_max_file_data_size(&fs) + 1));
     ASSERT_TRUE(file.current != reserved);
 
     ASSERT_OK(fffs_close(&file));
@@ -1676,7 +1648,6 @@ static int test_streaming_write_forces_gc_without_reclaiming_self(void) {
     size_t payload_size;
     size_t out_size = 0;
     struct fffs_file file;
-    size_t written = 0;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 10));
     ASSERT_OK(fffs_format(&backend, NULL));
@@ -1708,8 +1679,7 @@ static int test_streaming_write_forces_gc_without_reclaiming_self(void) {
     fs.gc_cursor = file.head;
     for (size_t off = 0; off < payload_size; off += 137) {
         size_t n = payload_size - off < 137 ? payload_size - off : 137;
-        ASSERT_OK(fffs_write(&file, payload + off, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, payload + off, n));
     }
     ASSERT_OK(fffs_close(&file));
 
@@ -1740,7 +1710,6 @@ static int test_streaming_write_fails_after_gc_exhausts_reclaimable_space(void) 
     size_t payload_size;
     size_t out_size = 0;
     struct fffs_file file;
-    size_t written = 0;
     uint8_t extra = 0xaa;
 
     ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 10));
@@ -1772,11 +1741,9 @@ static int test_streaming_write_fails_after_gc_exhausts_reclaimable_space(void) 
     fs.gc_cursor = file.head;
     for (size_t off = 0; off < payload_size; off += 251) {
         size_t n = payload_size - off < 251 ? payload_size - off : 251;
-        ASSERT_OK(fffs_write(&file, payload + off, n, &written));
-        ASSERT_TRUE(written == n);
+        ASSERT_OK(fffs_write(&file, payload + off, n));
     }
-    ASSERT_OK(fffs_write(&file, &extra, sizeof(extra), &written));
-    ASSERT_TRUE(written == sizeof(extra));
+    ASSERT_OK(fffs_write(&file, &extra, sizeof(extra)));
     const struct ffsv_op_counts *after_fail = ffsv_flash_counts(flash);
     ASSERT_TRUE(after_fail[FFSV_OP_ERASE].calls >= erase_calls_before);
 

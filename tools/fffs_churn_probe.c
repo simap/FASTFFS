@@ -290,7 +290,6 @@ static void fill_pattern(uint8_t *dst, size_t size, uint32_t seed) {
 static int write_file(struct fffs *fs, const char *name, size_t size,
         uint32_t seed) {
     struct fffs_file file;
-    size_t written = 0;
     fill_pattern(io_buffer, size, seed);
 
     int err = fffs_open(fs, &file, name,
@@ -298,10 +297,7 @@ static int write_file(struct fffs *fs, const char *name, size_t size,
     if (err != FFFS_OK) {
         return err;
     }
-    err = fffs_write(&file, io_buffer, size, &written);
-    if (err == FFFS_OK && written != size) {
-        err = FFFS_ERR_IO;
-    }
+    err = fffs_write(&file, io_buffer, size);
     int close_err = fffs_close(&file);
     if (err != FFFS_OK) {
         return err;

@@ -135,20 +135,15 @@ static void file_name(uint8_t id, char *out, size_t out_size) {
 static int write_file(struct fffs *fs, const char *name,
         const uint8_t *data, size_t size) {
     struct fffs_file file;
-    size_t written = 0;
     int err = fffs_open(fs, &file, name,
             FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC);
     if (err != FFFS_OK) {
         return err;
     }
-    err = fffs_write(&file, data, size, &written);
+    err = fffs_write(&file, data, size);
     if (err != FFFS_OK) {
         (void)fffs_close(&file);
         return err;
-    }
-    if (written != size) {
-        (void)fffs_close(&file);
-        return FFFS_ERR_IO;
     }
     return fffs_close(&file);
 }

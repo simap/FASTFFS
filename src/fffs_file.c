@@ -319,20 +319,6 @@ static int seek_from_current_position(struct fffs_file *file,
     return FFFS_OK;
 }
 
-static void apply_seek_md_record(struct fffs_file *file, uint16_t sector,
-        const struct fffs_md_record *record, uint32_t file_offset,
-        uint32_t target) {
-    file->current = sector;
-    file->data_offset = record->data_off;
-    file->current_data_len = record->data_len;
-    file->span_len = record->span_len;
-    file->current_next = record->next;
-    file->current_file_offset = file_offset;
-    file->current_data_pos = target - file_offset;
-    file->pos = target;
-    file->cache_len = 0;
-}
-
 static int hunt_current_span(struct fffs_file *file, uint32_t target,
         bool *found) {
     *found = false;
@@ -372,7 +358,15 @@ static int hunt_current_span(struct fffs_file *file, uint32_t target,
             }
             high = (uint16_t)(guess - 1u);
         } else if (target <= file_offset + record.data_len) {
-            apply_seek_md_record(file, sector, &record, file_offset, target);
+            file->current = sector;
+            file->data_offset = record.data_off;
+            file->current_data_len = record.data_len;
+            file->span_len = record.span_len;
+            file->current_next = record.next;
+            file->current_file_offset = file_offset;
+            file->current_data_pos = target - file_offset;
+            file->pos = target;
+            file->cache_len = 0;
             *found = true;
             return FFFS_OK;
         } else {
@@ -398,34 +392,13 @@ static bool read_cache_has_remaining(const struct fffs_file *file) {
         file->current_data_pos < file->cache_data_pos + file->cache_len;
 }
 
-static int map_read_span_position(const struct fffs_file *file,
-        uint16_t *sector, uint16_t *data_offset, uint32_t *sector_data_pos,
-        size_t *remaining) {
-    if (file->current_data_pos > file->current_data_len) {
-        return FFFS_ERR_CORRUPT;
-    }
-    *sector = file->current;
-    *data_offset = file->data_offset;
-    *sector_data_pos = file->current_data_pos;
-    *remaining = file->current_data_len - file->current_data_pos;
-    return FFFS_OK;
-}
-
 static int fill_read_cache(struct fffs_file *file) {
-    uint16_t sector;
-    uint16_t data_offset;
-    uint32_t sector_data_pos;
-    size_t remaining;
-    int err = map_read_span_position(file, &sector, &data_offset,
-            &sector_data_pos, &remaining);
-    if (err != FFFS_OK) {
-        return err;
-    }
+    size_t remaining = file->current_data_len - file->current_data_pos;
     size_t n = remaining < sizeof(file->cache) ? remaining :
         sizeof(file->cache);
-    err = fffs_flash_read(file->fs, (size_t)sector *
-            file->fs->sector_size + data_offset + sector_data_pos,
-            file->cache, n);
+    int err = fffs_flash_read(file->fs, (size_t)file->current *
+            file->fs->sector_size + file->data_offset +
+            file->current_data_pos, file->cache, n);
     if (err != FFFS_OK) {
         return err;
     }
@@ -507,20 +480,9 @@ int fffs_read(struct fffs_file *file, void *buffer, size_t size,
             memcpy(dst + total, file->cache, n);
         } else {
             file->cache_len = 0;
-            uint16_t sector;
-            uint16_t data_offset;
-            uint32_t sector_data_pos;
-            size_t span_remaining;
-            int err = map_read_span_position(file, &sector, &data_offset,
-                    &sector_data_pos, &span_remaining);
-            if (err == FFFS_OK && n > span_remaining) {
-                n = span_remaining;
-            }
-            if (err == FFFS_OK) {
-                err = fffs_flash_read(file->fs, (size_t)sector *
-                        file->fs->sector_size + data_offset +
-                        sector_data_pos, dst + total, n);
-            }
+            int err = fffs_flash_read(file->fs, (size_t)file->current *
+                    file->fs->sector_size + file->data_offset +
+                    file->current_data_pos, dst + total, n);
             if (err != FFFS_OK) {
                 FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_READ);
                 return err;
@@ -696,8 +658,7 @@ static int start_next_extent(struct fffs_file *file) {
     return FFFS_OK;
 }
 
-int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
-        size_t *out_written) {
+int fffs_write(struct fffs_file *file, const void *buffer, size_t size) {
     if (!file || file->closed || (!buffer && size) ||
             (file->flags & FFFS_O_WRONLY) == 0) {
         return FFFS_ERR_INVALID;
@@ -734,9 +695,6 @@ int fffs_write(struct fffs_file *file, const void *buffer, size_t size,
                 return err;
             }
         }
-    }
-    if (out_written) {
-        *out_written = size;
     }
     FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_WRITE);
     return FFFS_OK;

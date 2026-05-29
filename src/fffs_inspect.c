@@ -793,11 +793,7 @@ static int workload_write_file(struct fffs *fs, const char *name,
     if (err != FFFS_OK) {
         return err;
     }
-    size_t written = 0;
-    err = fffs_write(&file, buffer, size, &written);
-    if (err == FFFS_OK && written != size) {
-        err = FFFS_ERR_IO;
-    }
+    err = fffs_write(&file, buffer, size);
     if (err == FFFS_OK) {
         err = fffs_close(&file);
     }

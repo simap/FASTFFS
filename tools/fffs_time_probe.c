@@ -146,15 +146,14 @@ static const char *cache_mode_name(void) {
 static int write_file(struct fffs *fs, const char *name, const void *data,
         size_t size) {
     struct fffs_file file;
-    size_t written;
     int err = fffs_open(fs, &file, name,
             FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC);
     if (err != FFFS_OK) {
         return err;
     }
-    err = fffs_write(&file, data, size, &written);
-    if (err != FFFS_OK || written != size) {
-        return err == FFFS_OK ? FFFS_ERR_IO : err;
+    err = fffs_write(&file, data, size);
+    if (err != FFFS_OK) {
+        return err;
     }
     return fffs_close(&file);
 }

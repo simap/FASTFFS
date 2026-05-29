@@ -414,11 +414,7 @@ static int load_file(struct fffs *fs, const char *host_path,
     while (err == FFFS_OK) {
         size_t n = fread(buffer, 1, sizeof(buffer), in);
         if (n > 0) {
-            size_t written = 0;
-            err = fffs_write(&file, buffer, n, &written);
-            if (err == FFFS_OK && written != n) {
-                err = FFFS_ERR_IO;
-            }
+            err = fffs_write(&file, buffer, n);
         }
         if (n < sizeof(buffer)) {
             if (ferror(in)) {

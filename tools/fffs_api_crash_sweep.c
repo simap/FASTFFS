@@ -878,14 +878,10 @@ static int apply_step(struct fffs *fs, const struct api_step *step,
                 step->size > tx->size - step->offset) {
             return FFFS_ERR_INVALID;
         }
-        size_t written = 0;
         int err = fffs_write(open_file, tx->data + step->offset,
-                step->size, &written);
-        if (err == FFFS_OK && written != step->size) {
-            return FFFS_ERR_IO;
-        }
+                step->size);
         if (err == FFFS_OK) {
-            tx->written += written;
+            tx->written += step->size;
         }
         return err;
     }
