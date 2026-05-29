@@ -67,6 +67,7 @@ Variants:
   fastffs-raw-stack
   jesfs
   littlefs
+  fatfs
   spiffs
 EOF
 }
@@ -206,6 +207,13 @@ resolve_variant() {
             LOG_NAME="littlefs"
             APP_NAME="esp32s3_littlefs_bench"
             DONE_MATCH="LittleFS ESP32-S3 benchmark done"
+            ;;
+        fatfs)
+            PROJECT="esp32s3_fatfs"
+            BUILD_SUFFIX="fatfs"
+            LOG_NAME="fatfs"
+            APP_NAME="esp32s3_fatfs_bench"
+            DONE_MATCH="FATFS ESP32-S3 benchmark done"
             ;;
         spiffs)
             PROJECT="esp32s3_spiffs"

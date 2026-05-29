@@ -207,13 +207,12 @@ int fffs_tombstone_metadata_for_slot(struct fffs *fs, uint16_t sector,
         bool *accounted);
 void fffs_fsinfo_note_committed_delete(struct fffs *fs, uint32_t size);
 int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint16_t span_len,
-        uint32_t total_size, uint16_t next, uint32_t file_offset,
-        bool commit_index);
+        uint16_t data_off, uint16_t record_off, bool write_footer,
+        uint16_t data_len, uint16_t span_len, uint32_t total_size,
+        uint16_t next, uint32_t file_offset, bool commit_index);
 int fffs_begin_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint32_t file_offset);
+        uint16_t data_off, uint16_t record_off, bool write_footer,
+        uint16_t data_len, uint32_t file_offset);
 int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint16_t next, uint16_t span_len, uint32_t total_size,
         bool write_size, bool make_live, bool commit_index);

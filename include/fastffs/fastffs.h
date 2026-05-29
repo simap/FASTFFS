@@ -249,7 +249,6 @@ struct fffs_file {
     uint32_t current_data_pos;
     uint32_t cache_data_pos;
     uint32_t current_file_offset;
-    uint32_t current_sector_serial;
     size_t cache_len;
     char name[FFFS_MAX_NAME + 1];
     uint8_t cache[FFFS_FILE_CACHE_SIZE];

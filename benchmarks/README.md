@@ -40,9 +40,18 @@ ESP-IDF VFS benchmark for SPIFFS.
 - Uses `benchmarks/vfs_bench_common`.
 - `sdkconfig.defaults` pins the SPIFFS tuning used for current measurements.
 
+### `esp32s3_fatfs`
+
+ESP-IDF VFS benchmark for FatFs on the ESP-IDF wear-levelling layer.
+
+- Uses ESP-IDF's built-in FatFs VFS integration and `wear_levelling`.
+- Mounts a data partition named `storage` at `/fs`.
+- Uses `benchmarks/vfs_bench_common`.
+- Uses ESP-IDF wear-levelling defaults, including 4 KiB sectors.
+
 ## Shared VFS Workload
 
-`vfs_bench_common` is used by the LittleFS and SPIFFS projects. It measures:
+`vfs_bench_common` is used by the LittleFS, SPIFFS, and FATFS projects. It measures:
 
 - initial mount
 - format and mount
@@ -71,6 +80,7 @@ benchmarks/benchidf.sh --list
 benchmarks/benchidf.sh fastffs-default build
 benchmarks/benchidf.sh jesfs build
 benchmarks/benchidf.sh littlefs build
+benchmarks/benchidf.sh fatfs build
 benchmarks/benchidf.sh spiffs build
 ```
 
@@ -80,6 +90,7 @@ Flash and monitor one project at a time:
 benchmarks/benchidf.sh fastffs-default flash monitor
 benchmarks/benchidf.sh jesfs flash monitor
 benchmarks/benchidf.sh littlefs flash monitor
+benchmarks/benchidf.sh fatfs flash monitor
 benchmarks/benchidf.sh spiffs flash monitor
 ```
 

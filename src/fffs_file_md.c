@@ -521,11 +521,18 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     return FFFS_OK;
 }
 
+static uint32_t claim_sector_serial(struct fffs *fs) {
+    uint32_t serial = fs->next_sector_serial++;
+    if (fs->next_sector_serial == 0) {
+        fs->next_sector_serial = 1;
+    }
+    return serial;
+}
+
 static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint16_t span_len,
-        uint32_t total_size, uint16_t next, uint32_t file_offset,
-        bool is_root, bool live) {
+        uint16_t data_off, uint16_t record_off, bool write_footer,
+        uint16_t data_len, uint16_t span_len, uint32_t total_size,
+        uint16_t next, uint32_t file_offset, bool is_root, bool live) {
     struct fffs *fs = file->fs;
     uint8_t tail[FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE];
     uint8_t *md = tail;
@@ -549,7 +556,9 @@ static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
     }
     md[15] = is_root ? FFFS_MD_TYPE_FILE_ROOT_V1 :
         FFFS_MD_TYPE_FILE_CONT_V1;
-    fffs_encode_sector_footer(footer, serial, true);
+    if (write_footer) {
+        fffs_encode_sector_footer(footer, claim_sector_serial(fs), true);
+    }
 
     size_t off = (size_t)sector * fs->sector_size + record_off;
     int err = write_footer ?
@@ -571,10 +580,10 @@ static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
 }
 
 int fffs_begin_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint32_t file_offset) {
+        uint16_t data_off, uint16_t record_off, bool write_footer,
+        uint16_t data_len, uint32_t file_offset) {
     bool is_root = sector == file->head;
-    return program_extent_metadata(file, sector, serial, data_off, record_off,
+    return program_extent_metadata(file, sector, data_off, record_off,
             write_footer, data_len, 0, 0, 0, file_offset, is_root, false);
 }
 
@@ -629,14 +638,13 @@ int fffs_finish_deferred_root_metadata(struct fffs_file *file) {
 }
 
 int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint32_t serial, uint16_t data_off, uint16_t record_off,
-        bool write_footer, uint16_t data_len, uint16_t span_len,
-        uint32_t total_size, uint16_t next, uint32_t file_offset,
-        bool commit_index) {
+        uint16_t data_off, uint16_t record_off, bool write_footer,
+        uint16_t data_len, uint16_t span_len, uint32_t total_size,
+        uint16_t next, uint32_t file_offset, bool commit_index) {
     bool is_root = sector == file->head;
-    int err = program_extent_metadata(file, sector, serial, data_off,
-            record_off, write_footer, data_len, span_len, total_size, next,
-            file_offset, is_root, true);
+    int err = program_extent_metadata(file, sector, data_off, record_off,
+            write_footer, data_len, span_len, total_size, next, file_offset,
+            is_root, true);
     return err == FFFS_OK && commit_index ?
         fffs_append_index_record(file->fs, file->slot, file->head) : err;
 }

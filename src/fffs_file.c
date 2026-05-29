@@ -77,14 +77,6 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
     return true;
 }
 
-static uint32_t claim_sector_serial(struct fffs *fs) {
-    uint32_t serial = fs->next_sector_serial++;
-    if (fs->next_sector_serial == 0) {
-        fs->next_sector_serial = 1;
-    }
-    return serial;
-}
-
 static void register_inflight_writer(struct fffs_file *file) {
     if (file->inflight_registered) {
         return;
@@ -244,15 +236,6 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
         }
         file->head = sector;
         file->current = sector;
-        if (file->current_needs_footer) {
-            file->current_sector_serial = claim_sector_serial(file->fs);
-        } else {
-            err = fffs_read_sector_serial(file->fs, file->current,
-                    &file->current_sector_serial);
-            if (err != FFFS_OK) {
-                return err;
-            }
-        }
         memcpy(file->name, name, strlen(name) + 1);
         stage_root_prefix(file, name);
         file->span_head = file->current;
@@ -614,7 +597,6 @@ static int start_next_extent(struct fffs_file *file) {
     uint16_t old_data_offset = file->data_offset;
     uint16_t old_metadata_offset = file->current_metadata_offset;
     bool old_needs_footer = file->current_needs_footer;
-    uint32_t old_sector_serial = file->current_sector_serial;
     uint32_t old_file_offset = file->current_file_offset;
 
     uint16_t next_sector;
@@ -627,16 +609,16 @@ static int start_next_extent(struct fffs_file *file) {
         pending_span_len(file) < UINT16_MAX;
     uint32_t next_file_offset = old_file_offset + old_data_len;
     if (old_sector == file->span_head) {
-        err = fffs_begin_extent_metadata(file, old_sector, old_sector_serial,
-                old_data_offset, old_metadata_offset, old_needs_footer,
-                old_data_len, old_file_offset);
+        err = fffs_begin_extent_metadata(file, old_sector, old_data_offset,
+                old_metadata_offset, old_needs_footer, old_data_len,
+                old_file_offset);
         if (err != FFFS_OK) {
             return err;
         }
     } else {
-        err = fffs_write_extent_metadata(file, old_sector, old_sector_serial,
-                old_data_offset, old_metadata_offset, old_needs_footer,
-                old_data_len, 1, 0, next_sector, old_file_offset, false);
+        err = fffs_write_extent_metadata(file, old_sector, old_data_offset,
+                old_metadata_offset, old_needs_footer, old_data_len, 1, 0,
+                next_sector, old_file_offset, false);
         if (err != FFFS_OK) {
             return err;
         }
@@ -649,15 +631,6 @@ static int start_next_extent(struct fffs_file *file) {
     }
 
     file->current = next_sector;
-    if (file->current_needs_footer) {
-        file->current_sector_serial = claim_sector_serial(file->fs);
-    } else {
-        err = fffs_read_sector_serial(file->fs, file->current,
-                &file->current_sector_serial);
-        if (err != FFFS_OK) {
-            return err;
-        }
-    }
     file->current_data_len = 0;
     file->current_next = 0;
     file->current_file_offset = next_file_offset;
@@ -736,16 +709,15 @@ int fffs_close(struct fffs_file *file) {
         if (err == FFFS_OK) {
             if (file->current == file->span_head) {
                 err = fffs_begin_extent_metadata(file, file->current,
-                        file->current_sector_serial, file->data_offset,
-                        file->current_metadata_offset,
-                        file->current_needs_footer, file->current_data_len,
-                        file->current_file_offset);
+                        file->data_offset, file->current_metadata_offset,
+                        file->current_needs_footer,
+                        file->current_data_len, file->current_file_offset);
             } else {
                 err = fffs_write_extent_metadata(file, file->current,
-                        file->current_sector_serial, file->data_offset,
-                        file->current_metadata_offset,
-                        file->current_needs_footer, file->current_data_len,
-                        1, 0, 0, file->current_file_offset, false);
+                        file->data_offset, file->current_metadata_offset,
+                        file->current_needs_footer,
+                        file->current_data_len, 1, 0, 0,
+                        file->current_file_offset, false);
             }
         }
         if (err == FFFS_OK) {
