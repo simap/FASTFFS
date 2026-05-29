@@ -85,7 +85,7 @@ static int assigned_sector_serial(struct fffs_file *file, uint32_t *serial) {
         *serial = claim_sector_serial(file->fs);
         return FFFS_OK;
     }
-    return fffs_read_sector_footer(file->fs, file->current, serial);
+    return fffs_read_sector_serial(file->fs, file->current, serial);
 }
 
 static void register_inflight_writer(struct fffs_file *file) {

@@ -130,10 +130,18 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    uint8_t footer_bytes[FFFS_SECTOR_FOOTER_SIZE];
+    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
+    struct fffs_sector_reader window = {
+        .data = window_buf,
+        .capacity = sizeof(window_buf),
+        .sector = (uint16_t)s,
+        .reverse = true,
+    };
+    const uint8_t *footer_bytes;
     FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_GC_FOOTER_STATE);
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, (uint16_t)s),
-            footer_bytes, sizeof(footer_bytes));
+    int err = fffs_sector_reader_view(fs, &window, (uint16_t)s,
+            fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE, &footer_bytes);
     FFFS_PROFILE_POP(fs, FFFS_PROFILE_GC_FOOTER_STATE);
     if (err != FFFS_OK) {
         return err;
@@ -201,21 +209,19 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         return FFFS_OK;
     }
 
-    uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
-    struct fffs_md_read_window window = {
-        .data = window_buf,
-        .capacity = sizeof(window_buf),
-        .sector = (uint16_t)s,
-    };
+    enum fffs_md_walk_result walk_result;
     if (!fs->gc_md.active || fs->gc_md.sector != s) {
-        err = fffs_md_walk_init(fs, &fs->gc_md, (uint16_t)s, &window);
+        err = fffs_md_walk_init(fs, &fs->gc_md, (uint16_t)s, &window,
+                &walk_result);
         if (err != FFFS_OK) {
             return err;
+        }
+        if (walk_result != FFFS_MD_WALK_RECORD) {
+            return FFFS_ERR_CORRUPT;
         }
     }
 
     struct fffs_md_record record;
-    enum fffs_md_walk_result walk_result;
     err = fffs_md_walk_next(fs, &fs->gc_md, &window, &record, &walk_result);
     if (err == FFFS_ERR_CORRUPT) {
         fs->gc_md.active = false;

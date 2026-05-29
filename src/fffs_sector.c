@@ -43,28 +43,35 @@ void fffs_decode_sector_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
     };
 }
 
-int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
+int fffs_read_sector_serial(struct fffs *fs, uint16_t sector,
         uint32_t *serial) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
         return FFFS_ERR_CORRUPT;
     }
 
-    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
-    int err = fffs_flash_read(fs, fffs_sector_footer_offset(fs, sector),
-            footer, sizeof(footer));
+    uint8_t reader_buf[FFFS_SECTOR_FOOTER_SIZE];
+    struct fffs_sector_reader reader = {
+        .data = reader_buf,
+        .capacity = sizeof(reader_buf),
+        .reverse = true,
+    };
+    const uint8_t *footer;
+    int err = fffs_sector_reader_view(fs, &reader, sector,
+            fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE, &footer);
     if (err != FFFS_OK) {
         return err;
     }
     struct fffs_sector_footer view;
     fffs_decode_sector_footer(footer, &view);
     if (view.type != FFFS_SECTOR_TYPE_FILE || !view.magic_valid) {
-        return FFFS_ERR_NO_SPACE;
+        return FFFS_ERR_CORRUPT;
     }
     bool live = fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits);
     bool tombstoned = view.valid_bits != FFFS_BITMIRROR_MIXED &&
         view.tombstone_bits == FFFS_BITMIRROR_CLEARED;
     if (!live && !tombstoned) {
-        return FFFS_ERR_NO_SPACE;
+        return FFFS_ERR_CORRUPT;
     }
     if (serial) {
         *serial = view.serial;

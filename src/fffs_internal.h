@@ -188,7 +188,7 @@ struct fffs_sector_footer {
 };
 void fffs_decode_sector_footer(const uint8_t footer[FFFS_SECTOR_FOOTER_SIZE],
         struct fffs_sector_footer *view);
-int fffs_read_sector_footer(struct fffs *fs, uint16_t sector,
+int fffs_read_sector_serial(struct fffs *fs, uint16_t sector,
         uint32_t *serial);
 int fffs_write_sector_footer(struct fffs *fs, uint16_t sector,
         uint32_t serial);
@@ -244,21 +244,26 @@ struct fffs_md_record {
     size_t record_start;
     size_t record_len;
 };
-struct fffs_md_read_window {
+struct fffs_sector_reader {
     uint8_t *data;
     size_t capacity;
     uint16_t sector;
     size_t start;
     size_t len;
+    bool reverse;
 };
+int fffs_sector_reader_view(struct fffs *fs,
+        struct fffs_sector_reader *reader, uint16_t sector, size_t offset,
+        size_t size, const uint8_t **out);
 typedef int (*fffs_md_record_visitor)(struct fffs *fs,
         const struct fffs_md_record *record, void *ctx);
 int fffs_visit_metadata_records(struct fffs *fs, uint16_t sector,
         fffs_md_record_visitor visitor, void *ctx);
 int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
-        uint16_t sector, struct fffs_md_read_window *window);
+        uint16_t sector, struct fffs_sector_reader *window,
+        enum fffs_md_walk_result *result);
 int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
-        struct fffs_md_read_window *window, struct fffs_md_record *record,
+        struct fffs_sector_reader *window, struct fffs_md_record *record,
         enum fffs_md_walk_result *result);
 
 void fffs_bitset_clear(uint32_t *words, size_t word_count);

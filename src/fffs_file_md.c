@@ -63,76 +63,18 @@ static int read_root_prefix(struct fffs *fs, uint16_t sector,
     return FFFS_OK;
 }
 
-static int file_md_reader_load(struct fffs *fs,
-        struct fffs_md_read_window *reader, size_t offset, size_t size) {
-    if (offset >= reader->start &&
-            offset + size <= reader->start + reader->len) {
-        return FFFS_OK;
-    }
-
-    size_t sector_base = (size_t)reader->sector * fs->sector_size;
-    size_t sector_end = sector_base + fs->sector_size;
-    size_t capacity = reader->capacity;
-    if (capacity > FFFS_MD_PRELOAD_MAX) {
-        capacity = FFFS_MD_PRELOAD_MAX;
-    }
-    if (size > capacity || offset < sector_base || offset + size > sector_end) {
-        return FFFS_ERR_CORRUPT;
-    }
-
-    size_t end = offset + size;
-    size_t base = sector_base;
-    if (end > sector_base + capacity) {
-        base = end - capacity;
-    }
-    size_t nread = sector_end - base;
-    if (nread > capacity) {
-        nread = capacity;
-    }
-    int err = fffs_flash_read(fs, base, reader->data, nread);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    reader->start = base;
-    reader->len = nread;
-    return FFFS_OK;
-}
-
-static int file_md_reader_read(struct fffs *fs,
-        struct fffs_md_read_window *reader, size_t offset, void *out,
-        size_t size) {
-    int err = file_md_reader_load(fs, reader, offset, size);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    memcpy(out, reader->data + (offset - reader->start), size);
-    return FFFS_OK;
-}
-
-static int file_md_reader_view(struct fffs *fs,
-        struct fffs_md_read_window *reader, size_t offset, size_t size,
-        const uint8_t **out) {
-    int err = file_md_reader_load(fs, reader, offset, size);
-    if (err != FFFS_OK) {
-        return err;
-    }
-    *out = reader->data + (offset - reader->start);
-    return FFFS_OK;
-}
-
 static int decode_file_md_record(struct fffs *fs,
-        struct fffs_md_read_window *reader, size_t cursor,
+        struct fffs_sector_reader *reader, uint16_t sector, size_t cursor,
         struct fffs_md_record *record, enum fffs_md_walk_result *result) {
     *result = FFFS_MD_WALK_END_INVALID;
     memset(record, 0, sizeof(*record));
-    uint8_t type;
-    int err = file_md_reader_read(fs, reader,
-            (size_t)reader->sector * fs->sector_size + cursor - 1u,
-            &type, sizeof(type));
+    const uint8_t *type;
+    int err = fffs_sector_reader_view(fs, reader, sector, cursor - 1u,
+            sizeof(*type), &type);
     if (err != FFFS_OK) {
         return err;
     }
-    if (type == 0xff) {
+    if (*type == 0xff) {
         *result = FFFS_MD_WALK_END_ERASED;
         return FFFS_OK;
     }
@@ -142,21 +84,20 @@ static int decode_file_md_record(struct fffs *fs,
         return FFFS_ERR_CORRUPT;
     }
     size_t record_start = cursor - record_len;
-    record->type = type;
+    record->type = *type;
     record->record_start = record_start;
     record->record_len = record_len;
 
-    if (type == FFFS_MD_TYPE_FILE_ROOT_V1 ||
-            type == FFFS_MD_TYPE_FILE_CONT_V1) {
+    if (*type == FFFS_MD_TYPE_FILE_ROOT_V1 ||
+            *type == FFFS_MD_TYPE_FILE_CONT_V1) {
         /* Current file metadata records have one fixed size. */
     } else {
         return FFFS_OK;
     }
 
-    uint8_t buf[FFFS_MD_FILE_RECORD_SIZE];
-    err = file_md_reader_read(fs, reader,
-            (size_t)reader->sector * fs->sector_size + record_start,
-            buf, record_len);
+    const uint8_t *buf;
+    err = fffs_sector_reader_view(fs, reader, sector, record_start,
+            record_len, &buf);
     if (err != FFFS_OK) {
         return err;
     }
@@ -187,7 +128,7 @@ static int decode_file_md_record(struct fffs *fs,
     }
     if (!uncommitted) {
         if (record->span_len == 0 ||
-                (size_t)reader->sector + record->span_len >
+                (size_t)sector + record->span_len >
                     fs->sector_count) {
             return FFFS_OK;
         }
@@ -207,7 +148,7 @@ static bool valid_data_sector(const struct fffs *fs, uint16_t sector) {
 
 struct md_record_iter {
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
-    struct fffs_md_read_window window;
+    struct fffs_sector_reader window;
     struct fffs_md_walk walk;
     int erased_status;
     int invalid_status;
@@ -217,16 +158,30 @@ struct md_record_iter {
 static int md_record_iter_init(struct md_record_iter *iter,
         struct fffs *fs, uint16_t sector, int erased_status,
         int invalid_status, int claimed_status) {
+    enum fffs_md_walk_result result;
     *iter = (struct md_record_iter){
         .window = {
             .data = iter->window_buf,
             .capacity = sizeof(iter->window_buf),
+            .reverse = true,
         },
         .erased_status = erased_status,
         .invalid_status = invalid_status,
         .end_status = claimed_status,
     };
-    return fffs_md_walk_init(fs, &iter->walk, sector, &iter->window);
+    int err = fffs_md_walk_init(fs, &iter->walk, sector, &iter->window,
+            &result);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    if (result == FFFS_MD_WALK_END_ERASED) {
+        iter->end_status = erased_status;
+    } else if (result == FFFS_MD_WALK_END_INVALID) {
+        iter->end_status = invalid_status;
+    } else if (result == FFFS_MD_WALK_END_CLAIMED_DATA) {
+        iter->end_status = claimed_status;
+    }
+    return FFFS_OK;
 }
 
 static int md_record_iter_next(struct md_record_iter *iter,
@@ -259,39 +214,46 @@ static int md_record_iter_finish(const struct md_record_iter *iter,
 }
 
 int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
-        uint16_t sector, struct fffs_md_read_window *window) {
-    if (!fs || !walk || !window || !window->data ||
+        uint16_t sector, struct fffs_sector_reader *window,
+        enum fffs_md_walk_result *result) {
+    if (!fs || !walk || !window || !window->data || !result ||
             window->capacity < FFFS_MD_FILE_RECORD_SIZE +
                 FFFS_SECTOR_FOOTER_SIZE ||
             sector < fs->index_sectors || sector >= fs->sector_count) {
         return FFFS_ERR_INVALID;
     }
-
-    if (window->sector != sector) {
-        window->start = 0;
-        window->len = 0;
-    }
-    window->sector = sector;
+    *result = FFFS_MD_WALK_END_INVALID;
+    *walk = (struct fffs_md_walk){
+        .sector = sector,
+    };
 
     const uint8_t *footer;
     FFFS_PROFILE_PUSH(fs, FFFS_PROFILE_READ_METADATA);
-    int err = file_md_reader_view(fs, window,
-            fffs_sector_footer_offset(fs, sector), FFFS_SECTOR_FOOTER_SIZE,
-            &footer);
+    int err = fffs_sector_reader_view(fs, window, sector,
+            fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE, &footer);
     FFFS_PROFILE_POP(fs, FFFS_PROFILE_READ_METADATA);
     if (err != FFFS_OK) {
         return err;
     }
     struct fffs_sector_footer view;
     fffs_decode_sector_footer(footer, &view);
+    if (view.erased) {
+        *result = FFFS_MD_WALK_END_ERASED;
+        return FFFS_OK;
+    }
     if (view.type != FFFS_SECTOR_TYPE_FILE || !view.magic_valid) {
-        return FFFS_ERR_CORRUPT;
+        return FFFS_OK;
     }
     bool live = fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits);
     bool tombstoned = view.valid_bits != FFFS_BITMIRROR_MIXED &&
         view.tombstone_bits == FFFS_BITMIRROR_CLEARED;
     if (!live && !tombstoned) {
-        return FFFS_ERR_CORRUPT;
+        return FFFS_OK;
+    }
+    if (tombstoned) {
+        *result = FFFS_MD_WALK_END_CLAIMED_DATA;
+        return FFFS_OK;
     }
 
     walk->cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE;
@@ -299,11 +261,12 @@ int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
     walk->sector = sector;
     walk->live_seen = false;
     walk->active = live;
+    *result = FFFS_MD_WALK_RECORD;
     return FFFS_OK;
 }
 
 int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
-        struct fffs_md_read_window *window, struct fffs_md_record *record,
+        struct fffs_sector_reader *window, struct fffs_md_record *record,
         enum fffs_md_walk_result *result) {
     if (!fs || !walk || !window || !record || !result ||
             !walk->active || walk->sector != window->sector) {
@@ -316,7 +279,8 @@ int fffs_md_walk_next(struct fffs *fs, struct fffs_md_walk *walk,
         return FFFS_OK;
     }
 
-    int err = decode_file_md_record(fs, window, walk->cursor, record, result);
+    int err = decode_file_md_record(fs, window, walk->sector, walk->cursor,
+            record, result);
     if (err != FFFS_OK) {
         return err;
     }
@@ -492,15 +456,15 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     }
 
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
-    struct fffs_md_read_window window = {
+    struct fffs_sector_reader window = {
         .data = window_buf,
         .capacity = sizeof(window_buf),
-        .sector = sector,
+        .reverse = true,
     };
     const uint8_t *footer;
-    int err = file_md_reader_view(fs, &window,
-            fffs_sector_footer_offset(fs, sector), FFFS_SECTOR_FOOTER_SIZE,
-            &footer);
+    int err = fffs_sector_reader_view(fs, &window, sector,
+            fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE, &footer);
     if (err != FFFS_OK) {
         return err;
     }
@@ -537,9 +501,13 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     size_t metadata_start = footer_off;
     size_t record_count = 0;
     struct fffs_md_walk walk;
-    err = fffs_md_walk_init(fs, &walk, sector, &window);
+    enum fffs_md_walk_result init_result;
+    err = fffs_md_walk_init(fs, &walk, sector, &window, &init_result);
     if (err != FFFS_OK) {
-        return err == FFFS_ERR_CORRUPT ? FFFS_ERR_NO_SPACE : err;
+        return err;
+    }
+    if (init_result != FFFS_MD_WALK_RECORD) {
+        return FFFS_ERR_NO_SPACE;
     }
     while (walk.active) {
         struct fffs_md_record record;

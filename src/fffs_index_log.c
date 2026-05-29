@@ -698,7 +698,7 @@ static void recover_allocator_hint(struct fffs *fs, uint16_t head) {
             return;
         }
 
-        err = fffs_read_sector_footer(fs, (uint16_t)sector, &serial);
+        err = fffs_read_sector_serial(fs, (uint16_t)sector, &serial);
         if (err == FFFS_OK) {
             if (serial >= fs->next_sector_serial) {
                 fs->next_sector_serial = serial + 1;
