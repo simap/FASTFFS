@@ -134,8 +134,8 @@ DEPS = $(ALL_OBJS:.o=.d)
 	test-timing-nocache-small-scratch test-timing-compare test-churn \
 	test-churn-small-files test-churn-small-files-full test-churn-full-index \
 	test-churn-nocache test-workload \
-	test-crash-sweep test-api-crash-sweep test-sanitize test-full-index \
-	test-nocache test-full-alloc-map clean
+	test-crash-sweep test-api-crash-sweep test-compaction-stack-usage \
+	test-sanitize test-full-index test-nocache test-full-alloc-map clean
 
 all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe \
@@ -239,6 +239,24 @@ test-crash-sweep: $(BUILD_DIR)/fffs_crash_sweep
 
 test-api-crash-sweep: $(BUILD_DIR)/fffs_api_crash_sweep
 	./$(BUILD_DIR)/fffs_api_crash_sweep -s 0x46464653 -n 1 -t 50 -w 2 -j 1
+
+test-compaction-stack-usage:
+	@$(MAKE) -s BUILD_DIR=$(BUILD_ROOT)/compaction-stack-usage \
+		CFLAGS="$(CFLAGS) -fstack-usage" \
+		$(BUILD_ROOT)/compaction-stack-usage/test_fastffs
+	@printf 'compaction stack usage (compiler static bytes):\n'
+	@awk 'BEGIN { printf "%-44s %8s %s\n", "function", "bytes", "kind" } \
+	    /fffs_gc_until_erased|gc_compact_until_erased|gc_compact_root_only_sector|gc_copy_root_record|gc_copy_root_data|gc_tombstone_copied_roots|gc_update_compaction_candidate|gc_classify_record|fffs_alloc_find_compaction_root_window|fffs_find_sector_free_window|fffs_program_extent_metadata|fffs_md_walk_init|fffs_md_walk_next|fffs_tombstone_metadata_for_slot|fffs_sector_reader_view|fffs_flash_read|fffs_flash_program_aligned|fffs_append_index_record|fffs_index_insert/ { \
+	        n = split($$1, loc, ":"); \
+	        printf "%-44s %8s %s\n", loc[n], $$2, $$3; \
+	    }' \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_gc.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_alloc.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_file_md.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_sector_reader.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_flash.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_index_log.su \
+	    $(BUILD_ROOT)/compaction-stack-usage/src/fffs_hashtable_index.su
 
 test-sanitize:
 	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/sanitize CFLAGS="$(CFLAGS) $(SANITIZE_CFLAGS)" test

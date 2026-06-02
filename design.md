@@ -782,7 +782,7 @@ using the open/in flight file data to see what sectors are not fully written,
 and by skipping over sectors that are reserved for or currently used by open
 writers.
 
-Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or there were none to free. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
+Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or all reservations were already zero. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
 
 ## Expected Performance
 

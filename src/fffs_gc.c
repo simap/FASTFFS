@@ -11,8 +11,6 @@
 
 #include <string.h>
 
-static int gc_classify_record(struct fffs *fs, size_t sector,
-        const struct fffs_md_record *record, bool *live);
 
 static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
     if (sector < fs->index_sectors || sector >= fs->sector_count) {
@@ -21,6 +19,11 @@ static size_t normalized_data_cursor(struct fffs *fs, size_t sector) {
     return sector;
 }
 
+/*
+ * GC-step liveness helper. This is split out only so gc_classify_record() and
+ * the paranoid GC check can walk a current file chain without burying the
+ * sector scan logic.
+ */
 static int sector_is_reachable_from_chain(struct fffs *fs, uint16_t slot,
         uint16_t head, size_t sector, bool *reachable) {
     uint16_t current = head;
@@ -233,14 +236,13 @@ static int gc_tombstone_copied_roots(struct fffs *fs, uint16_t sector,
             break;
         }
         if (record.live && record.type == FFFS_MD_TYPE_FILE_ROOT_V1) {
-            bool record_live = false;
-            err = gc_classify_record(fs, sector, &record, &record_live);
+            bool accounted = false;
+            err = fffs_tombstone_metadata_for_slot(fs, sector, record.slot,
+                    FFFS_TOMBSTONE_NO_ACCOUNTING, &accounted);
             if (err != FFFS_OK) {
                 return err;
             }
-            if (!record_live) {
-                fffs_alloc_map_mark_unknown(fs, sector);
-            }
+            fffs_alloc_map_mark_unknown(fs, sector);
         }
         entry++;
     }
@@ -279,12 +281,7 @@ static int gc_compact_root_only_sector(struct fffs *fs, uint16_t source_sector,
             break;
         }
 
-        bool record_live = false;
-        err = gc_classify_record(fs, source_sector, &record, &record_live);
-        if (err != FFFS_OK) {
-            goto fail;
-        }
-        if (record_live) {
+        if (record.live) {
             if (record.type != FFFS_MD_TYPE_FILE_ROOT_V1 ||
                     fffs_slot_is_inflight(fs, record.slot)) {
                 err = FFFS_ERR_NO_SPACE;
@@ -371,6 +368,12 @@ static int gc_paranoid_sector_is_reachable_from_any_chain(struct fffs *fs,
 }
 #endif
 
+/*
+ * Core gc_step liveness classifier. This is not a general-purpose helper:
+ * gc_step() uses it while scanning sector metadata to decide whether a
+ * live-looking record is still reachable from the current index chain, and to
+ * tombstone records that are not.
+ */
 static int gc_classify_record(struct fffs *fs, size_t sector,
         const struct fffs_md_record *record, bool *live) {
     if (!record->live) {
@@ -432,6 +435,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
+    if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
+        fs->gc_cursor = fffs_next_data_sector(fs, s);
+        fs->gc_md.live_seen = true;
+        fs->gc_md.active = false;
+        if (out_action) {
+            *out_action = FFFS_GC_SCANNED;
+        }
+        return FFFS_OK;
+    }
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
     struct fffs_sector_reader window = {
         .data = window_buf,
@@ -460,8 +472,9 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
             fffs_alloc_map_mark_unknown(fs, (uint16_t)s);
             fs->gc_cursor = fffs_next_data_sector(fs, s);
             fs->gc_md.live_seen = false;
+            fs->gc_md.active = false;
             if (out_action) {
-                *out_action = FFFS_GC_SCANNED;
+                *out_action = FFFS_GC_ERASED;
             }
             return FFFS_OK;
         }
@@ -482,15 +495,6 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         full_hint = footer.full_bits == FFFS_BITMIRROR_CLEARED;
     }
 
-    if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
-        fs->gc_cursor = fffs_next_data_sector(fs, s);
-        fs->gc_md.live_seen = true;
-        fs->gc_md.active = false;
-        if (out_action) {
-            *out_action = FFFS_GC_SCANNED;
-        }
-        return FFFS_OK;
-    }
     if (erase_sector) {
         err = fffs_map_backend_status(fs->backend.erase(fs->backend.ctx,
                     s * fs->sector_size, fs->sector_size));

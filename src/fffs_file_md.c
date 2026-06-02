@@ -579,7 +579,10 @@ int fffs_program_extent_metadata(struct fffs *fs, uint16_t sector,
     if (err != FFFS_OK) {
         return err;
     }
-    if ((size_t)data_off + data_len >= record_off) {
+    size_t data_end = (size_t)data_off + data_len;
+    bool low_free = data_end >= record_off ||
+        record_off - data_end < FFFS_ALLOC_MIN_USABLE_FREE;
+    if (type == FFFS_MD_TYPE_FILE_CONT_V1 || low_free) {
         err = fffs_mark_sector_full(fs, sector);
         if (err != FFFS_OK) {
             return err;
@@ -638,8 +641,21 @@ int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
             return err;
         }
     }
-    return commit_index ? fffs_append_index_record(file->fs, file->slot,
-            file->head) : FFFS_OK;
+    if (commit_index) {
+        err = fffs_append_index_record(file->fs, file->slot, file->head);
+        if (err != FFFS_OK) {
+            return err;
+        }
+    }
+    // A root only gets continuation data after this sector overflowed, so this sector is full.
+    if (sector == file->head && (next != 0 || span_len > 1)) {
+        err = fffs_mark_sector_full(file->fs, sector);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        fffs_alloc_map_mark_used(file->fs, sector);
+    }
+    return FFFS_OK;
 }
 
 int fffs_finish_deferred_root_metadata(struct fffs_file *file) {

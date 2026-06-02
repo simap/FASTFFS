@@ -127,6 +127,10 @@ static bool sector_can_be_reserved(struct fffs_file *file, uint16_t sector) {
 }
 #endif
 
+/*
+ * Returns true only if at least one reserved sector was released. If false is
+ * returned, all open writer reservations were already empty.
+ */
 static bool halve_reservations(struct fffs *fs) {
     bool releasedAny = false;
     for (struct fffs_file *file = fs->inflight_writers; file;
