@@ -7,6 +7,32 @@
 #include <stdio.h>
 #include <string.h>
 
+static const bench_churn_profile_t default_profile = {
+    .name_prefix = "w",
+    .replace_percent = 25,
+    .protect_first_large = true,
+    .classes = {
+        [BENCH_CHURN_CLASS_SMALL] = {
+            .name = "small_10_20k",
+            .weight = 800,
+            .min_size = 10u * 1024u,
+            .max_size = 20u * 1024u,
+        },
+        [BENCH_CHURN_CLASS_MEDIUM] = {
+            .name = "medium_20_60k",
+            .weight = 150,
+            .min_size = 20u * 1024u,
+            .max_size = 60u * 1024u,
+        },
+        [BENCH_CHURN_CLASS_LARGE] = {
+            .name = "large_350k",
+            .weight = 50,
+            .min_size = 350u * 1024u,
+            .max_size = 350u * 1024u,
+        },
+    },
+};
+
 static uint32_t prng_next(bench_churn_model_t *model)
 {
     model->state = model->state * 1664525u + 1013904223u;
@@ -16,24 +42,40 @@ static uint32_t prng_next(bench_churn_model_t *model)
 static uint32_t choose_churn_size(bench_churn_model_t *model,
                                   bench_churn_class_t *cls)
 {
-    uint32_t r = prng_next(model) % 1000u;
-    if (r < 800u) {
+    uint32_t total_weight = 0;
+    for (int i = 0; i < BENCH_CHURN_CLASS_COUNT; ++i) {
+        total_weight += model->profile.classes[i].weight;
+    }
+    if (total_weight == 0) {
         *cls = BENCH_CHURN_CLASS_SMALL;
-        return (10u * 1024u) + (prng_next(model) % (10u * 1024u + 1u));
+        return 0;
     }
-    if (r < 950u) {
-        *cls = BENCH_CHURN_CLASS_MEDIUM;
-        return (20u * 1024u) + (prng_next(model) % (40u * 1024u + 1u));
+
+    uint32_t r = prng_next(model) % total_weight;
+    for (int i = 0; i < BENCH_CHURN_CLASS_COUNT; ++i) {
+        const bench_churn_class_profile_t *profile =
+            &model->profile.classes[i];
+        if (r >= profile->weight) {
+            r -= profile->weight;
+            continue;
+        }
+        *cls = (bench_churn_class_t)i;
+        if (profile->max_size <= profile->min_size) {
+            return profile->min_size;
+        }
+        return profile->min_size +
+            (prng_next(model) % (profile->max_size - profile->min_size + 1u));
     }
-    *cls = BENCH_CHURN_CLASS_LARGE;
-    return 350u * 1024u;
+
+    *cls = BENCH_CHURN_CLASS_SMALL;
+    return model->profile.classes[BENCH_CHURN_CLASS_SMALL].min_size;
 }
 
 static int find_free_slot(const bench_churn_model_t *model)
 {
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
         if (!model->slots[i].live) {
-            return i;
+            return (int)i;
         }
     }
     return -1;
@@ -42,8 +84,8 @@ static int find_free_slot(const bench_churn_model_t *model)
 static int choose_live_slot(bench_churn_model_t *model)
 {
     int live_count = 0;
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
-        if (model->slots[i].live && i != model->protected_large_slot) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
+        if (model->slots[i].live && (int)i != model->protected_large_slot) {
             live_count++;
         }
     }
@@ -56,11 +98,11 @@ static int choose_live_slot(bench_churn_model_t *model)
     }
 
     int target = (int)(prng_next(model) % (uint32_t)live_count);
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
         if (model->slots[i].live &&
-            i != model->protected_large_slot &&
+            (int)i != model->protected_large_slot &&
             target-- == 0) {
-            return i;
+            return (int)i;
         }
     }
     return -1;
@@ -75,8 +117,8 @@ static uint32_t delete_weight(const bench_churn_slot_t *slot)
 static int choose_delete_slot(bench_churn_model_t *model)
 {
     uint32_t total_weight = 0;
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
-        if (model->slots[i].live && i != model->protected_large_slot) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
+        if (model->slots[i].live && (int)i != model->protected_large_slot) {
             total_weight += delete_weight(&model->slots[i]);
         }
     }
@@ -89,13 +131,13 @@ static int choose_delete_slot(bench_churn_model_t *model)
     }
 
     uint32_t target = prng_next(model) % total_weight;
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
-        if (!model->slots[i].live || i == model->protected_large_slot) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
+        if (!model->slots[i].live || (int)i == model->protected_large_slot) {
             continue;
         }
         uint32_t weight = delete_weight(&model->slots[i]);
         if (target < weight) {
-            return i;
+            return (int)i;
         }
         target -= weight;
     }
@@ -128,7 +170,8 @@ static void fill_write_event(const bench_churn_model_t *model,
     if (event->replacing) {
         snprintf(event->name, sizeof(event->name), "%s", slot->name);
     } else {
-        snprintf(event->name, sizeof(event->name), "w%04d-%08x.bin",
+        snprintf(event->name, sizeof(event->name), "%s%04d-%08x.bin",
+                 model->profile.name_prefix ? model->profile.name_prefix : "w",
                  model->pending_slot, event->write_seed);
     }
 }
@@ -139,6 +182,11 @@ static void sample_live_file_count(bench_churn_model_t *model)
     model->live_file_samples++;
 }
 
+const bench_churn_profile_t *bench_churn_default_profile(void)
+{
+    return &default_profile;
+}
+
 void bench_churn_model_init(bench_churn_model_t *model,
                             uint32_t seed,
                             uint32_t target_live_bytes,
@@ -146,7 +194,32 @@ void bench_churn_model_init(bench_churn_model_t *model,
                             uint32_t target_slack_bytes,
                             uint32_t force_large_after_bytes)
 {
+    (void)bench_churn_model_init_profile(model, seed, target_live_bytes,
+                                         target_written_bytes,
+                                         target_slack_bytes,
+                                         force_large_after_bytes,
+                                         &default_profile,
+                                         model->default_slots,
+                                         BENCH_CHURN_MAX_FILES);
+}
+
+int bench_churn_model_init_profile(bench_churn_model_t *model,
+                                   uint32_t seed,
+                                   uint32_t target_live_bytes,
+                                   uint32_t target_written_bytes,
+                                   uint32_t target_slack_bytes,
+                                   uint32_t force_large_after_bytes,
+                                   const bench_churn_profile_t *profile,
+                                   bench_churn_slot_t *slots,
+                                   uint32_t slot_count)
+{
     memset(model, 0, sizeof(*model));
+    if (!profile) {
+        profile = &default_profile;
+    }
+    if (!slots || slot_count == 0) {
+        return -1;
+    }
     model->seed = seed;
     model->state = seed;
     model->target_live_bytes = target_live_bytes;
@@ -155,6 +228,11 @@ void bench_churn_model_init(bench_churn_model_t *model,
     model->force_large_after_bytes = force_large_after_bytes;
     model->pending_slot = -1;
     model->protected_large_slot = -1;
+    model->profile = *profile;
+    model->slot_count = slot_count;
+    model->slots = slots;
+    memset(model->slots, 0, sizeof(model->slots[0]) * model->slot_count);
+    return 0;
 }
 
 bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
@@ -207,7 +285,7 @@ bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
     }
 
     if (!model->slot_chosen) {
-        if ((prng_next(model) % 100u) < 25u) {
+        if ((prng_next(model) % 100u) < model->profile.replace_percent) {
             int slot = choose_live_slot(model);
             if (slot >= 0) {
                 model->pending_slot = slot;
@@ -272,7 +350,8 @@ void bench_churn_model_apply(bench_churn_model_t *model,
         slot->size = event->size;
         slot->write_seed = event->write_seed;
         snprintf(slot->name, sizeof(slot->name), "%s", event->name);
-        if (event->cls == BENCH_CHURN_CLASS_LARGE &&
+        if (model->profile.protect_first_large &&
+            event->cls == BENCH_CHURN_CLASS_LARGE &&
             model->protected_large_slot < 0) {
             model->protected_large_slot = event->slot;
         }
@@ -294,11 +373,11 @@ const char *bench_churn_class_name(bench_churn_class_t cls)
 {
     switch (cls) {
     case BENCH_CHURN_CLASS_SMALL:
-        return "small_10_20k";
+        return default_profile.classes[BENCH_CHURN_CLASS_SMALL].name;
     case BENCH_CHURN_CLASS_MEDIUM:
-        return "medium_20_60k";
+        return default_profile.classes[BENCH_CHURN_CLASS_MEDIUM].name;
     case BENCH_CHURN_CLASS_LARGE:
-        return "large_350k";
+        return default_profile.classes[BENCH_CHURN_CLASS_LARGE].name;
     default:
         return "unknown";
     }

@@ -174,9 +174,20 @@ struct fffs_fsinfo {
 struct fffs_md_walk {
     size_t cursor;
     size_t claimed_data_end;
+    uint32_t live_bytes;
     uint16_t sector;
+    uint16_t live_root_count;
     bool live_seen;
+    bool live_root_seen;
+    bool live_continuation_seen;
+    bool inflight_seen;
     bool active;
+};
+
+struct fffs_compaction_candidate {
+    uint16_t sector;
+    uint16_t trapped_reclaimable;
+    uint16_t live_root_count;
 };
 
 struct fffs {
@@ -210,6 +221,8 @@ struct fffs {
     size_t alloc_cursor;
     size_t gc_cursor;
     struct fffs_md_walk gc_md;
+    struct fffs_compaction_candidate
+        compaction_candidates[FFFS_COMPACTION_CANDIDATE_COUNT];
     bool strict;
     uint32_t next_sector_serial;
     uint32_t fsinfo_valid_flags;

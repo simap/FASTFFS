@@ -51,6 +51,20 @@ typedef struct {
 } bench_churn_event_t;
 
 typedef struct {
+    const char *name;
+    uint32_t weight;
+    uint32_t min_size;
+    uint32_t max_size;
+} bench_churn_class_profile_t;
+
+typedef struct {
+    const char *name_prefix;
+    uint32_t replace_percent;
+    bool protect_first_large;
+    bench_churn_class_profile_t classes[BENCH_CHURN_CLASS_COUNT];
+} bench_churn_profile_t;
+
+typedef struct {
     uint32_t seed;
     uint32_t state;
     uint32_t target_live_bytes;
@@ -78,8 +92,13 @@ typedef struct {
     bench_churn_class_t pending_cls;
     uint32_t pending_size;
 
-    bench_churn_slot_t slots[BENCH_CHURN_MAX_FILES];
+    bench_churn_profile_t profile;
+    uint32_t slot_count;
+    bench_churn_slot_t *slots;
+    bench_churn_slot_t default_slots[BENCH_CHURN_MAX_FILES];
 } bench_churn_model_t;
+
+const bench_churn_profile_t *bench_churn_default_profile(void);
 
 void bench_churn_model_init(bench_churn_model_t *model,
                             uint32_t seed,
@@ -87,6 +106,16 @@ void bench_churn_model_init(bench_churn_model_t *model,
                             uint32_t target_written_bytes,
                             uint32_t target_slack_bytes,
                             uint32_t force_large_after_bytes);
+
+int bench_churn_model_init_profile(bench_churn_model_t *model,
+                                   uint32_t seed,
+                                   uint32_t target_live_bytes,
+                                   uint32_t target_written_bytes,
+                                   uint32_t target_slack_bytes,
+                                   uint32_t force_large_after_bytes,
+                                   const bench_churn_profile_t *profile,
+                                   bench_churn_slot_t *slots,
+                                   uint32_t slot_count);
 
 bench_churn_event_type_t bench_churn_model_next(bench_churn_model_t *model,
                                                 bench_churn_event_t *event);

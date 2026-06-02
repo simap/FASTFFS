@@ -163,6 +163,7 @@ int fffs_md_walk_init(struct fffs *fs, struct fffs_md_walk *walk,
         .sector = sector,
         .cursor = fs->sector_size - FFFS_SECTOR_FOOTER_SIZE,
         .claimed_data_end = 0,
+        .live_bytes = FFFS_SECTOR_FOOTER_SIZE,
         .live_seen = false,
         .active = true,
     };
@@ -413,7 +414,8 @@ static int read_uncommitted_metadata_for_slot(struct fffs *fs, uint16_t sector,
 }
 
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
-        uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
+        uint16_t min_free, uint16_t reject_slot,
+        bool normal_allocation, uint16_t *data_off,
         uint16_t *record_off, bool *needs_footer, uint16_t *md_records) {
     if (sector < fs->index_sectors || sector >= fs->sector_count ||
             !data_off || !record_off || !needs_footer || !md_records) {
@@ -458,7 +460,8 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
             !fffs_lifecycle_is_live(view.valid_bits, view.tombstone_bits)) {
         return FFFS_ERR_NO_SPACE;
     }
-    if (view.full_bits == FFFS_BITMIRROR_CLEARED) {
+    if (normal_allocation &&
+            view.full_bits == FFFS_BITMIRROR_CLEARED) {
         return FFFS_ERR_NO_SPACE;
     }
 
@@ -487,6 +490,11 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
             break;
         }
         record_count++;
+        if (normal_allocation &&
+                record.type == FFFS_MD_TYPE_FILE_CONT_V1) {
+            (void)fffs_mark_sector_full(fs, sector);
+            return FFFS_ERR_NO_SPACE;
+        }
         if (record.live && record.slot == reject_slot) {
             return FFFS_ERR_NO_SPACE;
         }
@@ -505,7 +513,9 @@ int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
     size_t new_record_off = metadata_start - FFFS_MD_FILE_RECORD_SIZE;
     if (new_record_off < max_data_end ||
             new_record_off - max_data_end < min_free) {
-        (void)fffs_mark_sector_full(fs, sector);
+        if (normal_allocation) {
+            (void)fffs_mark_sector_full(fs, sector);
+        }
         return FFFS_ERR_NO_SPACE;
     }
     err = fffs_flash_span_is_erased(fs, (size_t)sector * fs->sector_size +
@@ -529,11 +539,15 @@ static uint32_t claim_sector_serial(struct fffs *fs) {
     return serial;
 }
 
-static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
-        uint16_t data_off, uint16_t record_off, bool write_footer,
-        uint16_t data_len, uint16_t span_len, uint32_t total_size,
-        uint16_t next, uint32_t file_offset, bool is_root, bool live) {
-    struct fffs *fs = file->fs;
+int fffs_program_extent_metadata(struct fffs *fs, uint16_t sector,
+        uint16_t slot, uint8_t type, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint16_t span_len,
+        uint32_t size_or_offset, uint16_t next, bool live) {
+    if (type != FFFS_MD_TYPE_FILE_ROOT_V1 &&
+            type != FFFS_MD_TYPE_FILE_CONT_V1) {
+        return FFFS_ERR_INVALID;
+    }
+    bool is_root = type == FFFS_MD_TYPE_FILE_ROOT_V1;
     uint8_t tail[FFFS_MD_FILE_RECORD_SIZE + FFFS_SECTOR_FOOTER_SIZE];
     uint8_t *md = tail;
     uint8_t *footer = tail + FFFS_MD_FILE_RECORD_SIZE;
@@ -543,19 +557,17 @@ static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
         fffs_store_le16(md + 3, next);
         fffs_store_le16(md + 5, span_len);
     }
-    fffs_store_le16(md + 1, file->slot);
+    fffs_store_le16(md + 1, slot);
     fffs_store_le16(md + 7, data_off);
-    fffs_store_le16(md + 9, is_root ?
-            (uint16_t)(file->root_payload_offset + data_len) : data_len);
+    fffs_store_le16(md + 9, data_len);
     if (is_root) {
         if (live) {
-            fffs_store_le32(md + 11, total_size);
+            fffs_store_le32(md + 11, size_or_offset);
         }
     } else {
-        fffs_store_le32(md + 11, file_offset);
+        fffs_store_le32(md + 11, size_or_offset);
     }
-    md[15] = is_root ? FFFS_MD_TYPE_FILE_ROOT_V1 :
-        FFFS_MD_TYPE_FILE_CONT_V1;
+    md[15] = type;
     if (write_footer) {
         fffs_encode_sector_footer(footer, claim_sector_serial(fs), true);
     }
@@ -567,9 +579,7 @@ static int program_extent_metadata(struct fffs_file *file, uint16_t sector,
     if (err != FFFS_OK) {
         return err;
     }
-    size_t logical_data_len = is_root ?
-        (size_t)file->root_payload_offset + data_len : data_len;
-    if ((size_t)data_off + logical_data_len >= record_off) {
+    if ((size_t)data_off + data_len >= record_off) {
         err = fffs_mark_sector_full(fs, sector);
         if (err != FFFS_OK) {
             return err;
@@ -583,8 +593,14 @@ int fffs_begin_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint16_t data_off, uint16_t record_off, bool write_footer,
         uint16_t data_len, uint32_t file_offset) {
     bool is_root = sector == file->head;
-    return program_extent_metadata(file, sector, data_off, record_off,
-            write_footer, data_len, 0, 0, 0, file_offset, is_root, false);
+    uint8_t type = is_root ? FFFS_MD_TYPE_FILE_ROOT_V1 :
+        FFFS_MD_TYPE_FILE_CONT_V1;
+    uint16_t logical_data_len = is_root ?
+        (uint16_t)(file->root_payload_offset + data_len) : data_len;
+    uint32_t size_or_offset = is_root ? 0 : file_offset;
+    return fffs_program_extent_metadata(file->fs, sector, file->slot, type,
+            data_off, record_off, write_footer, logical_data_len, 0,
+            size_or_offset, 0, false);
 }
 
 int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
@@ -642,9 +658,14 @@ int fffs_write_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint16_t data_len, uint16_t span_len, uint32_t total_size,
         uint16_t next, uint32_t file_offset, bool commit_index) {
     bool is_root = sector == file->head;
-    int err = program_extent_metadata(file, sector, data_off, record_off,
-            write_footer, data_len, span_len, total_size, next, file_offset,
-            is_root, true);
+    uint8_t type = is_root ? FFFS_MD_TYPE_FILE_ROOT_V1 :
+        FFFS_MD_TYPE_FILE_CONT_V1;
+    uint16_t logical_data_len = is_root ?
+        (uint16_t)(file->root_payload_offset + data_len) : data_len;
+    uint32_t size_or_offset = is_root ? total_size : file_offset;
+    int err = fffs_program_extent_metadata(file->fs, sector, file->slot, type,
+            data_off, record_off, write_footer, logical_data_len, span_len,
+            size_or_offset, next, true);
     return err == FFFS_OK && commit_index ?
         fffs_append_index_record(file->fs, file->slot, file->head) : err;
 }

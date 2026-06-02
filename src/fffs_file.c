@@ -723,6 +723,30 @@ int fffs_close(struct fffs_file *file) {
         if (err == FFFS_OK) {
             bool root_deferred = file->current != file->head &&
                 file->span_head != file->head;
+            if (file->old_head == file->head) {
+                /*
+                 * Allocation can run GC/compaction before this replacement is
+                 * committed. If the old root was moved and the original sector
+                 * was reused for the new root, refresh the old chain before
+                 * making the replacement current.
+                 */
+                uint16_t current_old_head;
+                bool found;
+                err = fffs_index_head_for_slot(file->fs, file->slot,
+                        &current_old_head, &found);
+                if (err == FFFS_OK && found) {
+                    uint16_t current_old_next;
+                    err = fffs_read_file_root_md(file->fs,
+                            current_old_head, file->slot, NULL, NULL, NULL,
+                            &current_old_next, NULL, NULL, NULL);
+                    if (err == FFFS_OK) {
+                        file->old_head = current_old_head;
+                        file->old_next = current_old_next;
+                    }
+                } else if (err == FFFS_OK) {
+                    file->old_head = 0;
+                }
+            }
             err = flush_pending_span_head(file, 0, true);
             if (err == FFFS_OK && root_deferred) {
                 err = fffs_finish_deferred_root_metadata(file);

@@ -336,6 +336,9 @@ static int adapter_close(void *ctx, void *file)
             break;
         }
     }
+    if (rc == FFFS_ERR_NO_SPACE) {
+        return BENCHFS_ERR_NO_SPACE;
+    }
     return rc;
 }
 

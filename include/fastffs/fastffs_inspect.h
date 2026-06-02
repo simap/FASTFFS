@@ -60,6 +60,8 @@ struct fffs_workload_summary {
 int fffs_inspect_check(const struct fffs_backend *backend,
         struct fffs_inspect_summary *summary);
 int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out);
+int fffs_inspect_fragstats_dump(const struct fffs_backend *backend,
+        FILE *out);
 int fffs_workload_run(struct fffs *fs,
         const struct fffs_workload_options *options,
         struct fffs_workload_summary *summary);

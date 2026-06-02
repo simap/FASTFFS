@@ -4,6 +4,7 @@
 
 #include "benchfs.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11,9 +12,6 @@
 
 #define BENCHFS_BUF_SIZE 1024
 #define BENCHFS_MAX_DELETE_LATENCY_SAMPLES 1024
-
-_Static_assert(BENCH_CHURN_MAX_FILES == 256,
-               "benchfs assumes the shared churn model slot count");
 
 typedef struct {
     uint32_t ops;
@@ -70,12 +68,28 @@ typedef struct {
 } overhead_stats_t;
 
 typedef struct {
+    const char *label;
+    const bench_churn_profile_t *profile;
+    bench_churn_slot_t *slots;
+    uint32_t slot_count;
+    uint32_t seed;
+    uint32_t target_live_bytes;
+    uint32_t target_written_bytes;
+    uint32_t target_slack_bytes;
+    uint32_t force_large_after_bytes;
+    uint32_t log_every_ops;
+    bool erase_before_format;
+    bool seek_large;
+    bool log_file_count_milestones;
+    bool legacy_report_logs;
+} churn_phase_t;
+
+typedef struct {
     const benchfs_config_t *cfg;
     const benchfs_ops_t *ops;
     void *ctx;
     uint8_t buf[BENCHFS_BUF_SIZE];
     bench_churn_model_t churn_model;
-    bench_churn_slot_t churn_files[BENCH_CHURN_MAX_FILES];
     class_stats_t churn_delete_class_stats[BENCHFS_SIZE_CLASS_COUNT];
     int64_t churn_delete_class_max_us[BENCHFS_SIZE_CLASS_COUNT];
     op_time_stats_t churn_delete_latency;
@@ -95,7 +109,8 @@ typedef struct {
 } noop_entry_t;
 
 typedef struct {
-    noop_entry_t entries[512];
+    noop_entry_t *entries;
+    size_t entry_count;
     char open_name[32];
     uint32_t open_size;
     uint32_t read_pos;
@@ -120,8 +135,17 @@ void benchfs_default_config(benchfs_config_t *cfg, const char *name)
         .churn_force_large_after_bytes = 7 * 1024 * 1024,
         .churn_seed = 0x4f465346u,
         .churn_delete_latency_samples = BENCHFS_MAX_DELETE_LATENCY_SAMPLES,
+        .small_churn_max_files = 5000,
+        .small_churn_min_size = 1,
+        .small_churn_max_size = 5 * 1024,
+        .small_churn_target_live_bytes = 0,
+        .small_churn_target_written_bytes = 8 * 1024 * 1024,
+        .small_churn_target_slack_bytes = 32 * 1024,
+        .small_churn_seed = 0x53464348u,
+        .small_churn_log_every_ops = 100,
         .erase_before_baseline_format = true,
         .erase_before_churn_format = true,
+        .erase_before_small_churn_format = true,
     };
 }
 
@@ -219,6 +243,15 @@ static const char *class_name(benchfs_size_class_t cls)
     default:
         return "unknown";
     }
+}
+
+static const char *churn_class_name(benchfs_t *b, benchfs_size_class_t cls)
+{
+    if ((int)cls >= 0 && cls < BENCHFS_SIZE_CLASS_COUNT &&
+        b->churn_model.profile.classes[cls].name) {
+        return b->churn_model.profile.classes[cls].name;
+    }
+    return class_name(cls);
 }
 
 static int erase_format_mount_phase(benchfs_t *b, const char *label,
@@ -355,7 +388,7 @@ static void log_class_stats(benchfs_t *b, const char *prefix,
     for (int i = 0; i < BENCHFS_SIZE_CLASS_COUNT; ++i) {
         blog(b, BENCHFS_LOG_INFO,
              "%s class=%s ops=%lu files=%lu bytes=%lu time_us=%lld bytes_per_s=%llu",
-             prefix, class_name((benchfs_size_class_t)i),
+             prefix, churn_class_name(b, (benchfs_size_class_t)i),
              (unsigned long)stats[i].ops, (unsigned long)stats[i].files,
              (unsigned long)stats[i].bytes, (long long)stats[i].time_us,
              (unsigned long long)bytes_per_s(stats[i].bytes,
@@ -369,7 +402,7 @@ static void log_read_class_stats(benchfs_t *b, const char *prefix,
     for (int i = 0; i < BENCHFS_SIZE_CLASS_COUNT; ++i) {
         char label[80];
         snprintf(label, sizeof(label), "%s class=%s", prefix,
-                 class_name((benchfs_size_class_t)i));
+                 churn_class_name(b, (benchfs_size_class_t)i));
         log_read_stats(b, label, &stats[i]);
     }
 }
@@ -451,7 +484,7 @@ static void log_delete_class_stats(benchfs_t *b, const char *prefix)
         uint32_t avg_us = s->ops == 0 ? 0 : (uint32_t)(s->time_us / s->ops);
         blog(b, BENCHFS_LOG_INFO,
              "%s class=%s ops=%lu files=%lu bytes=%lu time_us=%lld avg_us=%lu max_us=%lld",
-             prefix, class_name((benchfs_size_class_t)i),
+             prefix, churn_class_name(b, (benchfs_size_class_t)i),
              (unsigned long)s->ops, (unsigned long)s->files,
              (unsigned long)s->bytes, (long long)s->time_us,
              (unsigned long)avg_us,
@@ -505,6 +538,16 @@ static void bench_list(benchfs_t *b)
          (unsigned long)count, err_name(b, rc), (long long)(now_us(b) - t0));
 }
 
+static void bench_list_labeled(benchfs_t *b, const char *label)
+{
+    size_t count = 0;
+    int64_t t0 = now_us(b);
+    int rc = b->ops->list_count(b->ctx, &count);
+    blog(b, BENCHFS_LOG_INFO, "%s list entries=%lu rc=%s time_us=%lld",
+         label, (unsigned long)count, err_name(b, rc),
+         (long long)(now_us(b) - t0));
+}
+
 static bool read_fsinfo(benchfs_t *b, benchfs_info_t *info)
 {
     if (!b->ops->fsinfo) {
@@ -535,6 +578,40 @@ static void log_fsinfo(benchfs_t *b, const char *label,
          info->metadata_valid, (unsigned long)info->total_bytes,
          (unsigned long)info->used_bytes, (unsigned long)info->file_count,
          (unsigned long)info->metadata_bytes);
+}
+
+static void log_no_space_diagnostics(benchfs_t *b, const churn_phase_t *phase,
+                                     const bench_churn_event_t *event)
+{
+    char label[80];
+    snprintf(label, sizeof(label), "%s no_space", phase->label);
+
+    benchfs_info_t info;
+    bool have_info = read_fsinfo(b, &info);
+    if (have_info) {
+        log_fsinfo(b, label, &info);
+    } else {
+        blog(b, BENCHFS_LOG_INFO, "%s fsinfo unavailable", label);
+    }
+
+    uint32_t model_limit = phase->target_live_bytes + phase->target_slack_bytes;
+    uint32_t model_free = model_limit > b->churn_model.live_bytes ?
+        model_limit - b->churn_model.live_bytes : 0;
+    uint32_t fs_free = 0;
+    bool fs_free_valid = false;
+    if (have_info && info.total_valid && info.used_valid) {
+        fs_free = info.total_bytes > info.used_bytes ?
+            info.total_bytes - info.used_bytes : 0;
+        fs_free_valid = true;
+    }
+
+    blog(b, BENCHFS_LOG_ERROR,
+         "%s detail request=%lu model_live=%lu model_live_limit=%lu model_free_budget=%lu fs_free_valid=%d fs_free_est=%lu fragmentation_hint=%d",
+         label, (unsigned long)event->size,
+         (unsigned long)b->churn_model.live_bytes,
+         (unsigned long)model_limit, (unsigned long)model_free,
+         fs_free_valid, (unsigned long)fs_free,
+         fs_free_valid && fs_free >= event->size && model_free >= event->size);
 }
 
 static void log_storage_overhead(benchfs_t *b, const char *label,
@@ -761,11 +838,11 @@ static void bench_seek_medium(benchfs_t *b)
 
 static void bench_seek_churn_large(benchfs_t *b)
 {
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
-        if (b->churn_files[i].live &&
-            b->churn_files[i].cls == BENCH_CHURN_CLASS_LARGE) {
-            bench_seek_file(b, "seek churn large", b->churn_files[i].name,
-                            b->churn_files[i].write_seed);
+    for (uint32_t i = 0; i < b->churn_model.slot_count; ++i) {
+        bench_churn_slot_t *slot = &b->churn_model.slots[i];
+        if (slot->live && slot->cls == BENCH_CHURN_CLASS_LARGE) {
+            bench_seek_file(b, "seek churn large", slot->name,
+                            slot->write_seed);
             return;
         }
     }
@@ -858,76 +935,86 @@ static void bench_cold_start_phase(benchfs_t *b)
     log_read_stats(b, "cold read medium split", &med);
 }
 
-static void log_live_distribution(benchfs_t *b)
+static void log_live_distribution(benchfs_t *b, const char *label)
 {
     live_dist_t dist[BENCHFS_SIZE_CLASS_COUNT] = {0};
     uint32_t total_files = 0;
     uint32_t total_bytes = 0;
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
-        if (!b->churn_files[i].live) {
+    for (uint32_t i = 0; i < b->churn_model.slot_count; ++i) {
+        bench_churn_slot_t *slot = &b->churn_model.slots[i];
+        if (!slot->live) {
             continue;
         }
-        benchfs_size_class_t cls =
-            (benchfs_size_class_t)b->churn_files[i].cls;
+        benchfs_size_class_t cls = (benchfs_size_class_t)slot->cls;
         live_dist_t *d = &dist[cls];
-        if (d->files == 0 || b->churn_files[i].size < d->min_size) {
-            d->min_size = b->churn_files[i].size;
+        if (d->files == 0 || slot->size < d->min_size) {
+            d->min_size = slot->size;
         }
-        if (b->churn_files[i].size > d->max_size) {
-            d->max_size = b->churn_files[i].size;
+        if (slot->size > d->max_size) {
+            d->max_size = slot->size;
         }
         d->files++;
-        d->bytes += b->churn_files[i].size;
+        d->bytes += slot->size;
         total_files++;
-        total_bytes += b->churn_files[i].size;
+        total_bytes += slot->size;
     }
     blog(b, BENCHFS_LOG_INFO,
-         "churn live distribution total_files=%lu total_bytes=%lu avg_size=%lu",
-         (unsigned long)total_files, (unsigned long)total_bytes,
+         "%s live distribution total_files=%lu total_bytes=%lu avg_size=%lu",
+         label, (unsigned long)total_files, (unsigned long)total_bytes,
          (unsigned long)(total_files ? total_bytes / total_files : 0));
     for (int i = 0; i < BENCHFS_SIZE_CLASS_COUNT; ++i) {
         live_dist_t *d = &dist[i];
         blog(b, BENCHFS_LOG_INFO,
-             "churn live class=%s files=%lu bytes=%lu avg_size=%lu min_size=%lu max_size=%lu",
-             class_name((benchfs_size_class_t)i), (unsigned long)d->files,
+             "%s live class=%s files=%lu bytes=%lu avg_size=%lu min_size=%lu max_size=%lu",
+             label, churn_class_name(b, (benchfs_size_class_t)i),
+             (unsigned long)d->files,
              (unsigned long)d->bytes,
              (unsigned long)(d->files ? d->bytes / d->files : 0),
              (unsigned long)d->min_size, (unsigned long)d->max_size);
     }
 }
 
-static void run_churn_cold_reads(benchfs_t *b)
+static void run_churn_cold_reads(benchfs_t *b, const char *label,
+                                 bool legacy_report_logs)
 {
     (void)b->ops->unmount(b->ctx);
     int64_t t0 = now_us(b);
     int rc = b->ops->mount(b->ctx);
-    blog(b, BENCHFS_LOG_INFO, "churn cold mount rc=%s time_us=%lld",
-         err_name(b, rc), (long long)(now_us(b) - t0));
-    bench_list(b);
+    blog(b, BENCHFS_LOG_INFO, "%s cold mount rc=%s time_us=%lld",
+         label, err_name(b, rc), (long long)(now_us(b) - t0));
+    if (legacy_report_logs) {
+        bench_list(b);
+    } else {
+        bench_list_labeled(b, label);
+    }
     read_stats_t read_stats[BENCHFS_SIZE_CLASS_COUNT] = {0};
     int sampled[BENCHFS_SIZE_CLASS_COUNT] = {0};
     int limits[BENCHFS_SIZE_CLASS_COUNT] = {12, 6, 1};
-    for (int pass = 0; pass < BENCH_CHURN_MAX_FILES; ++pass) {
-        int i = permuted_index(pass, BENCH_CHURN_MAX_FILES, 73, 19);
-        if (!b->churn_files[i].live) {
+    for (uint32_t pass = 0; pass < b->churn_model.slot_count; ++pass) {
+        int i = permuted_index((int)pass, (int)b->churn_model.slot_count,
+                               73, 19);
+        bench_churn_slot_t *slot = &b->churn_model.slots[i];
+        if (!slot->live) {
             continue;
         }
-        benchfs_size_class_t cls =
-            (benchfs_size_class_t)b->churn_files[i].cls;
+        benchfs_size_class_t cls = (benchfs_size_class_t)slot->cls;
         if (sampled[cls] >= limits[cls]) {
             continue;
         }
-        (void)read_file_timed(b, b->churn_files[i].name, &read_stats[cls]);
+        (void)read_file_timed(b, slot->name, &read_stats[cls]);
         sampled[cls]++;
     }
-    log_read_class_stats(b, "churn cold read split", read_stats);
+    char read_label[80];
+    snprintf(read_label, sizeof(read_label), "%s cold read split", label);
+    log_read_class_stats(b, read_label, read_stats);
 
     exists_stats_t exists_existing = {0};
     exists_stats_t exists_missing = {0};
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES && exists_existing.probes < 32;
-         ++i) {
-        if (b->churn_files[i].live) {
-            probe_exists_name(b, b->churn_files[i].name, &exists_existing);
+    for (uint32_t i = 0; i < b->churn_model.slot_count &&
+         exists_existing.probes < 32; ++i) {
+        if (b->churn_model.slots[i].live) {
+            probe_exists_name(b, b->churn_model.slots[i].name,
+                              &exists_existing);
         }
     }
     for (int i = 0; i < 32; ++i) {
@@ -935,45 +1022,127 @@ static void run_churn_cold_reads(benchfs_t *b)
         snprintf(name, sizeof(name), "missing%03d.bin", i);
         probe_exists_name(b, name, &exists_missing);
     }
-    log_exists_stats(b, "exists churn cold existing", &exists_existing);
-    log_exists_stats(b, "exists churn cold missing", &exists_missing);
+    char exists_label[80];
+    snprintf(exists_label, sizeof(exists_label), "exists %s cold existing",
+             label);
+    log_exists_stats(b, exists_label, &exists_existing);
+    snprintf(exists_label, sizeof(exists_label), "exists %s cold missing",
+             label);
+    log_exists_stats(b, exists_label, &exists_missing);
 }
 
-static void run_churn_workload(benchfs_t *b)
+static void log_churn_file_count_milestones(benchfs_t *b,
+                                            const churn_phase_t *phase,
+                                            uint8_t logged[5])
+{
+    const uint32_t milestones[] = {1, 10, 100, 1000, 5000};
+    for (size_t i = 0; i < sizeof(milestones) / sizeof(milestones[0]); ++i) {
+        if (logged[i] || milestones[i] > phase->slot_count ||
+            b->churn_model.live_file_count < milestones[i]) {
+            continue;
+        }
+        logged[i] = 1;
+        blog(b, BENCHFS_LOG_INFO,
+             "%s milestone live_files=%lu live_bytes=%lu total_written=%lu",
+             phase->label, (unsigned long)b->churn_model.live_file_count,
+             (unsigned long)b->churn_model.live_bytes,
+             (unsigned long)b->churn_model.total_written);
+        bench_list_labeled(b, phase->label);
+        log_fsinfo(b, phase->label, NULL);
+    }
+}
+
+static int execute_churn_delete_event(benchfs_t *b,
+                                      const churn_phase_t *phase,
+                                      const bench_churn_event_t *event,
+                                      uint32_t op,
+                                      uint32_t *deletes,
+                                      uint8_t milestones_logged[5])
+{
+    int64_t dt = now_us(b);
+    int rc = b->ops->delete_file(b->ctx, event->name);
+    int64_t elapsed = now_us(b) - dt;
+    if (rc != BENCHFS_OK) {
+        blog(b, BENCHFS_LOG_ERROR, "%s delete failed name=%s rc=%s",
+             phase->label, event->name, err_name(b, rc));
+        return rc;
+    }
+
+    int64_t overhead_t = now_us(b);
+    record_delete_stats(b, (benchfs_size_class_t)event->cls, event->size,
+                        elapsed);
+    b->churn_overhead.stats_us += now_us(b) - overhead_t;
+    overhead_t = now_us(b);
+    bench_churn_model_apply(&b->churn_model, event);
+    b->churn_overhead.model_apply_us += now_us(b) - overhead_t;
+    overhead_t = now_us(b);
+    (*deletes)++;
+    b->churn_overhead.stats_us += now_us(b) - overhead_t;
+
+    if (phase->log_every_ops == 1 ||
+        (phase->log_every_ops > 0 && op % phase->log_every_ops == 0)) {
+        blog(b, BENCHFS_LOG_INFO,
+             "%s delete name=%s time_us=%lld live_bytes=%lu",
+             phase->label, event->name, (long long)elapsed,
+             (unsigned long)b->churn_model.live_bytes);
+    }
+    if (phase->log_file_count_milestones) {
+        log_churn_file_count_milestones(b, phase, milestones_logged);
+    }
+    (void)run_churn_gc(b, BENCHFS_CHURN_EVENT_DELETE, event->size);
+    return BENCHFS_OK;
+}
+
+static void run_churn_phase(benchfs_t *b, const churn_phase_t *phase)
 {
     uint32_t creates = 0;
     uint32_t replaces = 0;
     uint32_t deletes = 0;
     uint32_t op = 0;
+    uint8_t file_count_milestones_logged[5] = {0};
     class_stats_t write_stats[BENCHFS_SIZE_CLASS_COUNT] = {0};
     class_stats_t create_write_stats[BENCHFS_SIZE_CLASS_COUNT] = {0};
     class_stats_t replace_write_stats[BENCHFS_SIZE_CLASS_COUNT] = {0};
 
-    blog(b, BENCHFS_LOG_INFO, "churn format start");
-    if (erase_format_mount_phase(b, "churn",
-                                 b->cfg->erase_before_churn_format) !=
-        BENCHFS_OK) {
+    blog(b, BENCHFS_LOG_INFO, "%s format start", phase->label);
+    if (erase_format_mount_phase(b, phase->label,
+                                 phase->erase_before_format) != BENCHFS_OK) {
         return;
     }
-    memset(b->churn_files, 0, sizeof(b->churn_files));
     memset(&b->gc_total, 0, sizeof(b->gc_total));
     memset(b->churn_delete_class_stats, 0, sizeof(b->churn_delete_class_stats));
     memset(b->churn_delete_class_max_us, 0,
            sizeof(b->churn_delete_class_max_us));
     memset(&b->churn_delete_latency, 0, sizeof(b->churn_delete_latency));
-    bench_churn_model_init(&b->churn_model, b->cfg->churn_seed,
-                           b->cfg->churn_target_live_bytes,
-                           b->cfg->churn_target_written_bytes,
-                           b->cfg->churn_target_slack_bytes,
-                           b->cfg->churn_force_large_after_bytes);
-    blog(b, BENCHFS_LOG_INFO,
-         "churn target live_percent=%lu target_live_bytes=%lu fixed_live_bytes=%lu slack_bytes=%lu written_target=%lu erase_before_format=%d",
-         (unsigned long)b->cfg->churn_target_live_percent,
-         (unsigned long)b->cfg->churn_target_live_bytes,
-         (unsigned long)b->cfg->churn_target_live_bytes,
-         (unsigned long)b->cfg->churn_target_slack_bytes,
-         (unsigned long)b->cfg->churn_target_written_bytes,
-         b->cfg->erase_before_churn_format);
+    if (bench_churn_model_init_profile(&b->churn_model, phase->seed,
+                                       phase->target_live_bytes,
+                                       phase->target_written_bytes,
+                                       phase->target_slack_bytes,
+                                       phase->force_large_after_bytes,
+                                       phase->profile, phase->slots,
+                                       phase->slot_count) != 0) {
+        blog(b, BENCHFS_LOG_ERROR, "%s model init failed", phase->label);
+        return;
+    }
+    if (phase->legacy_report_logs) {
+        blog(b, BENCHFS_LOG_INFO,
+             "churn target live_percent=%lu target_live_bytes=%lu fixed_live_bytes=%lu slack_bytes=%lu written_target=%lu erase_before_format=%d",
+             (unsigned long)b->cfg->churn_target_live_percent,
+             (unsigned long)phase->target_live_bytes,
+             (unsigned long)phase->target_live_bytes,
+             (unsigned long)phase->target_slack_bytes,
+             (unsigned long)phase->target_written_bytes,
+             phase->erase_before_format);
+    } else {
+        blog(b, BENCHFS_LOG_INFO,
+             "%s target target_live_bytes=%lu slack_bytes=%lu written_target=%lu files=%lu erase_before_format=%d",
+             phase->label,
+             (unsigned long)phase->target_live_bytes,
+             (unsigned long)phase->target_slack_bytes,
+             (unsigned long)phase->target_written_bytes,
+             (unsigned long)phase->slot_count,
+             phase->erase_before_format);
+    }
 
     memset(&b->churn_overhead, 0, sizeof(b->churn_overhead));
     int64_t churn_wall_start_us = now_us(b);
@@ -987,36 +1156,17 @@ static void run_churn_workload(benchfs_t *b)
             break;
         }
         if (type == BENCH_CHURN_EVENT_NO_SLOT) {
-            blog(b, BENCHFS_LOG_ERROR, "churn no slot available");
+            blog(b, BENCHFS_LOG_ERROR, "%s no slot available", phase->label);
             break;
         }
 
         if (type == BENCH_CHURN_EVENT_DELETE) {
-            int64_t dt = now_us(b);
-            int rc = b->ops->delete_file(b->ctx, event.name);
-            int64_t elapsed = now_us(b) - dt;
+            int rc = execute_churn_delete_event(b, phase, &event, op,
+                                                &deletes,
+                                                file_count_milestones_logged);
             if (rc != BENCHFS_OK) {
-                blog(b, BENCHFS_LOG_ERROR,
-                     "churn delete failed name=%s rc=%s", event.name,
-                     err_name(b, rc));
                 break;
             }
-            overhead_t = now_us(b);
-            record_delete_stats(b, (benchfs_size_class_t)event.cls, event.size,
-                                elapsed);
-            b->churn_overhead.stats_us += now_us(b) - overhead_t;
-            overhead_t = now_us(b);
-            bench_churn_model_apply(&b->churn_model, &event);
-            b->churn_overhead.model_apply_us += now_us(b) - overhead_t;
-            overhead_t = now_us(b);
-            b->churn_files[event.slot].live = 0;
-            deletes++;
-            b->churn_overhead.stats_us += now_us(b) - overhead_t;
-            blog(b, BENCHFS_LOG_INFO,
-                 "churn delete name=%s time_us=%lld live_bytes=%lu",
-                 event.name, (long long)elapsed,
-                 (unsigned long)b->churn_model.live_bytes);
-            (void)run_churn_gc(b, BENCHFS_CHURN_EVENT_DELETE, event.size);
             continue;
         }
 
@@ -1024,26 +1174,25 @@ static void run_churn_workload(benchfs_t *b)
         int rc = write_file(b, event.name, event.size, event.write_seed);
         int64_t write_us = now_us(b) - wt;
         if (rc != BENCHFS_OK) {
+            if (rc == BENCHFS_ERR_NO_SPACE) {
+                log_no_space_diagnostics(b, phase, &event);
+            }
             blog(b, BENCHFS_LOG_ERROR,
-                 "churn write failed name=%s rc=%s total_written=%lu live_bytes=%lu",
-                 event.name, err_name(b, rc),
+                 "%s write failed name=%s rc=%s total_written=%lu live_bytes=%lu",
+                 phase->label, event.name, err_name(b, rc),
                  (unsigned long)b->churn_model.total_written,
                  (unsigned long)b->churn_model.live_bytes);
             break;
         }
         overhead_t = now_us(b);
+        bool replacing = event.replacing &&
+            b->churn_model.slots[event.slot].live;
         bench_churn_model_apply(&b->churn_model, &event);
         b->churn_overhead.model_apply_us += now_us(b) - overhead_t;
         overhead_t = now_us(b);
-        b->churn_files[event.slot].live = 1;
-        b->churn_files[event.slot].cls = event.cls;
-        b->churn_files[event.slot].size = event.size;
-        b->churn_files[event.slot].write_seed = event.write_seed;
-        snprintf(b->churn_files[event.slot].name,
-                 sizeof(b->churn_files[event.slot].name), "%s", event.name);
         op++;
         benchfs_size_class_t cls = (benchfs_size_class_t)event.cls;
-        if (event.replacing) {
+        if (replacing) {
             replaces++;
             replace_write_stats[cls].ops++;
             replace_write_stats[cls].files++;
@@ -1061,13 +1210,22 @@ static void run_churn_workload(benchfs_t *b)
         write_stats[cls].bytes += event.size;
         write_stats[cls].time_us += write_us;
         b->churn_overhead.stats_us += now_us(b) - overhead_t;
-        blog(b, BENCHFS_LOG_INFO,
-             "churn op=%lu name=%s class=%s size=%lu write_us=%lld write_bytes_per_s=%llu total_written=%lu live=%lu",
-             (unsigned long)op, event.name, class_name(cls),
-             (unsigned long)event.size, (long long)write_us,
-             (unsigned long long)bytes_per_s(event.size, write_us),
-             (unsigned long)b->churn_model.total_written,
-             (unsigned long)b->churn_model.live_bytes);
+        if (phase->log_every_ops == 1 ||
+            (phase->log_every_ops > 0 && op % phase->log_every_ops == 0)) {
+            blog(b, BENCHFS_LOG_INFO,
+                 "%s op=%lu name=%s class=%s size=%lu write_us=%lld write_bytes_per_s=%llu total_written=%lu live=%lu live_files=%lu",
+                 phase->label, (unsigned long)op, event.name,
+                 churn_class_name(b, cls), (unsigned long)event.size,
+                 (long long)write_us,
+                 (unsigned long long)bytes_per_s(event.size, write_us),
+                 (unsigned long)b->churn_model.total_written,
+                 (unsigned long)b->churn_model.live_bytes,
+                 (unsigned long)b->churn_model.live_file_count);
+        }
+        if (phase->log_file_count_milestones) {
+            log_churn_file_count_milestones(b, phase,
+                                            file_count_milestones_logged);
+        }
         (void)run_churn_gc(b, BENCHFS_CHURN_EVENT_WRITE, event.size);
     }
 
@@ -1084,40 +1242,140 @@ static void run_churn_workload(benchfs_t *b)
         measured_overhead_us;
     int64_t churn_unaccounted_us = churn_wall_us - churn_accounted_us;
     blog(b, BENCHFS_LOG_INFO,
-         "churn summary ops=%lu written=%lu live=%lu creates=%lu replaces=%lu deletes=%lu",
-         (unsigned long)op, (unsigned long)b->churn_model.total_written,
-         (unsigned long)b->churn_model.live_bytes, (unsigned long)creates,
+         "%s summary ops=%lu written=%lu live=%lu live_files=%lu creates=%lu replaces=%lu deletes=%lu",
+         phase->label, (unsigned long)op,
+         (unsigned long)b->churn_model.total_written,
+         (unsigned long)b->churn_model.live_bytes,
+         (unsigned long)b->churn_model.live_file_count,
+         (unsigned long)creates,
          (unsigned long)replaces, (unsigned long)deletes);
     blog(b, BENCHFS_LOG_INFO,
-         "churn accounting wall_us=%lld accounted_us=%lld write_us=%lld delete_us=%lld gc_step_us=%lld benchmark_overhead_us=%lld unaccounted_us=%lld",
-         (long long)churn_wall_us, (long long)churn_accounted_us,
+         "%s accounting wall_us=%lld accounted_us=%lld write_us=%lld delete_us=%lld gc_step_us=%lld benchmark_overhead_us=%lld unaccounted_us=%lld",
+         phase->label, (long long)churn_wall_us,
+         (long long)churn_accounted_us,
          (long long)churn_write_us, (long long)churn_delete_us,
          (long long)b->gc_total.time_us,
          (long long)churn_benchmark_overhead_us,
          (long long)churn_unaccounted_us);
     blog(b, BENCHFS_LOG_INFO,
-         "churn overhead detail measured_us=%lld model_next_us=%lld model_apply_us=%lld stats_us=%lld log_us=%lld residual_us=%lld",
-         (long long)measured_overhead_us,
+         "%s overhead detail measured_us=%lld model_next_us=%lld model_apply_us=%lld stats_us=%lld log_us=%lld residual_us=%lld",
+         phase->label, (long long)measured_overhead_us,
          (long long)b->churn_overhead.model_next_us,
          (long long)b->churn_overhead.model_apply_us,
          (long long)b->churn_overhead.stats_us,
          (long long)b->churn_overhead.log_us,
          (long long)churn_unaccounted_us);
-    blog(b, BENCHFS_LOG_INFO, "churn live files avg=%lu samples=%lu",
-         (unsigned long)(b->churn_model.live_file_samples ?
+    blog(b, BENCHFS_LOG_INFO, "%s live files avg=%lu samples=%lu",
+         phase->label, (unsigned long)(b->churn_model.live_file_samples ?
              b->churn_model.live_file_sum /
                  b->churn_model.live_file_samples : 0),
          (unsigned long)b->churn_model.live_file_samples);
-    log_class_stats(b, "churn write", write_stats);
-    log_class_stats(b, "churn create write", create_write_stats);
-    log_class_stats(b, "churn replace write", replace_write_stats);
-    log_delete_class_stats(b, "churn delete");
-    log_op_time_stats(b, "churn delete latency", &b->churn_delete_latency);
-    log_gc_stats(b, "churn total", &b->gc_total);
-    log_live_distribution(b);
-    bench_list(b);
-    bench_seek_churn_large(b);
-    run_churn_cold_reads(b);
+    char metric_label[80];
+    snprintf(metric_label, sizeof(metric_label), "%s write", phase->label);
+    log_class_stats(b, metric_label, write_stats);
+    snprintf(metric_label, sizeof(metric_label), "%s create write",
+             phase->label);
+    log_class_stats(b, metric_label, create_write_stats);
+    snprintf(metric_label, sizeof(metric_label), "%s replace write",
+             phase->label);
+    log_class_stats(b, metric_label, replace_write_stats);
+    snprintf(metric_label, sizeof(metric_label), "%s delete", phase->label);
+    log_delete_class_stats(b, metric_label);
+    snprintf(metric_label, sizeof(metric_label), "%s delete latency",
+             phase->label);
+    log_op_time_stats(b, metric_label, &b->churn_delete_latency);
+    snprintf(metric_label, sizeof(metric_label), "%s total", phase->label);
+    log_gc_stats(b, metric_label, &b->gc_total);
+    log_live_distribution(b, phase->label);
+    if (phase->legacy_report_logs) {
+        bench_list(b);
+    } else {
+        bench_list_labeled(b, phase->label);
+    }
+    if (phase->seek_large) {
+        bench_seek_churn_large(b);
+    }
+    run_churn_cold_reads(b, phase->label, phase->legacy_report_logs);
+}
+
+static void run_churn_workload(benchfs_t *b)
+{
+    churn_phase_t phase = {
+        .label = "churn",
+        .profile = bench_churn_default_profile(),
+        .slots = b->churn_model.default_slots,
+        .slot_count = BENCH_CHURN_MAX_FILES,
+        .seed = b->cfg->churn_seed,
+        .target_live_bytes = b->cfg->churn_target_live_bytes,
+        .target_written_bytes = b->cfg->churn_target_written_bytes,
+        .target_slack_bytes = b->cfg->churn_target_slack_bytes,
+        .force_large_after_bytes = b->cfg->churn_force_large_after_bytes,
+        .log_every_ops = 1,
+        .erase_before_format = b->cfg->erase_before_churn_format,
+        .seek_large = true,
+        .legacy_report_logs = true,
+    };
+    run_churn_phase(b, &phase);
+}
+
+static void run_small_churn_workload(benchfs_t *b)
+{
+    if (b->cfg->small_churn_max_files == 0) {
+        blog(b, BENCHFS_LOG_INFO, "small_churn skipped max_files=0");
+        return;
+    }
+    uint32_t min_size = b->cfg->small_churn_min_size;
+    uint32_t max_size = b->cfg->small_churn_max_size;
+    if (max_size < min_size) {
+        max_size = min_size;
+    }
+    uint32_t target_live = b->cfg->small_churn_target_live_bytes;
+    if (target_live == 0) {
+        target_live = b->cfg->churn_target_live_bytes;
+    }
+    char class_name_buf[32];
+    snprintf(class_name_buf, sizeof(class_name_buf), "small_%lu_%lub",
+             (unsigned long)min_size, (unsigned long)max_size);
+
+    bench_churn_profile_t profile = {
+        .name_prefix = "sf",
+        .replace_percent = 25,
+        .protect_first_large = false,
+        .classes = {
+            [BENCH_CHURN_CLASS_SMALL] = {
+                .name = class_name_buf,
+                .weight = 1000,
+                .min_size = min_size,
+                .max_size = max_size,
+            },
+        },
+    };
+    bench_churn_slot_t *slots =
+        calloc(b->cfg->small_churn_max_files, sizeof(slots[0]));
+    if (!slots) {
+        blog(b, BENCHFS_LOG_ERROR, "small_churn slot allocation failed files=%lu",
+             (unsigned long)b->cfg->small_churn_max_files);
+        return;
+    }
+
+    churn_phase_t phase = {
+        .label = "smallfiles",
+        .profile = &profile,
+        .slots = slots,
+        .slot_count = b->cfg->small_churn_max_files,
+        .seed = b->cfg->small_churn_seed,
+        .target_live_bytes = target_live,
+        .target_written_bytes = b->cfg->small_churn_target_written_bytes,
+        .target_slack_bytes = b->cfg->small_churn_target_slack_bytes,
+        .force_large_after_bytes = UINT32_MAX,
+        .log_every_ops = b->cfg->small_churn_log_every_ops,
+        .erase_before_format = b->cfg->erase_before_small_churn_format,
+        .log_file_count_milestones = true,
+    };
+    run_churn_phase(b, &phase);
+    free(slots);
+    b->churn_model.slots = NULL;
+    b->churn_model.slot_count = 0;
 }
 
 static void run_baseline(benchfs_t *b)
@@ -1238,11 +1496,12 @@ static void run_baseline(benchfs_t *b)
     bench_exists_baseline(b);
     bench_cold_start_phase(b);
     run_churn_workload(b);
+    run_small_churn_workload(b);
 }
 
 static noop_entry_t *noop_find(noop_ctx_t *n, const char *name)
 {
-    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+    for (size_t i = 0; i < n->entry_count; ++i) {
         if (n->entries[i].exists && strcmp(n->entries[i].name, name) == 0) {
             return &n->entries[i];
         }
@@ -1256,7 +1515,7 @@ static noop_entry_t *noop_find_or_alloc(noop_ctx_t *n, const char *name)
     if (entry) {
         return entry;
     }
-    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+    for (size_t i = 0; i < n->entry_count; ++i) {
         if (!n->entries[i].exists) {
             n->entries[i].exists = true;
             snprintf(n->entries[i].name, sizeof(n->entries[i].name), "%s",
@@ -1277,7 +1536,7 @@ static int noop_setup(void *ctx)
 static int noop_format(void *ctx)
 {
     noop_ctx_t *n = ctx;
-    memset(n->entries, 0, sizeof(n->entries));
+    memset(n->entries, 0, sizeof(n->entries[0]) * n->entry_count);
     n->open = false;
     return BENCHFS_OK;
 }
@@ -1425,7 +1684,7 @@ static int noop_list_count(void *ctx, size_t *count)
 {
     noop_ctx_t *n = ctx;
     size_t nfiles = 0;
-    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+    for (size_t i = 0; i < n->entry_count; ++i) {
         if (n->entries[i].exists) {
             nfiles++;
         }
@@ -1439,7 +1698,7 @@ static int noop_fsinfo(void *ctx, benchfs_info_t *info)
     noop_ctx_t *n = ctx;
     uint32_t used = 0;
     uint32_t files = 0;
-    for (size_t i = 0; i < sizeof(n->entries) / sizeof(n->entries[0]); ++i) {
+    for (size_t i = 0; i < n->entry_count; ++i) {
         if (n->entries[i].exists) {
             files++;
             used += n->entries[i].size;
@@ -1467,6 +1726,17 @@ static const char *noop_error_name(void *ctx, int rc)
 {
     (void)ctx;
     return rc == BENCHFS_OK ? "OK" : "ERR";
+}
+
+static size_t noop_entry_capacity(const benchfs_config_t *cfg)
+{
+    size_t baseline = (size_t)cfg->tiny_files + cfg->medium_files;
+    size_t capacity = baseline > BENCH_CHURN_MAX_FILES ?
+        baseline : BENCH_CHURN_MAX_FILES;
+    if (capacity < cfg->small_churn_max_files) {
+        capacity = cfg->small_churn_max_files;
+    }
+    return capacity;
 }
 
 static int benchfs_run_with_state(benchfs_t *b, const benchfs_config_t *cfg,
@@ -1514,6 +1784,11 @@ int benchfs_run_noop(const benchfs_config_t *cfg,
     }
     static noop_ctx_t noop_ctx;
     memset(&noop_ctx, 0, sizeof(noop_ctx));
+    noop_ctx.entry_count = noop_entry_capacity(cfg);
+    noop_ctx.entries = calloc(noop_ctx.entry_count, sizeof(noop_ctx.entries[0]));
+    if (!noop_ctx.entries) {
+        return -1;
+    }
     const benchfs_ops_t ops = {
         .now_us = now_us_fn,
         .vlog = noop_vlog,
@@ -1535,7 +1810,11 @@ int benchfs_run_noop(const benchfs_config_t *cfg,
         .fsinfo = noop_fsinfo,
     };
     static benchfs_t noop_b;
-    return benchfs_run_with_state(&noop_b, cfg, &ops, &noop_ctx, false);
+    int rc = benchfs_run_with_state(&noop_b, cfg, &ops, &noop_ctx, false);
+    free(noop_ctx.entries);
+    noop_ctx.entries = NULL;
+    noop_ctx.entry_count = 0;
+    return rc;
 }
 
 int benchfs_run(const benchfs_config_t *cfg, const benchfs_ops_t *ops,

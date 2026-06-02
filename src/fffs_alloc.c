@@ -63,6 +63,42 @@ static bool sector_reserved_by_other(struct fffs_file *owner,
     return false;
 }
 
+int fffs_alloc_find_compaction_root_window(struct fffs *fs,
+        uint16_t source_sector, uint16_t slot, uint16_t data_len,
+        uint16_t *sector, uint16_t *data_off, uint16_t *record_off,
+        bool *needs_footer) {
+    size_t s = fs->alloc_cursor;
+    if (s < fs->index_sectors || s >= fs->sector_count) {
+        s = fs->index_sectors;
+    }
+
+    size_t data_sectors = fs->sector_count - fs->index_sectors;
+    for (size_t checked = 0; checked < data_sectors; checked++) {
+        if (s == source_sector || fffs_sector_is_inflight(fs, (uint16_t)s)) {
+            s = fffs_next_data_sector(fs, s);
+            continue;
+        }
+
+        uint16_t md_records;
+        int err = fffs_find_sector_free_window(fs, (uint16_t)s, data_len,
+                slot, false, data_off, record_off, needs_footer, &md_records);
+        if (err == FFFS_OK) {
+            *sector = (uint16_t)s;
+            if (md_records >= FFFS_ALLOC_TARGET_DENSITY) {
+                fs->alloc_cursor = fffs_next_data_sector(fs, s);
+            } else {
+                fs->alloc_cursor = s;
+            }
+            return FFFS_OK;
+        }
+        if (err != FFFS_ERR_NO_SPACE) {
+            return err;
+        }
+        s = fffs_next_data_sector(fs, s);
+    }
+    return FFFS_ERR_NO_SPACE;
+}
+
 void fffs_alloc_release_reservation(struct fffs_file *file) {
     if (!file || !file->fs || file->reserve_count == 0) {
         return;
@@ -184,6 +220,7 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
 static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
         bool use_map, uint16_t skip_sector, bool have_skip) {
     struct fffs *fs = file->fs;
+    bool continuation = file->current != 0;
     if (fs->sector_count <= fs->index_sectors) {
         return FFFS_ERR_NO_SPACE;
     }
@@ -213,9 +250,13 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
         uint16_t md_records;
         bool needs_footer;
         int err = fffs_find_sector_free_window(fs, (uint16_t)s,
-                FFFS_ALLOC_MIN_USABLE_FREE, file->slot, &data_off, &record_off,
-                &needs_footer, &md_records);
+                FFFS_ALLOC_MIN_USABLE_FREE, file->slot, true, &data_off,
+                &record_off, &needs_footer, &md_records);
         if (err == FFFS_OK) {
+            if (continuation && !needs_footer) {
+                s = fffs_next_data_sector(fs, s);
+                continue;
+            }
             *sector = (uint16_t)s;
             file->data_offset = data_off;
             file->current_write_offset = data_off;

@@ -41,6 +41,7 @@ static void usage(FILE *out, const char *argv0) {
     fprintf(out, "  %s create <sector_size> <sector_count> <image> [index_sectors]\n",
             argv0);
     fprintf(out, "  %s dump <image>\n", argv0);
+    fprintf(out, "  %s fragstats <image>\n", argv0);
     fprintf(out, "  %s check <image>\n", argv0);
     fprintf(out, "  %s list <image>\n", argv0);
     fprintf(out, "  %s load <root> <image>\n", argv0);
@@ -128,6 +129,17 @@ static int cmd_check(const char *path) {
                 summary.data_sectors_corrupt || summary.md_corrupt) {
             err = FFFS_ERR_CORRUPT;
         }
+    }
+    ffsv_flash_destroy(flash);
+    return err;
+}
+
+static int cmd_fragstats(const char *path) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    int err = open_image(path, &flash, &backend);
+    if (err == FFFS_OK) {
+        err = fffs_inspect_fragstats_dump(&backend, stdout);
     }
     ffsv_flash_destroy(flash);
     return err;
@@ -530,6 +542,8 @@ int main(int argc, char **argv) {
                 argc == 6 ? argv[5] : NULL);
     } else if (strcmp(argv[1], "dump") == 0 && argc == 3) {
         err = cmd_dump(argv[2]);
+    } else if (strcmp(argv[1], "fragstats") == 0 && argc == 3) {
+        err = cmd_fragstats(argv[2]);
     } else if (strcmp(argv[1], "check") == 0 && argc == 3) {
         err = cmd_check(argv[2]);
     } else if (strcmp(argv[1], "list") == 0 && argc == 3) {

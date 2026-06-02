@@ -217,8 +217,13 @@ int fffs_finish_extent_metadata(struct fffs_file *file, uint16_t sector,
         uint16_t next, uint16_t span_len, uint32_t total_size,
         bool write_size, bool make_live, bool commit_index);
 int fffs_finish_deferred_root_metadata(struct fffs_file *file);
+int fffs_program_extent_metadata(struct fffs *fs, uint16_t sector,
+        uint16_t slot, uint8_t type, uint16_t data_off, uint16_t record_off,
+        bool write_footer, uint16_t data_len, uint16_t span_len,
+        uint32_t size_or_offset, uint16_t next, bool live);
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
-        uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
+        uint16_t min_free, uint16_t reject_slot,
+        bool normal_allocation, uint16_t *data_off,
         uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
 enum fffs_md_walk_result {
     FFFS_MD_WALK_RECORD,
@@ -345,6 +350,10 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
 int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size);
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
 int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector);
+int fffs_alloc_find_compaction_root_window(struct fffs *fs,
+        uint16_t source_sector, uint16_t slot, uint16_t data_len,
+        uint16_t *sector, uint16_t *data_off, uint16_t *record_off,
+        bool *needs_footer);
 void fffs_alloc_release_reservation(struct fffs_file *file);
 
 #endif

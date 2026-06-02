@@ -132,7 +132,8 @@ DEPS = $(ALL_OBJS:.o=.d)
 
 .PHONY: all test test-timing test-timing-full-index test-timing-nocache \
 	test-timing-nocache-small-scratch test-timing-compare test-churn \
-	test-churn-full-index test-churn-nocache test-workload \
+	test-churn-small-files test-churn-small-files-full test-churn-full-index \
+	test-churn-nocache test-workload \
 	test-crash-sweep test-api-crash-sweep test-sanitize test-full-index \
 	test-nocache test-full-alloc-map clean
 
@@ -208,6 +209,16 @@ test-timing-compare: test-timing test-timing-full-index test-timing-nocache
 
 test-churn: $(BUILD_DIR)/fffs_churn_probe
 	./$(BUILD_DIR)/fffs_churn_probe
+
+test-churn-small-files:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/churn-small-files-1m-720k \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_HOST_CHURN_PROFILE_SMALL_FILES=1 -DFFFS_INDEX_HASH_TABLE_SIZE=8192 -DFFFS_HOST_CHURN_FLASH_SIZE=1048576u -DFFFS_HOST_CHURN_TARGET_LIVE_BYTES=737280u -DFFFS_HOST_CHURN_TARGET_WRITTEN_BYTES=1572864u -DFFFS_HOST_CHURN_TARGET_SLACK_BYTES=65536u" \
+		test-churn
+
+test-churn-small-files-full:
+	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/churn-small-files-full \
+		CPPFLAGS="$(CPPFLAGS) -DFFFS_HOST_CHURN_PROFILE_SMALL_FILES=1 -DFFFS_INDEX_HASH_TABLE_SIZE=8192" \
+		test-churn
 
 test-churn-full-index:
 	$(MAKE) BUILD_DIR=$(BUILD_ROOT)/churn-full-index \

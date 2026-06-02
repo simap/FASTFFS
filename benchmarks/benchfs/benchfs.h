@@ -92,8 +92,17 @@ typedef struct {
     uint32_t churn_force_large_after_bytes;
     uint32_t churn_seed;
     uint32_t churn_delete_latency_samples;
+    uint32_t small_churn_max_files;
+    uint32_t small_churn_min_size;
+    uint32_t small_churn_max_size;
+    uint32_t small_churn_target_live_bytes;
+    uint32_t small_churn_target_written_bytes;
+    uint32_t small_churn_target_slack_bytes;
+    uint32_t small_churn_seed;
+    uint32_t small_churn_log_every_ops;
     bool erase_before_baseline_format;
     bool erase_before_churn_format;
+    bool erase_before_small_churn_format;
 } benchfs_config_t;
 
 typedef struct {

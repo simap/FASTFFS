@@ -547,6 +547,336 @@ int fffs_inspect_check(const struct fffs_backend *backend,
     return FFFS_OK;
 }
 
+enum frag_pin_class {
+    FRAG_ROOT_ONLY = 0,
+    FRAG_CONTINUATION_ONLY = 1,
+    FRAG_MIXED = 2,
+    FRAG_NO_LIVE = 3,
+    FRAG_CLASS_COUNT = 4,
+};
+
+struct frag_class_summary {
+    size_t sectors;
+    size_t reclaimable_bytes;
+    size_t live_bytes;
+    size_t immediate_free_bytes;
+};
+
+struct fragstats_summary {
+    size_t data_sectors;
+    size_t erased_sectors;
+    size_t owned_sectors;
+    size_t tombstoned_sectors;
+    size_t corrupt_sectors;
+    size_t span_tail_sectors;
+    size_t full_hint_sectors;
+    size_t immediate_free_sectors;
+    size_t immediate_free_bytes;
+    struct frag_class_summary class_summary[FRAG_CLASS_COUNT];
+};
+
+static void mark_range(bool *mask, size_t mask_size, size_t off, size_t len) {
+    if (off > mask_size) {
+        return;
+    }
+    if (len > mask_size - off) {
+        len = mask_size - off;
+    }
+    for (size_t i = 0; i < len; i++) {
+        mask[off + i] = true;
+    }
+}
+
+static size_t count_marked(const bool *mask, size_t size) {
+    size_t count = 0;
+    for (size_t i = 0; i < size; i++) {
+        if (mask[i]) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int range_erased(const struct fffs_backend *backend, size_t off,
+        size_t len, bool *erased) {
+    *erased = true;
+    uint8_t buf[64];
+    while (len > 0) {
+        size_t n = len < sizeof(buf) ? len : sizeof(buf);
+        int err = backend_read(backend, off, buf, n);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        for (size_t i = 0; i < n; i++) {
+            if (buf[i] != 0xff) {
+                *erased = false;
+                return FFFS_OK;
+            }
+        }
+        off += n;
+        len -= n;
+    }
+    return FFFS_OK;
+}
+
+static enum frag_pin_class pin_class_for_sector(bool has_root,
+        bool has_continuation) {
+    if (has_root && has_continuation) {
+        return FRAG_MIXED;
+    }
+    if (has_continuation) {
+        return FRAG_CONTINUATION_ONLY;
+    }
+    if (has_root) {
+        return FRAG_ROOT_ONLY;
+    }
+    return FRAG_NO_LIVE;
+}
+
+static const char *frag_class_name(enum frag_pin_class cls) {
+    switch (cls) {
+    case FRAG_ROOT_ONLY:
+        return "root-only";
+    case FRAG_CONTINUATION_ONLY:
+        return "continuation-only";
+    case FRAG_MIXED:
+        return "mixed";
+    case FRAG_NO_LIVE:
+        return "erase-only";
+    default:
+        return "unknown";
+    }
+}
+
+static int inspect_fragstats_sector(const struct fffs_backend *backend,
+        const struct fffs_inspect_summary *summary,
+        const uint16_t *live_heads, const bool *reachable,
+        const bool *span_heads, size_t sector,
+        struct fragstats_summary *stats, bool *live_mask,
+        bool *free_mask) {
+    uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+    size_t footer_off = sector * summary->sector_size +
+        summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+    int err = backend_read(backend, footer_off, footer, sizeof(footer));
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    stats->data_sectors++;
+    struct fffs_sector_footer view;
+    fffs_decode_sector_footer(footer, &view);
+    if (view.erased) {
+        stats->erased_sectors++;
+        return FFFS_OK;
+    }
+
+    uint32_t serial = 0;
+    if (!valid_footer(&view, &serial)) {
+        (void)serial;
+        stats->corrupt_sectors++;
+        return FFFS_OK;
+    }
+    if (view.tombstone_bits == FFFS_BITMIRROR_CLEARED) {
+        stats->tombstoned_sectors++;
+        return FFFS_OK;
+    }
+
+    stats->owned_sectors++;
+    if (view.full_bits == FFFS_BITMIRROR_CLEARED) {
+        stats->full_hint_sectors++;
+    }
+    bool span_tail = reachable[sector] && !span_heads[sector];
+    if (span_tail) {
+        stats->span_tail_sectors++;
+    }
+
+    memset(live_mask, 0, summary->sector_size * sizeof(*live_mask));
+    memset(free_mask, 0, summary->sector_size * sizeof(*free_mask));
+    mark_range(live_mask, summary->sector_size,
+            summary->sector_size - FFFS_SECTOR_FOOTER_SIZE,
+            FFFS_SECTOR_FOOTER_SIZE);
+
+    size_t cursor = summary->sector_size - FFFS_SECTOR_FOOTER_SIZE;
+    size_t claimed_data_end = 0;
+    size_t metadata_start = cursor;
+    bool has_root = false;
+    bool has_continuation = false;
+    bool parsed_live_record = false;
+    while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
+        struct decoded_md decoded;
+        enum md_state state;
+        size_t record_start = 0;
+        err = read_record_before(backend, summary, sector, cursor,
+                &decoded, &state, &record_start);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (state == MD_ERASED) {
+            break;
+        }
+        if (state == MD_CORRUPT) {
+            stats->corrupt_sectors++;
+            break;
+        }
+
+        cursor = record_start;
+        metadata_start = record_start;
+        size_t data_end = (size_t)decoded.data_off + decoded.data_len;
+        if (data_end > claimed_data_end) {
+            claimed_data_end = data_end;
+        }
+
+        bool record_live = false;
+        if (state == MD_VALID) {
+            err = record_reachable_for_slot(backend, summary, live_heads,
+                    decoded.slot, sector, &record_live);
+            if (err != FFFS_OK) {
+                return err;
+            }
+        }
+        if (record_live) {
+            parsed_live_record = true;
+            mark_range(live_mask, summary->sector_size, decoded.data_off,
+                    decoded.data_len);
+            mark_range(live_mask, summary->sector_size, record_start,
+                    FFFS_MD_FILE_RECORD_SIZE);
+            if (decoded.type == FFFS_MD_TYPE_FILE_ROOT_V1) {
+                has_root = true;
+            } else {
+                has_continuation = true;
+            }
+        }
+
+        if (cursor <= claimed_data_end) {
+            break;
+        }
+    }
+
+    if (span_tail) {
+        has_continuation = true;
+        if (!parsed_live_record) {
+            mark_range(live_mask, summary->sector_size, 0,
+                    summary->sector_size - FFFS_SECTOR_FOOTER_SIZE);
+        }
+    }
+
+    size_t immediate_free = 0;
+    if (metadata_start > claimed_data_end) {
+        bool erased = false;
+        err = range_erased(backend, sector * summary->sector_size +
+                claimed_data_end, metadata_start - claimed_data_end,
+                &erased);
+        if (err != FFFS_OK) {
+            return err;
+        }
+        if (erased) {
+            mark_range(free_mask, summary->sector_size, claimed_data_end,
+                    metadata_start - claimed_data_end);
+            immediate_free = metadata_start - claimed_data_end;
+        }
+    }
+    if (immediate_free != 0) {
+        stats->immediate_free_sectors++;
+        stats->immediate_free_bytes += immediate_free;
+    }
+
+    size_t live_bytes = count_marked(live_mask, summary->sector_size);
+    size_t free_bytes = count_marked(free_mask, summary->sector_size);
+    size_t reclaimable = 0;
+    for (size_t i = 0; i < summary->sector_size; i++) {
+        if (!live_mask[i] && !free_mask[i]) {
+            reclaimable++;
+        }
+    }
+
+    enum frag_pin_class cls = pin_class_for_sector(has_root,
+            has_continuation);
+    struct frag_class_summary *class_summary = &stats->class_summary[cls];
+    class_summary->sectors++;
+    class_summary->reclaimable_bytes += reclaimable;
+    class_summary->live_bytes += live_bytes;
+    class_summary->immediate_free_bytes += free_bytes;
+    return FFFS_OK;
+}
+
+int fffs_inspect_fragstats_dump(const struct fffs_backend *backend,
+        FILE *out) {
+    if (!out) {
+        return FFFS_ERR_INVALID;
+    }
+    struct fffs_inspect_summary summary;
+    int err = fffs_inspect_check(backend, &summary);
+    if (err != FFFS_OK) {
+        return err;
+    }
+
+    uint16_t *live_heads = calloc(FFFS_SLOT_COUNT, sizeof(*live_heads));
+    bool *seen_root = calloc(FFFS_SLOT_COUNT, sizeof(*seen_root));
+    bool *reachable = calloc(summary.sector_count, sizeof(*reachable));
+    bool *span_heads = calloc(summary.sector_count, sizeof(*span_heads));
+    bool *live_mask = calloc(summary.sector_size, sizeof(*live_mask));
+    bool *free_mask = calloc(summary.sector_size, sizeof(*free_mask));
+    if (!live_heads || !seen_root || !reachable || !span_heads ||
+            !live_mask || !free_mask) {
+        free(free_mask);
+        free(live_mask);
+        free(span_heads);
+        free(reachable);
+        free(seen_root);
+        free(live_heads);
+        return FFFS_ERR_NOMEM;
+    }
+
+    err = replay_active_index(backend, &summary, live_heads);
+    if (err == FFFS_OK) {
+        err = mark_live_chains(backend, &summary, live_heads, reachable,
+                span_heads, seen_root);
+    }
+
+    struct fragstats_summary stats = {0};
+    for (size_t sector = summary.index_sectors;
+            err == FFFS_OK && sector < summary.sector_count; sector++) {
+        err = inspect_fragstats_sector(backend, &summary, live_heads,
+                reachable, span_heads, sector, &stats, live_mask, free_mask);
+    }
+
+    if (err == FFFS_OK) {
+        fprintf(out, "FASTFFS fragstats: sector_size=%zu sector_count=%zu "
+                "index_sectors=%u active_index=%zu serial=%u\n",
+                summary.sector_size, summary.sector_count,
+                (unsigned)summary.index_sectors,
+                summary.active_index_sector,
+                (unsigned)summary.active_index_serial);
+        fprintf(out, "sectors: data=%zu owned=%zu erased=%zu "
+                "tombstoned=%zu corrupt=%zu span_tail=%zu full_hint=%zu\n",
+                stats.data_sectors, stats.owned_sectors,
+                stats.erased_sectors, stats.tombstoned_sectors,
+                stats.corrupt_sectors, stats.span_tail_sectors,
+                stats.full_hint_sectors);
+        fprintf(out, "immediate_free: sectors=%zu bytes=%zu\n",
+                stats.immediate_free_sectors, stats.immediate_free_bytes);
+        for (size_t i = 0; i < FRAG_CLASS_COUNT; i++) {
+            const struct frag_class_summary *class_summary =
+                &stats.class_summary[i];
+            fprintf(out, "class=%s sectors=%zu reclaimable_bytes=%zu "
+                    "live_bytes=%zu immediate_free_bytes=%zu\n",
+                    frag_class_name((enum frag_pin_class)i),
+                    class_summary->sectors,
+                    class_summary->reclaimable_bytes,
+                    class_summary->live_bytes,
+                    class_summary->immediate_free_bytes);
+        }
+    }
+
+    free(free_mask);
+    free(live_mask);
+    free(span_heads);
+    free(reachable);
+    free(seen_root);
+    free(live_heads);
+    return err;
+}
+
 static const char *md_state_name(enum md_state state, bool live) {
     switch (state) {
     case MD_ERASED:

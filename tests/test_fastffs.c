@@ -48,6 +48,7 @@
 #define TEST_MD_FILE_RECORD_SIZE 16u
 #define TEST_MD_FLAGS_VALID 0x7eu
 #define TEST_MD_FLAGS_TOMBSTONED 0x3cu
+#define TEST_MD_TYPE_FILE_CONT_V1 0x12u
 #define TEST_MD_TYPE_UNKNOWN 0x13u
 #define TEST_SECTOR_TYPE_FILE 0x01u
 #define TEST_SECTOR_FLAGS_VALID 0x7eu
@@ -91,7 +92,8 @@ struct fffs_md_record {
 int fffs_read_md_for_slot(struct fffs *fs, uint16_t sector,
         uint16_t want_slot, struct fffs_md_record *out);
 int fffs_find_sector_free_window(struct fffs *fs, uint16_t sector,
-        uint16_t min_free, uint16_t reject_slot, uint16_t *data_off,
+        uint16_t min_free, uint16_t reject_slot,
+        bool normal_allocation, uint16_t *data_off,
         uint16_t *record_off, bool *needs_footer, uint16_t *md_records);
 
 struct measured_ops {
@@ -525,7 +527,7 @@ static int test_free_window_rejects_partially_erased_footer_without_scan(void) {
     const struct ffsv_op_counts *before = ffsv_flash_counts(flash);
     uint64_t read_bytes_before = before[FFSV_OP_READ].bytes;
     ASSERT_EQ_INT(FFFS_ERR_NO_SPACE,
-            fffs_find_sector_free_window(&fs, sector, 1, 0,
+            fffs_find_sector_free_window(&fs, sector, 1, 0, true,
                 &data_off, &record_off, &needs_footer, &md_records));
     const struct ffsv_op_counts *after = ffsv_flash_counts(flash);
     ASSERT_TRUE(after[FFSV_OP_READ].bytes - read_bytes_before ==
@@ -2900,6 +2902,275 @@ static int test_span_head_skips_contiguous_continuations(void) {
     return 0;
 }
 
+static int test_root_alloc_skips_sector_with_continuation_record(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file large_file;
+    struct fffs_file tiny_file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    size_t large_size;
+    uint8_t *large;
+    uint8_t tiny = 0x51;
+    struct fffs_md_record cont_record;
+    uint16_t continuation_sector;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+    large_size = fs.sector_size + 512u;
+    large = malloc(large_size);
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    ASSERT_OK(fffs_open(&fs, &large_file, "large.bin",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    fs.alloc_cursor = (uint16_t)(large_file.head + 2u);
+    ASSERT_OK(fffs_write(&large_file, large, large_size));
+    ASSERT_TRUE(large_file.current != large_file.head);
+    continuation_sector = large_file.current;
+    ASSERT_OK(fffs_close(&large_file));
+
+    ASSERT_OK(fffs_open(&fs, &large_file, "large.bin", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read_md_for_slot(&fs, continuation_sector, large_file.slot,
+                &cont_record));
+    ASSERT_TRUE(cont_record.type == TEST_MD_TYPE_FILE_CONT_V1);
+    ASSERT_OK(fffs_close(&large_file));
+
+    fs.alloc_cursor = continuation_sector;
+    ASSERT_OK(fffs_open(&fs, &tiny_file, "tiny",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(tiny_file.head != continuation_sector);
+    ASSERT_OK(fffs_write(&tiny_file, &tiny, sizeof(tiny)));
+    ASSERT_OK(fffs_close(&tiny_file));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_continuation_alloc_requires_empty_sector(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    uint8_t small = 0x32;
+    const size_t large_size = 4096u * 2u;
+    uint8_t *large = malloc(large_size);
+    uint16_t root_only_sector;
+
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    fs.alloc_cursor = (uint16_t)(fs.index_sectors + 1u);
+    ASSERT_OK(write_chunks(&fs, "root-only", &small, sizeof(small)));
+    root_only_sector = (uint16_t)(fs.index_sectors + 1u);
+
+    fs.alloc_cursor = fs.index_sectors;
+    ASSERT_OK(fffs_open(&fs, &file, "large.bin",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(file.head == fs.index_sectors);
+    ASSERT_OK(fffs_write(&file, large, large_size));
+    ASSERT_TRUE(file.current != file.head);
+    ASSERT_TRUE(file.current != root_only_sector);
+    ASSERT_OK(fffs_close(&file));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_gc_compacts_root_only_sector_under_pressure(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file large_file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const uint8_t value[] = {0x10, 0x11, 0x12};
+    size_t large_size;
+    uint8_t *large;
+    uint8_t out[8] = {0};
+    size_t out_size = 0;
+    uint16_t source_sector;
+    uint16_t continuation_sector;
+    uint16_t erased_sector = 0;
+    uint16_t head = 0;
+    bool found = false;
+    struct fffs_inspect_summary inspect;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    fs.alloc_cursor = fs.index_sectors;
+    ASSERT_OK(write_chunks(&fs, "f000", value, sizeof(value)));
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f000"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    source_sector = head;
+    for (size_t i = 1; i < 8; i++) {
+        char name[8];
+        snprintf(name, sizeof(name), "f%03zu", i);
+        fs.alloc_cursor = source_sector;
+        ASSERT_OK(write_chunks(&fs, name, value, sizeof(value)));
+        ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
+                    &found));
+        ASSERT_TRUE(found);
+        ASSERT_TRUE(head == source_sector);
+    }
+    for (size_t i = 0; i < 6; i++) {
+        char name[8];
+        snprintf(name, sizeof(name), "f%03zu", i);
+        ASSERT_OK(fffs_delete_file(&fs, name));
+    }
+
+    large_size = fs.sector_size + 512u;
+    large = malloc(large_size);
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    fs.alloc_cursor = (uint16_t)(source_sector + 1u);
+    ASSERT_OK(fffs_open(&fs, &large_file, "large.bin",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&large_file, large, large_size));
+    ASSERT_TRUE(large_file.current != large_file.head);
+    continuation_sector = large_file.current;
+    ASSERT_OK(fffs_close(&large_file));
+
+    fs.alloc_cursor = continuation_sector;
+    fs.gc_cursor = source_sector;
+    ASSERT_OK(fffs_gc_until_erased(&fs, &erased_sector));
+    ASSERT_TRUE(erased_sector == source_sector);
+
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f006"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(head == continuation_sector);
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f007"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(head == continuation_sector);
+
+    ASSERT_OK(read_chunks(&fs, "f006", out, sizeof(out), &out_size));
+    ASSERT_TRUE(out_size == sizeof(value));
+    ASSERT_TRUE(memcmp(out, value, sizeof(value)) == 0);
+    memset(out, 0, sizeof(out));
+    ASSERT_OK(read_chunks(&fs, "f007", out, sizeof(out), &out_size));
+    ASSERT_TRUE(out_size == sizeof(value));
+    ASSERT_TRUE(memcmp(out, value, sizeof(value)) == 0);
+    ASSERT_OK(fffs_inspect_check(&backend, &inspect));
+    ASSERT_TRUE(inspect.live_entries_corrupt == 0);
+    ASSERT_TRUE(inspect.md_corrupt == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_replacement_refreshes_old_head_after_alloc_gc(void) {
+#if !FFFS_GC_ON_ALLOC_FAILURE
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file file;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    static uint8_t large[FFFS_DEFAULT_SECTOR_SIZE];
+    const uint8_t tiny = 0x21;
+    const uint8_t other_live[96] = {0x43};
+    const uint8_t replacement[] = {0x91, 0x92, 0x93};
+    uint8_t out[8] = {0};
+    size_t out_size = 0;
+    uint16_t source_sector = 0;
+    uint16_t other_sector = 0;
+    uint16_t head = 0;
+    bool found = false;
+    struct fffs_inspect_summary inspect;
+    char name[32];
+
+    memset(large, 0x68, sizeof(large));
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    fs.alloc_cursor = fs.index_sectors;
+    ASSERT_OK(write_chunks(&fs, "target", &tiny, sizeof(tiny)));
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("target"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    source_sector = head;
+    for (size_t i = 0; i < FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR - 1u; i++) {
+        snprintf(name, sizeof(name), "src%02zu", i);
+        fs.alloc_cursor = source_sector;
+        ASSERT_OK(write_chunks(&fs, name, &tiny, sizeof(tiny)));
+        ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
+                    &found));
+        ASSERT_TRUE(found);
+        ASSERT_TRUE(head == source_sector);
+    }
+
+    fs.alloc_cursor = (uint16_t)(source_sector + 1u);
+    ASSERT_OK(write_chunks(&fs, "other-live", other_live,
+                sizeof(other_live)));
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("other-live"),
+                &head, &found));
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(head != source_sector);
+    other_sector = head;
+    for (size_t i = 0; i < FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR - 1u; i++) {
+        snprintf(name, sizeof(name), "oth%02zu", i);
+        fs.alloc_cursor = other_sector;
+        ASSERT_OK(write_chunks(&fs, name, &tiny, sizeof(tiny)));
+        ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
+                    &found));
+        ASSERT_TRUE(found);
+        ASSERT_TRUE(head == other_sector);
+    }
+
+    for (size_t i = 0; i < FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR - 1u; i++) {
+        snprintf(name, sizeof(name), "src%02zu", i);
+        ASSERT_OK(fffs_delete_file(&fs, name));
+        snprintf(name, sizeof(name), "oth%02zu", i);
+        ASSERT_OK(fffs_delete_file(&fs, name));
+    }
+
+    size_t large_size = sizeof(large);
+    ASSERT_TRUE(large_size <= sizeof(large));
+    for (size_t i = 0; i < 14; i++) {
+        snprintf(name, sizeof(name), "fill%02zu", i);
+        ASSERT_OK(write_chunks(&fs, name, large, large_size));
+    }
+
+    fs.alloc_cursor = fs.index_sectors;
+    fs.gc_cursor = source_sector;
+    ASSERT_OK(fffs_open(&fs, &file, "target",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_TRUE(file.old_head == file.head);
+    ASSERT_OK(fffs_write(&file, replacement, sizeof(replacement)));
+    ASSERT_OK(fffs_close(&file));
+
+    ASSERT_OK(fffs_inspect_check(&backend, &inspect));
+    ASSERT_TRUE(inspect.live_entries_corrupt == 0);
+    ASSERT_TRUE(inspect.md_corrupt == 0);
+    ASSERT_OK(read_chunks(&fs, "target", out, sizeof(out), &out_size));
+    ASSERT_TRUE(out_size == sizeof(replacement));
+    ASSERT_TRUE(memcmp(out, replacement, sizeof(replacement)) == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
 static int test_read_seek_single_extent(void) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -3171,6 +3442,10 @@ int main(void) {
     failures += test_large_file_uses_noncontiguous_extents();
     failures += test_large_file_uses_contiguous_spans();
     failures += test_span_head_skips_contiguous_continuations();
+    failures += test_root_alloc_skips_sector_with_continuation_record();
+    failures += test_continuation_alloc_requires_empty_sector();
+    failures += test_gc_compacts_root_only_sector_under_pressure();
+    failures += test_replacement_refreshes_old_head_after_alloc_gc();
     failures += test_read_seek_single_extent();
     failures += test_read_seek_across_extents();
     failures += test_inspect_classifies_live_and_orphaned_metadata();

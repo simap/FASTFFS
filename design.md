@@ -487,7 +487,7 @@ A coarse bitmap could compress this down significiantly, while still having some
 Coarse map variants should use conservative "proven full bucket" semantics,
 not "some live sector was full" semantics. Since allocation attempts to fill sequentially, there should be many contiguous, completely full blocks of sectors that can be skipped over. There would still be some partially full buckets, but it would still be less scanning that scanning every sector.
 
-The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New writes fill a usable sector until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space, or until a soft metadata-density target suggests moving on. The allocator does not try to hunt for sparse holes before filling the current usable sector.
+The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New file roots and whole small files can share sectors with other roots. Continuations require an empty sector in normal allocation, so that compaction can do COW prefix compaction on a single sector. When allocation scans a sector and sees a continuation metadata record, it skips that sector for normal allocation and marks it full in the allocation bitmap. New writes fill a usable sector until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space, or until a soft metadata-density target suggests moving on. The allocator does not try to hunt for sparse holes before filling the current usable sector.
 
 The hard metadata-record cap provides an upper limit to file search time: allocation must not append past
 it. A lower target density is only a post-allocation cursor policy, and a target
@@ -535,6 +535,14 @@ Crash behavior:
 - Crash after index append: new version is live.
 - Crash before bitmap update: bitmap may be stale, but blank-check prevents corruption.
 
+A write can trigger allocation-pressure GC and root-only compaction before the
+replacement index record is appended. If the old root was moved during that
+allocation path and the original sector is reused for the new root, close must
+refresh the current old head from the index before making the replacement
+current and before tombstoning old metadata. The global index remains
+authoritative; the refresh prevents stale per-open replacement state from
+invalidating the wrong root.
+
 Delete:
 
 - Append `slot,0` to the global index.
@@ -556,11 +564,8 @@ data________________md1
 dataDDDDAAAATTTAAA_MD2md1
 ```
 
-Small files can share a sector. Larger files can spill into continuation sectors. A continuation tail may still leave room for other file starts or small files.
-
-New files prefer a sector with enough free space for the largest supported metadata record plus at least a configured minimum threshold of file data. A reasonable starting threshold is 128-256 bytes. The exact formula is a tunable definition, but runtime allocation should be a simple range check.
-
-Allocator policy should also reserve some metadata slack for later tombstones and amendment records. The exact reserve is TBD. Might be configurable, with reserve = 0 effectively disables MD ammendment records.
+Small files and file roots can share a sector. Larger files can spill into
+continuation sectors.
 
 ## Sector Footer
 
@@ -682,11 +687,13 @@ valid metadata. A non-CRC image must not reinterpret a CRC-prefixed physical
 record as current metadata. Mixed CRC/non-CRC metadata within one mounted image
 is not a baseline format.
 
-Metadata CRC32 excludes the stored CRC field and excludes the lifecycle byte,
-because lifecycle is programmed after the immutable body and may later be
-tombstoned. It covers the record's claimed sector-local data bytes and the
-immutable metadata body through the terminal type byte. CRC is not part of the
-4-byte index record because that would destroy compact index density.
+Metadata CRC32 excludes the stored CRC field and excludes the lifecycle byte.
+The baseline writer may program the lifecycle byte in the same record write as
+the CRC-covered body; lifecycle-last commit remains a possible later hardening
+choice if partial-write behavior warrants it. CRC covers the record's claimed
+sector-local data bytes and the immutable metadata body through the terminal
+type byte. CRC is not part of the 4-byte index record because that would destroy
+compact index density.
 
 ## Local Tombstones
 
@@ -694,7 +701,7 @@ The global index delete is authoritative.
 
 Sector-local tombstones are physical hints:
 
-- help compaction/defrag
+- help compaction
 - allow metadata updates by writing a new metadata entry and tombstoning the old one
 - are not required for namespace correctness
 
@@ -748,8 +755,17 @@ Allocation should consider the following:
 * Allocate sectors with enough free space for metadata plus a minimum amount of data. In other words, it should try to use leftover free space in a sector.
 * Multiple open writable files should not end up being allocated the same sectors. This ensures that open files can write contiguously to the data area without conflict.
 * It should not allocate sectors being used for any open files.
+* Continuation allocations should only use empty sectors.
+* Normal root allocations should skip sectors containing continuation metadata, but may share sectors containing other roots.
 * Ideally contiguous sectors are allocated when available. 
 * Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or used/free bitmaps.
+
+A reasonable starting minimum data threshold is 128-256 bytes. The exact formula
+is a tunable definition, but runtime allocation should be a simple range check.
+
+Allocator policy should also reserve some metadata slack for later tombstones
+and amendment records. The exact reserve is TBD. It might be configurable, with
+reserve = 0 effectively disabling MD amendment records.
 
 The allocator may temporarily reserve some sectors in a contiguous extent for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
 
@@ -985,7 +1001,7 @@ Several parts of the design can be optional or compile-time/runtime configuratio
 | metadata CRC32 | Runtime format-time image policy; adds 4 bytes to file metadata records and enforces CRC validation on mount/read/GC paths |
 | minimum first-write threshold | Avoids starting files in sectors with too little data space |
 | packed small files | Baseline density feature for tiny files |
-| sector-local tombstones | Baseline physical hint for GC/defrag; not required for namespace correctness |
+| sector-local tombstones | Baseline physical hint for GC/compaction; not required for namespace correctness |
 | linked single-extent metadata | Baseline continuation model |
 | cache extent list on open or first seek | Makes later seeks faster; uses per-open RAM |
 | background erase | Keeps write path fast; must be scheduled around frame/latency-sensitive work |
@@ -1027,7 +1043,44 @@ future helper could loop over GC steps until a supplied time budget is exhausted
 but the core can remain usable with a simple one-step API and caller-managed
 scheduling.
 
-Sector-local compaction is TBD. It can behave like defrag: copy whole live files elsewhere, append normal overwrite records to the index, and allow the old sector to become reclaimable through ordinary GC. Because file size is known during compaction, it can try to choose contiguous sectors and reduce the number of extents. Flash does not materially care about sequential access, but contiguous placement benefits the linked-extent representation slightly by reducing metadata and seek traversal.
+Data-sector compaction is currently root-only. This is intentionally narrower
+than general compaction: it does not copy continuation data, does not rewrite
+whole files, and does not need multi-sector space analysis. Normal allocation
+keeps continuations isolated so GC can identify root-only sectors with a local
+metadata walk.
+
+During the full allocation-pressure `fffs_gc_until_erased` scan, GC keeps a
+small sorted top-`n` list of compaction candidates. A candidate is a sector with
+live root metadata, no live continuation metadata, and no inflight writer state.
+The recorded candidate facts are:
+
+- sector number
+- trapped reclaimable bytes
+- live root count
+
+Candidate ranking prefers sectors with more trapped reclaimable bytes. If that
+is tied, it prefers more live roots. This keeps the ranking tied to actual
+space/copy shape instead of mixing unrelated weights such as wear count into
+the reclaim decision.
+
+If erase-only GC cannot free a sector and fsinfo estimates enough unused space
+to try a root-only move, GC copies live roots out of the best candidate. Each
+copied root is written as ordinary root metadata at a valid destination window,
+and an index record is appended so the copied root becomes current. The
+destination allocator skips the source sector and inflight sectors. It uses a
+relaxed root-placement policy, so copied roots may land in sectors that contain
+continuation metadata under pressure, while still requiring erased writable
+space and rejecting ordinary allocation conflicts. If all live roots are copied,
+the source sector is erased. If the copy fails partway through, old roots that
+were successfully copied are tombstoned only after reclassification shows they
+are no longer current.
+
+The current implementation intentionally leaves continuation-held reclaimable
+space alone. Compacting mixed continuation/root sectors, continuation-only tail
+waste, linked span prefixes, and whole files requires a separate general
+compaction design that accounts for copied bytes, destination space, source
+sectors made freeable, new trapped space, erase cost, wear, and foreground
+stall time.
 
 Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
 

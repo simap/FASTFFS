@@ -21,32 +21,68 @@
      ((FFFS_INDEX_CACHE_BYTES(INDEX_HASH_TABLE_SIZE) + sizeof(uint32_t) - 1u) / \
       sizeof(uint32_t)) : 1u)
 
+#ifndef FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_PROFILE_SMALL_FILES 0
+#endif
+
 #ifndef FFFS_HOST_CHURN_FLASH_SIZE
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_FLASH_SIZE (4u * 1024u * 1024u)
+#else
 #define FFFS_HOST_CHURN_FLASH_SIZE (2u * 1024u * 1024u)
+#endif
 #endif
 
 #ifndef FFFS_HOST_CHURN_TARGET_LIVE_BYTES
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_TARGET_LIVE_BYTES 2308848u
+#else
 #define FFFS_HOST_CHURN_TARGET_LIVE_BYTES (512u * 1024u)
+#endif
 #endif
 
 #ifndef FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES (8u * 1024u * 1024u)
+#else
 #define FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES (1u * 1024u * 1024u)
+#endif
 #endif
 
 #ifndef FFFS_HOST_CHURN_TARGET_SLACK_BYTES
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_TARGET_SLACK_BYTES (128u * 1024u)
+#else
 #define FFFS_HOST_CHURN_TARGET_SLACK_BYTES (64u * 1024u)
+#endif
 #endif
 
 #ifndef FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES UINT32_MAX
+#else
 #define FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES (768u * 1024u)
+#endif
+#endif
+
+#ifndef FFFS_HOST_CHURN_MAX_FILES
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define FFFS_HOST_CHURN_MAX_FILES 5000u
+#else
+#define FFFS_HOST_CHURN_MAX_FILES BENCH_CHURN_MAX_FILES
+#endif
+#endif
+
+#ifndef FFFS_HOST_CHURN_SMALL_MIN_SIZE
+#define FFFS_HOST_CHURN_SMALL_MIN_SIZE 1u
+#endif
+
+#ifndef FFFS_HOST_CHURN_SMALL_MAX_SIZE
+#define FFFS_HOST_CHURN_SMALL_MAX_SIZE (5u * 1024u)
 #endif
 
 #ifndef FFFS_HOST_CHURN_GC_STEPS_PER_OP
 #define FFFS_HOST_CHURN_GC_STEPS_PER_OP 16u
-#endif
-
-#ifndef FFFS_HOST_CHURN_FORCED_GC_STEPS
-#define FFFS_HOST_CHURN_FORCED_GC_STEPS 1024u
 #endif
 
 #ifndef FFFS_HOST_CHURN_SCRATCH_SIZE
@@ -54,7 +90,11 @@
 #endif
 
 #define FFFS_HOST_CHURN_SEED 0x4f465346u
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+#define MAX_CHURN_FILE_SIZE FFFS_HOST_CHURN_SMALL_MAX_SIZE
+#else
 #define MAX_CHURN_FILE_SIZE (350u * 1024u)
+#endif
 
 #ifndef FFFS_HOST_CHURN_IMAGE_PREFIX
 #define FFFS_HOST_CHURN_IMAGE_PREFIX "churn"
@@ -63,6 +103,8 @@
 #if FFFS_HOST_CHURN_SCRATCH_SIZE < FFFS_MIN_SCRATCH_SIZE
 #error "FFFS_HOST_CHURN_SCRATCH_SIZE must be at least FFFS_MIN_SCRATCH_SIZE"
 #endif
+
+static const bench_churn_profile_t *host_churn_profile(void);
 
 struct op_summary {
     uint64_t calls;
@@ -105,6 +147,8 @@ struct profile_stats {
 static uint32_t index_cache[INDEX_CACHE_WORDS];
 static uint32_t remount_cache[INDEX_CACHE_WORDS];
 static uint8_t scratch[FFFS_HOST_CHURN_SCRATCH_SIZE];
+static bench_churn_slot_t model_slots[FFFS_HOST_CHURN_MAX_FILES];
+static uint32_t slot_seed[FFFS_HOST_CHURN_MAX_FILES];
 static uint8_t *io_buffer;
 
 #if FFFS_PROFILE_TRACE
@@ -368,22 +412,24 @@ static int list_all(struct fffs *fs, size_t *out_count) {
 
 static int validate_live_set(struct fffs *fs, const bench_churn_model_t *model,
         const char *label) {
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
         if (!model->slots[i].live) {
             continue;
         }
         bool exists = false;
         int err = fffs_exists(fs, model->slots[i].name, &exists);
         if (err != FFFS_OK) {
-            fprintf(stderr, "%s exists %s slot=%d size=%u failed: %s\n",
-                    label, model->slots[i].name, i, model->slots[i].size,
+            fprintf(stderr, "%s exists %s slot=%u size=%u failed: %s\n",
+                    label, model->slots[i].name, (unsigned)i,
+                    model->slots[i].size,
                     fffs_status_name(err));
             return err;
         }
         if (!exists) {
-            fprintf(stderr, "%s missing live model file name=%s slot=%d "
+            fprintf(stderr, "%s missing live model file name=%s slot=%u "
                     "size=%u class=%s\n",
-                    label, model->slots[i].name, i, model->slots[i].size,
+                    label, model->slots[i].name, (unsigned)i,
+                    model->slots[i].size,
                     bench_churn_class_name(model->slots[i].cls));
             return FFFS_ERR_NOT_FOUND;
         }
@@ -391,21 +437,26 @@ static int validate_live_set(struct fffs *fs, const bench_churn_model_t *model,
     return FFFS_OK;
 }
 
-static void summarize_ops(struct ffsv_flash *flash, uint64_t before_seq,
-        uint64_t after_seq, struct op_summary out[FFSV_OP_COUNT]) {
+static void snapshot_ops(struct ffsv_flash *flash,
+        struct op_summary out[FFSV_OP_COUNT]) {
     memset(out, 0, sizeof(out[0]) * FFSV_OP_COUNT);
-    size_t count = 0;
-    const struct ffsv_op_record *log = ffsv_flash_log(flash, &count);
-    for (size_t i = 0; i < count; i++) {
-        const struct ffsv_op_record *r = &log[i];
-        if (r->sequence < before_seq || r->sequence >= after_seq ||
-                r->type >= FFSV_OP_COUNT) {
-            continue;
-        }
-        out[r->type].calls += 1;
-        out[r->type].bytes += r->committed_bytes != 0 ?
-            r->committed_bytes : r->size;
-        out[r->type].ns += r->time_after_ns - r->time_before_ns;
+    const struct ffsv_op_counts *counts = ffsv_flash_counts(flash);
+    if (!counts) {
+        return;
+    }
+    for (size_t i = 0; i < FFSV_OP_COUNT; i++) {
+        out[i].calls = counts[i].calls;
+        out[i].bytes = counts[i].bytes;
+    }
+}
+
+static void diff_ops(const struct op_summary before[FFSV_OP_COUNT],
+        const struct op_summary after[FFSV_OP_COUNT],
+        struct op_summary out[FFSV_OP_COUNT]) {
+    memset(out, 0, sizeof(out[0]) * FFSV_OP_COUNT);
+    for (size_t i = 0; i < FFSV_OP_COUNT; i++) {
+        out[i].calls = after[i].calls - before[i].calls;
+        out[i].bytes = after[i].bytes - before[i].bytes;
     }
 }
 
@@ -415,6 +466,35 @@ static void add_flash_counts(struct class_stats *stats,
     stats->flash_programs += ops[FFSV_OP_PROGRAM].calls;
     stats->flash_erases += ops[FFSV_OP_ERASE].calls;
     stats->flash_blank_checks += ops[FFSV_OP_BLANK_CHECK].calls;
+}
+
+static int execute_churn_delete(struct fffs *fs, struct ffsv_flash *flash,
+        bench_churn_model_t *model, const bench_churn_event_t *event,
+        struct class_stats delete_stats[BENCH_CHURN_CLASS_COUNT],
+        uint32_t *delete_ops) {
+    struct op_summary before_ops[FFSV_OP_COUNT];
+    struct op_summary after_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, before_ops);
+    uint64_t before = ffsv_flash_time_ns(flash);
+    int err = fffs_delete_file(fs, event->name);
+    uint64_t after = ffsv_flash_time_ns(flash);
+    snapshot_ops(flash, after_ops);
+    if (err != FFFS_OK) {
+        fprintf(stderr, "delete %s failed: %s\n", event->name,
+                fffs_status_name(err));
+        return err;
+    }
+
+    struct op_summary ops[FFSV_OP_COUNT];
+    diff_ops(before_ops, after_ops, ops);
+    struct class_stats *s = &delete_stats[event->cls];
+    s->ops++;
+    s->bytes += event->size;
+    s->ns += after - before;
+    add_flash_counts(s, ops);
+    bench_churn_model_apply(model, event);
+    (*delete_ops)++;
+    return FFFS_OK;
 }
 
 static const char *profile_bucket_name(enum profile_bucket bucket) {
@@ -586,6 +666,11 @@ static void print_wear_stats(struct ffsv_flash *flash, const char *label,
 }
 
 static const char *class_name(bench_churn_class_t cls) {
+    const bench_churn_profile_t *profile = host_churn_profile();
+    if ((int)cls >= 0 && cls < BENCH_CHURN_CLASS_COUNT &&
+            profile->classes[cls].name) {
+        return profile->classes[cls].name;
+    }
     return bench_churn_class_name(cls);
 }
 
@@ -611,7 +696,7 @@ static void print_class_stats(const char *label,
 
 static uint32_t count_live_slots(const bench_churn_model_t *model) {
     uint32_t live = 0;
-    for (int i = 0; i < BENCH_CHURN_MAX_FILES; ++i) {
+    for (uint32_t i = 0; i < model->slot_count; ++i) {
         if (model->slots[i].live) {
             live++;
         }
@@ -681,6 +766,110 @@ static void dump_final_image(struct ffsv_flash *flash, const char *profile_name)
     }
 }
 
+static void print_no_space_diagnostics(struct fffs *fs,
+        const bench_churn_model_t *model, const bench_churn_event_t *event) {
+    struct fffs_fsinfo info;
+    int err = fffs_fsinfo(fs, &info, FFFS_FSINFO_REFRESH_IF_NEEDED |
+            FFFS_FSINFO_ESTIMATE_METADATA);
+    if (err != FFFS_OK) {
+        fprintf(stderr, "no_space fsinfo failed: %s\n",
+                fffs_status_name(err));
+        return;
+    }
+
+    bool total_valid =
+        (info.valid_flags & FFFS_FSINFO_TOTAL_VALID) != 0;
+    bool committed_bytes_valid =
+        (info.valid_flags & FFFS_FSINFO_COMMITTED_BYTES_VALID) != 0;
+    bool inflight_valid =
+        (info.valid_flags & FFFS_FSINFO_INFLIGHT_VALID) != 0;
+    bool metadata_valid =
+        (info.valid_flags & FFFS_FSINFO_METADATA_ESTIMATE_VALID) != 0;
+    bool file_count_valid =
+        (info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) != 0;
+    uint32_t used = 0;
+    bool used_valid = committed_bytes_valid && inflight_valid;
+    if (used_valid) {
+        used = info.committed_data_bytes + info.inflight_data_bytes;
+        if (metadata_valid) {
+            used += info.estimated_metadata_bytes;
+        }
+    }
+    uint32_t fs_free = total_valid && used_valid && info.total_bytes > used ?
+        info.total_bytes - used : 0;
+    bool fs_free_valid = total_valid && used_valid;
+    uint32_t model_limit =
+        model->target_live_bytes + model->target_slack_bytes;
+    uint32_t model_free = model_limit > model->live_bytes ?
+        model_limit - model->live_bytes : 0;
+
+    fprintf(stderr,
+            "no_space fsinfo valid=0x%08x total_valid=%d used_valid=%d file_count_valid=%d metadata_valid=%d total=%u used_est=%u fs_free_valid=%d fs_free_est=%u files=%u committed_data=%u inflight_files=%u inflight_data=%u metadata=%u request=%u model_live=%u model_live_limit=%u model_free_budget=%u fragmentation_hint=%d\n",
+            info.valid_flags, total_valid, used_valid, file_count_valid,
+            metadata_valid, info.total_bytes, used, fs_free_valid, fs_free,
+            info.committed_file_count, info.committed_data_bytes,
+            info.inflight_file_count, info.inflight_data_bytes,
+            info.estimated_metadata_bytes, event->size, model->live_bytes,
+            model_limit, model_free,
+            fs_free_valid && fs_free >= event->size &&
+                model_free >= event->size);
+    fprintf(stderr,
+            "no_space progress events=%u writes=%u deletes=%u creates=%u replaces=%u live_files=%u live_bytes=%u total_written=%u target_written=%u pending_slot=%d pending_replacing=%d request=%u\n",
+            model->op_count + model->delete_count, model->op_count,
+            model->delete_count, model->create_count, model->replace_count,
+            model->live_file_count, model->live_bytes, model->total_written,
+            model->target_written_bytes, event->slot, event->replacing,
+            event->size);
+    size_t count = 0;
+    for (size_t i = 0; i < FFFS_COMPACTION_CANDIDATE_COUNT; i++) {
+        if (fs->compaction_candidates[i].sector != 0) {
+            count++;
+        }
+    }
+    fprintf(stderr, "no_space compaction_candidates count=%zu", count);
+    for (size_t i = 0; i < FFFS_COMPACTION_CANDIDATE_COUNT; i++) {
+        const struct fffs_compaction_candidate *candidate =
+            &fs->compaction_candidates[i];
+        if (candidate->sector == 0) {
+            continue;
+        }
+        fprintf(stderr, " sector%zu=%u trapped%zu=%u roots%zu=%u",
+                i, candidate->sector, i, candidate->trapped_reclaimable,
+                i, candidate->live_root_count);
+    }
+    fprintf(stderr, "\n");
+}
+
+static const bench_churn_profile_t *host_churn_profile(void) {
+#if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
+    static const bench_churn_profile_t profile = {
+        .name_prefix = "sf",
+        .replace_percent = 25,
+        .protect_first_large = false,
+        .classes = {
+            [BENCH_CHURN_CLASS_SMALL] = {
+                .name = "small_1_5k",
+                .weight = 1000,
+                .min_size = FFFS_HOST_CHURN_SMALL_MIN_SIZE,
+                .max_size = FFFS_HOST_CHURN_SMALL_MAX_SIZE,
+            },
+        },
+    };
+    return &profile;
+#else
+    return bench_churn_default_profile();
+#endif
+}
+
+static int init_host_churn_model(bench_churn_model_t *model) {
+    return bench_churn_model_init_profile(model, FFFS_HOST_CHURN_SEED,
+            FFFS_HOST_CHURN_TARGET_LIVE_BYTES,
+            FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES,
+            FFFS_HOST_CHURN_TARGET_SLACK_BYTES,
+            FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES,
+            host_churn_profile(), model_slots, FFFS_HOST_CHURN_MAX_FILES);
+}
+
 static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     struct ffsv_flash *flash = NULL;
     struct fffs_backend backend;
@@ -696,18 +885,13 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
 #if FFFS_PROFILE_TRACE
     struct trace_capture churn_scope_profile;
     struct trace_capture gc_scope_profile;
-    struct trace_capture forced_gc_scope_profile;
     struct trace_capture list_scope_profile;
     struct trace_capture mount_scope_profile;
     struct trace_capture read_scope_profile;
 #endif
-    uint64_t forced_gc_ns = 0;
-    size_t forced_gc_erased = 0;
-    struct profile_stats forced_gc_profile[PROFILE_COUNT] = {0};
     uint32_t write_ops = 0;
     uint32_t delete_ops = 0;
     uint32_t no_space_retries = 0;
-    uint32_t slot_seed[BENCH_CHURN_MAX_FILES] = {0};
     int err;
 
     struct ffsv_flash_config cfg;
@@ -734,6 +918,7 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
            profile_name, cache_mode_name(),
            FFFS_HOST_CHURN_FLASH_SIZE / 1024u,
            FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES / 1024u);
+    fflush(stdout);
 
     uint64_t format_before = ffsv_flash_time_ns(flash);
     err = fffs_format(&backend, NULL);
@@ -759,19 +944,24 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
         return 1;
     }
 
-    bench_churn_model_init(&model, FFFS_HOST_CHURN_SEED,
-            FFFS_HOST_CHURN_TARGET_LIVE_BYTES,
-            FFFS_HOST_CHURN_TARGET_WRITTEN_BYTES,
-            FFFS_HOST_CHURN_TARGET_SLACK_BYTES,
-            FFFS_HOST_CHURN_FORCE_LARGE_AFTER_BYTES);
+    memset(slot_seed, 0, sizeof(slot_seed));
+    err = init_host_churn_model(&model);
+    if (err != 0) {
+        fprintf(stderr, "churn model init failed\n");
+        fffs_unmount(&fs);
+        dump_final_image(flash, profile_name);
+        ffsv_flash_destroy(flash);
+        return 1;
+    }
 
 #if FFFS_PROFILE_TRACE
     trace_reset(&churn_scope_profile, flash);
     trace_reset(&gc_scope_profile, flash);
-    trace_reset(&forced_gc_scope_profile, flash);
     active_trace = &churn_scope_profile;
 #endif
     uint64_t churn_before_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary churn_before_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, churn_before_ops);
     uint64_t churn_before = ffsv_flash_time_ns(flash);
     while (true) {
         bench_churn_event_t event;
@@ -785,56 +975,33 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
             break;
         }
 
-        uint64_t before_seq = ffsv_flash_next_sequence(flash);
-        uint64_t before = ffsv_flash_time_ns(flash);
         if (type == BENCH_CHURN_EVENT_DELETE) {
-            err = fffs_delete_file(&fs, event.name);
-            uint64_t after = ffsv_flash_time_ns(flash);
-            uint64_t after_seq = ffsv_flash_next_sequence(flash);
+            err = execute_churn_delete(&fs, flash, &model, &event,
+                    delete_stats, &delete_ops);
             if (err != FFFS_OK) {
-                fprintf(stderr, "delete %s failed: %s\n", event.name,
-                        fffs_status_name(err));
                 break;
             }
-            struct op_summary ops[FFSV_OP_COUNT];
-            summarize_ops(flash, before_seq, after_seq, ops);
-            struct class_stats *s = &delete_stats[event.cls];
-            s->ops++;
-            s->bytes += event.size;
-            s->ns += after - before;
-            add_flash_counts(s, ops);
-            bench_churn_model_apply(&model, &event);
-            delete_ops++;
         } else {
+            struct op_summary before_ops[FFSV_OP_COUNT];
+            struct op_summary after_ops[FFSV_OP_COUNT];
+            snapshot_ops(flash, before_ops);
+            uint64_t before = ffsv_flash_time_ns(flash);
             err = write_file(&fs, event.name, event.size, event.write_seed);
             if (err == FFFS_ERR_NO_SPACE) {
                 no_space_retries++;
-                uint64_t local_gc_ns = 0;
-                size_t local_erased = 0;
-                int gc_err = run_gc_steps(&fs, FFFS_HOST_CHURN_FORCED_GC_STEPS,
-                        &local_gc_ns, &local_erased, forced_gc_profile
-#if FFFS_PROFILE_TRACE
-                        , &forced_gc_scope_profile
-#endif
-                        );
-                forced_gc_ns += local_gc_ns;
-                forced_gc_erased += local_erased;
-                if (gc_err == FFFS_OK) {
-                    before_seq = ffsv_flash_next_sequence(flash);
-                    before = ffsv_flash_time_ns(flash);
-                    err = write_file(&fs, event.name, event.size,
-                            event.write_seed);
-                }
             }
             uint64_t after = ffsv_flash_time_ns(flash);
-            uint64_t after_seq = ffsv_flash_next_sequence(flash);
+            snapshot_ops(flash, after_ops);
             if (err != FFFS_OK) {
+                if (err == FFFS_ERR_NO_SPACE) {
+                    print_no_space_diagnostics(&fs, &model, &event);
+                }
                 fprintf(stderr, "write %s size=%u failed: %s\n", event.name,
                         event.size, fffs_status_name(err));
                 break;
             }
             struct op_summary ops[FFSV_OP_COUNT];
-            summarize_ops(flash, before_seq, after_seq, ops);
+            diff_ops(before_ops, after_ops, ops);
             struct class_stats *s = &write_stats[event.cls];
             s->ops++;
             s->bytes += event.size;
@@ -863,6 +1030,8 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
     uint64_t churn_after = ffsv_flash_time_ns(flash);
     uint64_t churn_after_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary churn_after_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, churn_after_ops);
 #if FFFS_PROFILE_TRACE
     active_trace = NULL;
 #endif
@@ -880,10 +1049,14 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     active_trace = &list_scope_profile;
 #endif
     uint64_t list_before_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary list_before_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, list_before_ops);
     uint64_t list_before = ffsv_flash_time_ns(flash);
     err = list_all(&fs, &listed);
     uint64_t list_after = ffsv_flash_time_ns(flash);
     uint64_t list_after_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary list_after_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, list_after_ops);
 #if FFFS_PROFILE_TRACE
     active_trace = NULL;
 #endif
@@ -908,10 +1081,14 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     active_trace = &mount_scope_profile;
 #endif
     uint64_t mount_before_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary mount_before_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, mount_before_ops);
     uint64_t mount_before = ffsv_flash_time_ns(flash);
     err = mount_fs(&remounted, &backend, remount_cache);
     uint64_t mount_after = ffsv_flash_time_ns(flash);
     uint64_t mount_after_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary mount_after_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, mount_after_ops);
 #if FFFS_PROFILE_TRACE
     active_trace = NULL;
 #endif
@@ -934,19 +1111,23 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     active_trace = &read_scope_profile;
 #endif
     uint64_t read_before_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary read_before_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, read_before_ops);
     uint64_t read_before = ffsv_flash_time_ns(flash);
     size_t read_files = 0;
-    for (int pass = 0; pass < BENCH_CHURN_MAX_FILES; ++pass) {
-        int slot = (pass * 73 + 19) % BENCH_CHURN_MAX_FILES;
+    for (uint32_t pass = 0; pass < model.slot_count; ++pass) {
+        uint32_t slot = (pass * 73u + 19u) % model.slot_count;
         if (!model.slots[slot].live) {
             continue;
         }
         bench_churn_slot_t *s = &model.slots[slot];
-        uint64_t before_seq = ffsv_flash_next_sequence(flash);
+        struct op_summary before_ops[FFSV_OP_COUNT];
+        struct op_summary after_ops[FFSV_OP_COUNT];
+        snapshot_ops(flash, before_ops);
         uint64_t before = ffsv_flash_time_ns(flash);
         err = read_file(&remounted, s->name, s->size, slot_seed[slot]);
         uint64_t after = ffsv_flash_time_ns(flash);
-        uint64_t after_seq = ffsv_flash_next_sequence(flash);
+        snapshot_ops(flash, after_ops);
         if (err != FFFS_OK) {
             fprintf(stderr, "read %s failed: %s\n", s->name,
                     fffs_status_name(err));
@@ -956,7 +1137,7 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
             return 1;
         }
         struct op_summary ops[FFSV_OP_COUNT];
-        summarize_ops(flash, before_seq, after_seq, ops);
+        diff_ops(before_ops, after_ops, ops);
         struct class_stats *rs = &read_stats[s->cls];
         rs->ops++;
         rs->bytes += s->size;
@@ -966,6 +1147,8 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     }
     uint64_t read_after = ffsv_flash_time_ns(flash);
     uint64_t read_after_seq = ffsv_flash_next_sequence(flash);
+    struct op_summary read_after_ops[FFSV_OP_COUNT];
+    snapshot_ops(flash, read_after_ops);
 #if FFFS_PROFILE_TRACE
     active_trace = NULL;
 #endif
@@ -978,10 +1161,10 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     struct profile_stats list_profile[PROFILE_COUNT];
     struct profile_stats mount_profile[PROFILE_COUNT];
     struct profile_stats read_profile[PROFILE_COUNT];
-    summarize_ops(flash, churn_before_seq, churn_after_seq, churn_ops);
-    summarize_ops(flash, list_before_seq, list_after_seq, list_ops);
-    summarize_ops(flash, mount_before_seq, mount_after_seq, mount_ops);
-    summarize_ops(flash, read_before_seq, read_after_seq, read_ops);
+    diff_ops(churn_before_ops, churn_after_ops, churn_ops);
+    diff_ops(list_before_ops, list_after_ops, list_ops);
+    diff_ops(mount_before_ops, mount_after_ops, mount_ops);
+    diff_ops(read_before_ops, read_after_ops, read_ops);
     summarize_profile(flash, &fs, churn_before_seq, churn_after_seq,
             churn_profile);
     summarize_profile(flash, &fs, list_before_seq, list_after_seq,
@@ -1007,16 +1190,11 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
     printf("gc idle                 steps_per_op=%u time=%9.3f ms erased=%zu\n",
            FFFS_HOST_CHURN_GC_STEPS_PER_OP,
            (double)gc_ns / 1000000.0, gc_erased);
-    printf("gc forced               steps=%u time=%9.3f ms erased=%zu\n",
-           FFFS_HOST_CHURN_FORCED_GC_STEPS,
-           (double)forced_gc_ns / 1000000.0, forced_gc_erased);
     print_profile("churn total", churn_profile);
     print_profile("gc idle", gc_profile);
-    print_profile("gc forced", forced_gc_profile);
 #if FFFS_PROFILE_TRACE
     print_scope_profile("churn total", &churn_scope_profile);
     print_scope_profile("gc idle", &gc_scope_profile);
-    print_scope_profile("gc forced", &forced_gc_scope_profile);
 #endif
     print_class_stats("write", write_stats);
     print_class_stats("delete", delete_stats);
