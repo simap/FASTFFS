@@ -74,25 +74,8 @@ static bool compaction_candidate_better(
     return false;
 }
 
-static int gc_update_compaction_candidate(struct fffs *fs, uint16_t sector,
-        enum fffs_md_walk_result walk_result) {
-    size_t immediate_free = 0;
-    if (walk_result == FFFS_MD_WALK_END_ERASED &&
-            fs->gc_md.cursor > fs->gc_md.claimed_data_end) {
-        size_t free_len = fs->gc_md.cursor - fs->gc_md.claimed_data_end;
-        if (free_len >= FFFS_ALLOC_MIN_USABLE_FREE) {
-            int err = fffs_flash_span_is_erased(fs,
-                    (size_t)sector * fs->sector_size +
-                        fs->gc_md.claimed_data_end,
-                    free_len);
-            if (err == FFFS_OK) {
-                immediate_free = free_len;
-            } else if (err != FFFS_ERR_NO_SPACE) {
-                return err;
-            }
-        }
-    }
-
+static void gc_update_compaction_candidate(struct fffs *fs, uint16_t sector,
+        size_t immediate_free) {
     size_t accounted = fs->gc_md.live_bytes + immediate_free;
     size_t trapped = accounted < fs->sector_size ?
         fs->sector_size - accounted : 0;
@@ -109,7 +92,7 @@ static int gc_update_compaction_candidate(struct fffs *fs, uint16_t sector,
     size_t pos = FFFS_COMPACTION_CANDIDATE_COUNT - 1u;
     if (!compaction_candidate_better(&candidate,
                 &fs->compaction_candidates[pos])) {
-        return FFFS_OK;
+        return;
     }
 
     fs->compaction_candidates[pos] = candidate;
@@ -122,7 +105,6 @@ static int gc_update_compaction_candidate(struct fffs *fs, uint16_t sector,
         fs->compaction_candidates[pos] = tmp;
         pos--;
     }
-    return FFFS_OK;
 }
 
 static int gc_fsinfo_allows_compaction(struct fffs *fs,
@@ -475,7 +457,6 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     struct fffs_sector_footer footer;
     fffs_decode_sector_footer(footer_bytes, &footer);
     bool erase_sector = false;
-    bool full_hint = false;
     if (footer.erased) {
         err = fffs_flash_span_is_erased(fs, s * fs->sector_size,
                 fs->sector_size);
@@ -502,8 +483,6 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     } else if (!fffs_lifecycle_is_live(footer.valid_bits,
                 footer.tombstone_bits)) {
         return FFFS_ERR_CORRUPT;
-    } else {
-        full_hint = footer.full_bits == FFFS_BITMIRROR_CLEARED;
     }
 
     if (erase_sector) {
@@ -607,16 +586,40 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
     }
 
     if (fs->gc_md.live_seen) {
-        if (fs->gc_md.live_root_seen &&
-                !fs->gc_md.live_continuation_seen &&
-                !fs->gc_md.inflight_seen) {
-            err = gc_update_compaction_candidate(fs, (uint16_t)s,
-                    walk_result);
-            if (err != FFFS_OK) {
-                return err;
+        bool root_only_compaction_candidate = fs->gc_md.live_root_seen &&
+            !fs->gc_md.live_continuation_seen && !fs->gc_md.inflight_seen;
+        bool normal_alloc_full = fs->gc_md.live_continuation_seen ||
+            fs->gc_md.live_root_count >=
+                FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR;
+        size_t immediate_free = 0;
+        if ((root_only_compaction_candidate || !normal_alloc_full) &&
+                walk_result == FFFS_MD_WALK_END_ERASED &&
+                fs->gc_md.cursor > fs->gc_md.claimed_data_end) {
+            size_t free_len = fs->gc_md.cursor -
+                fs->gc_md.claimed_data_end;
+            if (free_len >= FFFS_ALLOC_MIN_USABLE_FREE) {
+                //FIXME: this check is expensive for candidate selection, but catches sectors where a crash has left junk filling up the sector without a MD entry.
+                err = fffs_flash_span_is_erased(fs,
+                        (size_t)s * fs->sector_size +
+                            fs->gc_md.claimed_data_end,
+                        free_len);
+                if (err == FFFS_OK) {
+                    immediate_free = free_len;
+                } else if (err != FFFS_ERR_NO_SPACE) {
+                    return err;
+                }
             }
         }
-        if (full_hint) {
+        if (root_only_compaction_candidate) {
+            gc_update_compaction_candidate(fs, (uint16_t)s,
+                    immediate_free);
+        }
+        if (!normal_alloc_full) {
+            size_t required_window = FFFS_ALLOC_MIN_USABLE_FREE +
+                FFFS_MD_FILE_RECORD_SIZE;
+            normal_alloc_full = immediate_free < required_window;
+        }
+        if (normal_alloc_full) {
             fffs_alloc_map_mark_used(fs, (uint16_t)s);
         }
         fs->gc_cursor = fffs_next_data_sector(fs, s);
