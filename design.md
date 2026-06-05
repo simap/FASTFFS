@@ -483,10 +483,12 @@ Allocation-pressure GC can run a second pass that ignores the bitmap.
 
 A writer can set the bit when it knows the sector is full under the current
 allocation rules, such as after writing continuation metadata or consuming the
-remaining useful free window. GC can set the bit after it has classified the
-sector and found live metadata plus a full sector hint. The footer full bit by
-itself is not enough to update the bitmap, because the sector may only contain
-obsolete or tombstoned data that GC should reclaim.
+remaining useful free window. GC can set the bit after it has classified live
+metadata and proven the sector is full under normal allocation rules: it has a
+live continuation, has reached the live-root record cap, or has no erased
+window large enough for a new root record plus `FFFS_ALLOC_MIN_USABLE_FREE`.
+The footer full bit by itself is not enough to update the bitmap, because the
+sector may only contain obsolete or tombstoned data that GC should reclaim.
 
 A full bitmap does require a decent chunk of memory. With 4K sectors, you'd need 256 bytes to cover an 8MB filesystem.
 
