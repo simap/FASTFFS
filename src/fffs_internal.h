@@ -349,11 +349,15 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
 /* Allocation and GC helpers for erased data sectors. */
 int fffs_flash_span_is_erased(struct fffs *fs, size_t offset, size_t size);
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector);
+int fffs_gc_compact_until_erased(struct fffs *fs,
+        uint16_t *erased_sector, bool allow_relaxed_compaction);
 int fffs_alloc_next_sector(struct fffs_file *file, uint16_t *sector);
 int fffs_alloc_find_compaction_root_window(struct fffs *fs,
         uint16_t source_sector, uint16_t slot, uint16_t data_len,
         uint16_t *sector, uint16_t *data_off, uint16_t *record_off,
-        bool *needs_footer);
+        bool *needs_footer, bool allow_relaxed);
 void fffs_alloc_release_reservation(struct fffs_file *file);
+bool fffs_alloc_compaction_reserved(struct fffs *fs, uint16_t sector);
+void fffs_alloc_compaction_reserve_remove(struct fffs *fs, uint16_t sector);
 
 #endif

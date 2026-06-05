@@ -166,6 +166,7 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
         FFFS_HEADER_SIZE;
     fs->alloc_cursor = fs->index_sectors;
     fs->gc_cursor = fs->index_sectors;
+    fs->compaction_reserve_count = 0;
     fs->next_sector_serial = 1;
     fs->avg_sectors_per_file_q8 = FFFS_SECTORS_PER_FILE_Q8_ONE;
 

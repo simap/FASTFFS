@@ -181,14 +181,14 @@ static int gc_copy_root_data(struct fffs *fs, uint16_t source_sector,
 }
 
 static int gc_copy_root_record(struct fffs *fs, uint16_t source_sector,
-        const struct fffs_md_record *record) {
+        const struct fffs_md_record *record, bool allow_relaxed_compaction) {
     uint16_t dest_sector;
     uint16_t data_off;
     uint16_t record_off;
     bool needs_footer;
     int err = fffs_alloc_find_compaction_root_window(fs, source_sector,
             record->slot, record->data_len, &dest_sector, &data_off,
-            &record_off, &needs_footer);
+            &record_off, &needs_footer, allow_relaxed_compaction);
     if (err != FFFS_OK) {
         return err;
     }
@@ -250,7 +250,7 @@ static int gc_tombstone_copied_roots(struct fffs *fs, uint16_t sector,
 }
 
 static int gc_compact_root_only_sector(struct fffs *fs, uint16_t source_sector,
-        uint16_t *erased_sector) {
+        uint16_t *erased_sector, bool allow_relaxed_compaction) {
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
     struct fffs_sector_reader window = {
         .data = window_buf,
@@ -287,7 +287,8 @@ static int gc_compact_root_only_sector(struct fffs *fs, uint16_t source_sector,
                 err = FFFS_ERR_NO_SPACE;
                 goto fail;
             }
-            err = gc_copy_root_record(fs, source_sector, &record);
+            err = gc_copy_root_record(fs, source_sector, &record,
+                    allow_relaxed_compaction);
             if (err != FFFS_OK) {
                 goto fail;
             }
@@ -320,7 +321,8 @@ fail:
     return err;
 }
 
-static int gc_compact_until_erased(struct fffs *fs, uint16_t *erased_sector) {
+int fffs_gc_compact_until_erased(struct fffs *fs, uint16_t *erased_sector,
+        bool allow_relaxed_compaction) {
     for (size_t i = 0; i < FFFS_COMPACTION_CANDIDATE_COUNT; i++) {
         const struct fffs_compaction_candidate *candidate =
             &fs->compaction_candidates[i];
@@ -337,7 +339,7 @@ static int gc_compact_until_erased(struct fffs *fs, uint16_t *erased_sector) {
             continue;
         }
         err = gc_compact_root_only_sector(fs, candidate->sector,
-                erased_sector);
+                erased_sector, allow_relaxed_compaction);
         if (err == FFFS_OK) {
             return FFFS_OK;
         }
@@ -427,6 +429,15 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         fs->gc_md.active = false;
     }
     if (use_map && fffs_alloc_map_maybe_used(fs, (uint16_t)s)) {
+        fs->gc_cursor = fffs_next_data_sector(fs, s);
+        fs->gc_md.live_seen = false;
+        fs->gc_md.active = false;
+        if (out_action) {
+            *out_action = FFFS_GC_SCANNED;
+        }
+        return FFFS_OK;
+    }
+    if (fffs_alloc_compaction_reserved(fs, (uint16_t)s)) {
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.live_seen = false;
         fs->gc_md.active = false;
@@ -671,7 +682,7 @@ int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector) {
             }
         }
     }
-    return gc_compact_until_erased(fs, erased_sector);
+    return fffs_gc_compact_until_erased(fs, erased_sector, false);
 }
 
 int fffs_gc(struct fffs *fs, size_t max_steps, size_t *out_erased) {

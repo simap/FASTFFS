@@ -360,7 +360,9 @@ Examples:
 
 This is still below measured SPIFFS open/list behavior that reached hundreds of ms to nearly 1 second on larger partitions.
 
-An optional background blank check can rebuild/update in-memory free/used state after boot. If writing begins before this completes, allocation still blank-checks candidates before use.
+An optional background blank check can prime in-memory allocation hints after
+boot. If writing begins before this completes, allocation still blank-checks
+candidates before use.
 
 ## Optional Directory Objects as Secondary Index
 
@@ -450,35 +452,41 @@ contents are required.
 This should be an optional feature. It is most useful when a
 workload performs frequent directory listings over a large namespace. Direct full path access wouldn't be impacted.
 
-## Free/Used Tracking
+## Allocation Bitmap Hints
 
-Free/used state can be tracked at FASTFFS sector level with a bitmap. The
-baseline can also be built with no allocation map, in which case allocation and
-GC use linear scans plus blank checks and metadata classification. A full bitmap
-uses caller-provided memory because it scales with sector count; an 8 MB
-filesystem with 4 KB sectors needs 256 bytes. Smaller coarse maps can be
-compile-time variants with inline storage.
+Allocation state can be tracked at FASTFFS sector level with an in-memory
+bitmap. It is not persisted. On mount, the map starts from runtime-known state,
+such as index sectors being unavailable, and allocation/GC refine it during
+normal scans. The baseline can also be built with no allocation map, in which
+case allocation and GC use linear scans plus blank checks and metadata
+classification. A full bitmap uses caller-provided memory because it scales
+with sector count; an 8 MB filesystem with 4 KB sectors needs 256 bytes.
+Smaller coarse maps can be compile-time variants with inline storage.
 
-The bitmap is an optimization, not the source of truth:
+The bitmap is an optimization, not the source of truth. On-flash sector
+footers, metadata records, tombstones, inflight state, reservations, and blank
+checks remain authoritative. A `0` bit means unknown or worth inspecting; it is
+not proof of erased or usable space. For data sectors, a `1` bit normally means
+the sector is known to contain live data and be full under current normal
+allocation rules, so normal allocation and normal GC can skip it. "Full" uses
+the allocator's practical rule: no useful allocation window remains, the hard
+`FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` limit was reached, or continuation
+metadata makes the sector ineligible for normal root sharing. Temporary
+reservations may also set bits to mask
+reserved sectors, and must clear them when the reservation is released, shrunk,
+or consumed.
 
-- It can be stale after a crash.
-- Allocation checks candidate sectors for blank state before writing.
-- If stale, the allocator may skip usable space temporarily.
-- GC classification can update the bitmap lazily.
-- Full truth can be reconstructed from the index and sector metadata.
-- A failed data-sector erase/program can be skipped without committing an index record pointing at it. Persistent bad-sector tracking can remain a later backend feature.
+GC usually consults the bitmap before reading a sector. Deletes clear the old
+file's known sector chain back to unknown, so GC can
+later reclassify those sectors.
+Allocation-pressure GC can run a second pass that ignores the bitmap.
 
-The full bitmap uses strict pressure-skip semantics: `1` means known full and
-probably not erasable, or otherwise unavailable for allocation; `0` means
-unknown or worth inspecting. A `0` bit is not proof of free space, and a stale
-`1` must not be allowed to starve pressure paths forever. Allocation may use a
-full hint as a local cheap skip, but it does not refresh the bitmap because it
-does not perform liveness analysis. A writer that completely fills its current
-sector can program the full hint and set the bitmap because it owns that sector
-state. GC can also set the bit when the sector is full-hinted and still has
-live metadata. Deletes clear the old file's known sector chain back to unknown
-even in lazy tombstone mode, so GC can later reclassify those sectors without
-delete-time sector-local flash programs.
+A writer can set the bit when it knows the sector is full under the current
+allocation rules, such as after writing continuation metadata or consuming the
+remaining useful free window. GC can set the bit after it has classified the
+sector and found live metadata plus a full sector hint. The footer full bit by
+itself is not enough to update the bitmap, because the sector may only contain
+obsolete or tombstoned data that GC should reclaim.
 
 A full bitmap does require a decent chunk of memory. With 4K sectors, you'd need 256 bytes to cover an 8MB filesystem.
 
@@ -533,7 +541,8 @@ Crash behavior:
 
 - Crash before index append: old version remains live; new data is orphaned.
 - Crash after index append: new version is live.
-- Crash before bitmap update: bitmap may be stale, but blank-check prevents corruption.
+- Allocation bitmap updates are RAM-only hints. After a crash, mount starts with
+  fresh hint state and flash remains authoritative.
 
 A write can trigger allocation-pressure GC and root-only compaction before the
 replacement index record is appended. If the old root was moved during that
@@ -725,7 +734,7 @@ Seek can follow the linked extent structure. If needed, cache the extent list af
 Write cost for blank pages is roughly:
 
 ```text
-blank check + program data + local metadata write + one index append + bitmap update
+blank check + program data + local metadata write + one index append
 ```
 
 Using measured approximate numbers:
@@ -733,7 +742,7 @@ Using measured approximate numbers:
 - read/blank-check 256 bytes: ~100 us
 - program 256 bytes: ~670 us
 - tiny index write: <= ~380 us
-- bitmap update: ~380-670 us
+- optional sector full-hint program: <= ~380 us
 
 Erase cost is moved to a background task where possible.
 
@@ -758,7 +767,7 @@ Allocation should consider the following:
 * Continuation allocations should only use empty sectors.
 * Normal root allocations should skip sectors containing continuation metadata, but may share sectors containing other roots.
 * Ideally contiguous sectors are allocated when available. 
-* Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or used/free bitmaps.
+* Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or allocation hints.
 
 A reasonable starting minimum data threshold is 128-256 bytes. The exact formula
 is a tunable definition, but runtime allocation should be a simple range check.
@@ -774,8 +783,9 @@ Reservations don't need to be blank checked or verified until allocated.
 Reservation state can be represented as temporary unavailable bits in the
 allocation bitmap. These bits must be cleared when a reservation is released,
 shrunk, consumed, or fails allocation. If allocation cannot find space while
-respecting the bitmap, it can cut reservations and then fall back to checking
-sectors directly without trusting bitmap state.
+respecting the bitmap, it can cut reservations and retry. If cutting
+reservations does not release any sectors, all file reservations were already
+zero.
 
 The allocator can avoid allocating sectors potentially used by other files by
 using the open/in flight file data to see what sectors are not fully written,
@@ -798,12 +808,12 @@ These estimates assume candidate sectors are already erased or can be blank-chec
 | open missing file, low collision load | RAM lookup only, usually no flash read |
 | sequential read 50 KB | roughly `50 KB / 4 KB * 405 us`, about ~5 ms raw read time |
 | sequential read 300 KB | roughly `300 KB / 4 KB * 405 us`, about ~30 ms raw read time |
-| write 50 KB to blank pages | `50 KB / 256 * 670 us`, about ~134 ms plus metadata/index/bitmap |
-| write 300 KB to blank pages | `300 KB / 256 * 670 us`, about ~804 ms plus metadata/index/bitmap |
+| write 50 KB to blank pages | `50 KB / 256 * 670 us`, about ~134 ms plus metadata/index/full-hint writes |
+| write 300 KB to blank pages | `300 KB / 256 * 670 us`, about ~804 ms plus metadata/index/full-hint writes |
 | program 4 KB blank sector | ~9.1 ms |
 | erase + program 4 KB sector | ~53 ms |
 | append one small index record | <= ~380 us |
-| update bitmap page | ~380-670 us |
+| program sector full hint | <= ~380 us |
 
 Sequential read/write overhead depends on the number of linked extent records and whether the open path caches an extent list. The design assumes open/read paths can cache enough file metadata to avoid repeated global scans.
 
@@ -986,25 +996,49 @@ faster than no-cache full index scans.
 
 ## Configuration Options
 
-Several parts of the design can be optional or compile-time/runtime configuration choices:
+Several parts of the design are compile-time policy choices, runtime mount
+choices, or format-time image choices. Current implemented knobs:
 
-| Option | Purpose |
+| Option | Kind | Purpose |
+|---|---|---|
+| `sector_size` | format-time | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |
+| `index_sectors` | format-time | Number of rotating index sectors; must be at least 2 |
+| backend geometry | runtime | Backend size and read/program/erase granules; FASTFFS sector size must fit backend constraints |
+| `strict` mount | runtime | Controls whether narrow non-strict recovery exceptions are allowed |
+| caller-provided scratch | runtime | Required working buffer; keeps the embedded core usable without `malloc`/`free` |
+| `FFFS_INDEX_CACHE_MODE` | compile-time | Selects no-cache, hash `(slot, head)` cache, or full slot-head cache |
+| `index_hash_table_size` | runtime | Cache entry count for the selected index mode; hash mode requires a bounded power-of-two count, full slot-head mode requires `FFFS_SLOT_COUNT` |
+| `FFFS_INDEX_HASH_TABLE_SIZE` / `FFFS_INDEX_HASH_TABLE_SIZE_MAX` | compile-time | Default and upper bound for hash-cache sizing |
+| `FFFS_ALLOC_MAP_MODE` | compile-time | Selects no allocation map or full in-memory bitmap hints |
+| `alloc_map` / `alloc_map_words` | runtime | Caller-provided RAM storage for the full bitmap when compiled in |
+| `FFFS_ALLOC_RECOVERY_LOOKAHEAD` | compile-time | Bounds allocator cursor recovery from recent index heads |
+| `FFFS_ALLOC_MIN_USABLE_FREE` | compile-time | Minimum useful data window before a sector is treated as full for normal allocation |
+| `FFFS_ALLOC_TARGET_DENSITY` | compile-time | Soft cursor-advance target after allocation; not a hard capacity limit |
+| `FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` | compile-time | Hard metadata-record cap for allocation/search cost |
+| `FFFS_ALLOC_RESERVE_SECTORS` | compile-time | Per-file reservation count for contiguous continuation allocation |
+| `FFFS_COMPACTION_RESERVE_SECTORS` | compile-time | Root-compaction destination reserve count |
+| `FFFS_COMPACTION_RESERVE_BEST_FIT` | compile-time | Optional best-fit selection inside the compaction reserve bank |
+| `FFFS_COMPACTION_CANDIDATE_COUNT` | compile-time | Number of root-only compaction candidates retained during pressure GC |
+| `FFFS_GC_ON_ALLOC_FAILURE` | compile-time | Enables foreground GC/compaction when allocation cannot find space |
+| `FFFS_GC_PARANOID_REACHABILITY` | compile-time | Debug/paranoid reachability check during GC classification |
+| `FFFS_FILE_CACHE_SIZE` | compile-time | Per-file IO cache and flash program chunk size; must satisfy backend program granule needs |
+| `FFFS_MD_PRELOAD_MAX` / `FFFS_MIN_SCRATCH_SIZE` | compile-time | Bounds stack/caller scratch used for metadata and flash reads |
+| `FFFS_INDEX_COMPACT_OUTER_SCAN_SIZE` / `FFFS_INDEX_COMPACT_WRITE_BUFFER_SIZE` | compile-time | Bounds index compaction scan/write buffering |
+| `FFFS_LAZY_DELETE_TOMBSTONES` | compile-time | Defers delete-time local tombstone programming; global index remains authoritative |
+| `FFFS_PROFILE_TRACE` | compile-time/runtime | Enables optional flash/profile trace callback |
+
+Design-only or future knobs:
+
+| Option | Status |
 |---|---|
-| cache full file metadata at startup | Faster `stat`, `ls`, and open; uses more RAM |
-| cache only index at startup | Lower RAM; open may read one metadata page |
-| no preload / lazy metadata reads | Lowest startup work; cold operations may probe flash |
-| caller-provided static buffers | Keeps the embedded core usable without `malloc`/`free` |
-| background blank-check scan on boot | Refreshes in-memory free/used state before writes |
-| skip boot scan and blank-check on allocation | Faster boot; bitmap may be stale until writes complete |
-| sector size | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |
-| backend erase unit | Runtime backend constraint; must divide FASTFFS sector size |
-| metadata CRC32 | Runtime format-time image policy; adds 4 bytes to file metadata records and enforces CRC validation on mount/read/GC paths |
-| minimum first-write threshold | Avoids starting files in sectors with too little data space |
-| packed small files | Baseline density feature for tiny files |
-| sector-local tombstones | Baseline physical hint for GC/compaction; not required for namespace correctness |
-| linked single-extent metadata | Baseline continuation model |
-| cache extent list on open or first seek | Makes later seeks faster; uses per-open RAM |
-| background erase | Keeps write path fast; must be scheduled around frame/latency-sensitive work |
+| cache full file metadata at startup | Future larger-MCU mode |
+| cache extent list on open or first seek | Future per-open seek acceleration |
+| background blank-check scan on boot | Future map warmup; current allocation verifies candidates as needed |
+| metadata CRC32 | Planned format-time policy, not current baseline |
+| directory objects | Optional future secondary index |
+| metadata amendment records | Future metadata variant |
+| background erase scheduling helper | Future helper; current API exposes incremental GC steps |
+| wear-level erase counters | Future wear-leveling input, not part of allocation/compaction scoring today |
 
 ## Compaction and Reclaim
 
@@ -1058,10 +1092,12 @@ The recorded candidate facts are:
 - trapped reclaimable bytes
 - live root count
 
-Candidate ranking prefers sectors with more trapped reclaimable bytes. If that
-is tied, it prefers more live roots. This keeps the ranking tied to actual
-space/copy shape instead of mixing unrelated weights such as wear count into
-the reclaim decision.
+Candidate ranking keeps sectors with useful trapped reclaimable bytes ahead of
+sub-threshold candidates. Within the useful tier, it prefers more trapped
+reclaimable bytes, then more live roots. Within the sub-threshold tier, it
+prefers more live roots, then more trapped reclaimable bytes. This keeps the
+ranking tied to actual space/copy shape instead of mixing unrelated weights
+such as wear count into the reclaim decision.
 
 If erase-only GC cannot free a sector and fsinfo estimates enough unused space
 to try a root-only move, GC copies live roots out of the best candidate. Each

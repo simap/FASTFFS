@@ -1,5 +1,7 @@
 build/
 
+plans/
+
 # ESP-IDF benchmark project outputs
 benchmarks/*/build-*/
 benchmarks/*/sdkconfig

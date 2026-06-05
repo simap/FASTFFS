@@ -220,6 +220,10 @@ struct fffs {
     uint8_t active_index_serial;
     size_t alloc_cursor;
     size_t gc_cursor;
+    uint16_t compaction_reserve_count;
+    uint16_t compaction_reserve_sectors[
+        FFFS_COMPACTION_RESERVE_SECTORS > 0 ?
+            FFFS_COMPACTION_RESERVE_SECTORS : 1];
     struct fffs_md_walk gc_md;
     struct fffs_compaction_candidate
         compaction_candidates[FFFS_COMPACTION_CANDIDATE_COUNT];

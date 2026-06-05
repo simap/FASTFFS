@@ -63,6 +63,9 @@ ESP-IDF VFS benchmark for FatFs on the ESP-IDF wear-levelling layer.
 - `stat()` probes for existing and missing names
 - cold remount plus read/list probes
 - churn workload writing about 8 MiB total while keeping about 2.2 MiB live
+- small-file churn workload with a 5,000-slot cap, 1 B-5 KiB file sizes,
+  milestone list/fsinfo probes at 1, 10, 100, 1,000, and 5,000 live files, and
+  continued writes/replacements/deletes to exercise fragmentation and GC
 - write health counters for short writes, retry loops, flush failures, and close
   failures
 

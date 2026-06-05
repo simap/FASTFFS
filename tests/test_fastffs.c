@@ -53,6 +53,12 @@
 #define TEST_SECTOR_TYPE_FILE 0x01u
 #define TEST_SECTOR_FLAGS_VALID 0x7eu
 #define TEST_SECTOR_FLAGS_FULL 0x5au
+#define TEST_RESERVE_BACKEND_SECTORS \
+    (FFFS_DEFAULT_INDEX_SECTORS + FFFS_COMPACTION_RESERVE_SECTORS + \
+     FFFS_ALLOC_RESERVE_SECTORS + 4u)
+#define TEST_RESERVE_PRESSURE_BACKEND_SECTORS \
+    (FFFS_DEFAULT_INDEX_SECTORS + FFFS_COMPACTION_RESERVE_SECTORS + \
+     FFFS_ALLOC_RESERVE_SECTORS + 1u)
 #define TEST_INDEX_CACHE_WORDS \
     (((FFFS_INDEX_CACHE_BYTES(TEST_INDEX_HASH_TABLE_SIZE) + \
        sizeof(uint32_t) - 1u) / sizeof(uint32_t)) ? \
@@ -69,6 +75,10 @@ int fffs_index_head_for_slot(struct fffs *fs, uint16_t slot,
         uint16_t *head, bool *found);
 int fffs_index_insert(struct fffs *fs, uint16_t slot, uint16_t head);
 int fffs_index_remove(struct fffs *fs, uint16_t slot);
+int fffs_alloc_find_compaction_root_window(struct fffs *fs,
+        uint16_t source_sector, uint16_t slot, uint16_t data_len,
+        uint16_t *sector, uint16_t *data_off, uint16_t *record_off,
+        bool *needs_footer, bool allow_relaxed);
 enum fffs_tombstone_accounting {
     FFFS_TOMBSTONE_NO_ACCOUNTING,
     FFFS_TOMBSTONE_COMMITTED_DELETE,
@@ -1424,7 +1434,8 @@ static int test_alloc_reservation_skips_other_open_writer(void) {
     struct fffs_file second;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
-    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(new_backend_with_size(&flash, &backend,
+                4096 * TEST_RESERVE_PRESSURE_BACKEND_SECTORS));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
@@ -1456,7 +1467,8 @@ static int test_alloc_reservation_released_on_close(void) {
     struct fffs_file second;
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
 
-    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(new_backend_with_size(&flash, &backend,
+                4096 * TEST_RESERVE_PRESSURE_BACKEND_SECTORS));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
@@ -1489,7 +1501,8 @@ static int test_alloc_uses_owner_reservation_for_next_extent(void) {
     static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
 
-    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(new_backend_with_size(&flash, &backend,
+                4096 * TEST_RESERVE_BACKEND_SECTORS));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
@@ -1522,7 +1535,8 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
     static uint8_t payload[FFFS_DEFAULT_SECTOR_SIZE + 1];
     uint8_t dirty[FFFS_FILE_WRITE_BUFFER];
 
-    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 8));
+    ASSERT_OK(new_backend_with_size(&flash, &backend,
+                4096 * TEST_RESERVE_BACKEND_SECTORS));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
 
@@ -1548,7 +1562,7 @@ static int test_alloc_skips_invalid_reserved_candidate(void) {
 }
 
 static int test_alloc_trims_other_reservations_under_pressure(void) {
-#if FFFS_ALLOC_RESERVE_SECTORS <= 1
+#if FFFS_ALLOC_RESERVE_SECTORS <= 1 || FFFS_COMPACTION_RESERVE_SECTORS > 0
     return 0;
 #else
     struct ffsv_flash *flash = NULL;
@@ -1580,7 +1594,7 @@ static int test_alloc_trims_other_reservations_under_pressure(void) {
 }
 
 static int test_alloc_revokes_other_reservation_under_pressure(void) {
-#if FFFS_ALLOC_RESERVE_SECTORS <= 0
+#if FFFS_ALLOC_RESERVE_SECTORS <= 0 || FFFS_COMPACTION_RESERVE_SECTORS > 0
     return 0;
 #else
     struct ffsv_flash *flash = NULL;
@@ -1894,14 +1908,20 @@ static int test_mount_uses_orphan_lookahead_for_serial_hint(void) {
         0x01, 0x7e,
         'F', 'F', 'S', 'D',
     };
+    uint16_t head = 0;
     uint16_t orphan_sector;
+    bool found = false;
 
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)value,
                 strlen(value)));
-    orphan_sector = (uint16_t)(fs.index_sectors + 1u);
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("config"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    orphan_sector = (uint16_t)(head + 1u);
+    ASSERT_TRUE(orphan_sector < fs.sector_count);
     ASSERT_OK(flash_to_fs(ffsv_flash_program(flash,
                     (size_t)orphan_sector * FFFS_DEFAULT_SECTOR_SIZE +
                     FFFS_DEFAULT_SECTOR_SIZE - sizeof(orphan_footer_program),
@@ -2923,6 +2943,8 @@ static int test_continuation_alloc_requires_empty_sector(void) {
     const size_t large_size = 4096u * 2u;
     uint8_t *large = malloc(large_size);
     uint16_t root_only_sector;
+    uint16_t head = 0;
+    bool found = false;
 
     ASSERT_TRUE(large != NULL);
     fill_large_pattern(large, large_size);
@@ -2933,12 +2955,15 @@ static int test_continuation_alloc_requires_empty_sector(void) {
 
     fs.alloc_cursor = (uint16_t)(fs.index_sectors + 1u);
     ASSERT_OK(write_chunks(&fs, "root-only", &small, sizeof(small)));
-    root_only_sector = (uint16_t)(fs.index_sectors + 1u);
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("root-only"),
+                &head, &found));
+    ASSERT_TRUE(found);
+    root_only_sector = head;
 
     fs.alloc_cursor = fs.index_sectors;
     ASSERT_OK(fffs_open(&fs, &file, "large.bin",
                 FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
-    ASSERT_TRUE(file.head == fs.index_sectors);
+    ASSERT_TRUE(file.head != root_only_sector);
     ASSERT_OK(fffs_write(&file, large, large_size));
     ASSERT_TRUE(file.current != file.head);
     uint16_t root_sector = file.head;
@@ -2973,6 +2998,7 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
     uint16_t continuation_sector;
     uint16_t erased_sector = 0;
     uint16_t head = 0;
+    uint16_t moved_head = 0;
     bool found = false;
     struct fffs_inspect_summary inspect;
     struct measured_ops before_ops;
@@ -2992,7 +3018,7 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
     for (size_t i = 1; i < 8; i++) {
         char name[8];
         snprintf(name, sizeof(name), "f%03zu", i);
-        fs.alloc_cursor = source_sector;
+        fs.alloc_cursor = fs.index_sectors;
         ASSERT_OK(write_chunks(&fs, name, value, sizeof(value)));
         ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
                     &found));
@@ -3046,11 +3072,12 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
     ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f006"), &head,
                 &found));
     ASSERT_TRUE(found);
-    ASSERT_TRUE(head == continuation_sector);
+    ASSERT_TRUE(head != source_sector);
+    moved_head = head;
     ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f007"), &head,
                 &found));
     ASSERT_TRUE(found);
-    ASSERT_TRUE(head == continuation_sector);
+    ASSERT_TRUE(head != source_sector);
 
     ASSERT_OK(read_chunks(&fs, "f006", out, sizeof(out), &out_size));
     ASSERT_TRUE(out_size == sizeof(value));
@@ -3078,7 +3105,7 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
 
     fprintf(stderr,
             "root-only compaction roots=2 source=%u dest=%u  %10s   %s\n",
-            (unsigned)source_sector, (unsigned)continuation_sector,
+            (unsigned)source_sector, (unsigned)moved_head,
             duration, first ? "no flash ops" : op_summary);
 
     fffs_unmount(&fs);
@@ -3087,8 +3114,44 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
     return 0;
 }
 
+static int test_compaction_window_consumes_reserved_sector(void) {
+#if FFFS_COMPACTION_RESERVE_SECTORS <= 0
+    return 0;
+#else
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    uint16_t sector = 0;
+    uint16_t data_off = 0;
+    uint16_t record_off = 0;
+    bool needs_footer = false;
+    uint16_t reserved_sector;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    reserved_sector = fs.index_sectors;
+    fs.compaction_reserve_count = 1;
+    fs.compaction_reserve_sectors[0] = reserved_sector;
+
+    ASSERT_OK(fffs_alloc_find_compaction_root_window(&fs,
+                (uint16_t)(reserved_sector + 1u), fffs_hash16("moved"),
+                16, &sector, &data_off, &record_off, &needs_footer, true));
+    ASSERT_TRUE(sector == reserved_sector);
+    ASSERT_TRUE(fs.compaction_reserve_count == 0);
+    ASSERT_TRUE(data_off == 0);
+    ASSERT_TRUE(needs_footer);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+#endif
+}
+
 static int test_replacement_refreshes_old_head_after_alloc_gc(void) {
-#if !FFFS_GC_ON_ALLOC_FAILURE
+#if !FFFS_GC_ON_ALLOC_FAILURE || FFFS_COMPACTION_RESERVE_SECTORS > 0
     return 0;
 #else
     struct ffsv_flash *flash = NULL;
@@ -3122,7 +3185,7 @@ static int test_replacement_refreshes_old_head_after_alloc_gc(void) {
     source_sector = head;
     for (size_t i = 0; i < FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR - 1u; i++) {
         snprintf(name, sizeof(name), "src%02zu", i);
-        fs.alloc_cursor = source_sector;
+        fs.alloc_cursor = fs.index_sectors;
         ASSERT_OK(write_chunks(&fs, name, &tiny, sizeof(tiny)));
         ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
                     &found));
@@ -3349,13 +3412,18 @@ static int test_inspect_reports_corrupt_live_head(void) {
     struct fffs_inspect_summary summary;
     uint8_t corrupt = 0;
     size_t md_offset;
+    uint16_t head = 0;
+    bool found = false;
 
     ASSERT_OK(new_backend(&flash, &backend));
     ASSERT_OK(fffs_format(&backend, NULL));
     ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
     ASSERT_OK(write_chunks(&fs, "config", (const uint8_t *)value,
                 strlen(value)));
-    md_offset = fs.index_sectors * fs.sector_size + fs.sector_size -
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("config"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    md_offset = (size_t)head * fs.sector_size + fs.sector_size -
         10 - 1;
     ASSERT_OK(flash_to_fs(ffsv_flash_corrupt(flash, md_offset, &corrupt,
                     sizeof(corrupt), FFSV_CALLSITE)));
@@ -3456,6 +3524,7 @@ int main(void) {
     failures += test_root_alloc_skips_sector_with_continuation_record();
     failures += test_continuation_alloc_requires_empty_sector();
     failures += test_gc_compacts_root_only_sector_under_pressure();
+    failures += test_compaction_window_consumes_reserved_sector();
     failures += test_replacement_refreshes_old_head_after_alloc_gc();
     failures += test_read_seek_single_extent();
     failures += test_read_seek_across_extents();

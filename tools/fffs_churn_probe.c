@@ -89,7 +89,9 @@
 #define FFFS_HOST_CHURN_SCRATCH_SIZE 4096u
 #endif
 
+#ifndef FFFS_HOST_CHURN_SEED
 #define FFFS_HOST_CHURN_SEED 0x4f465346u
+#endif
 #if FFFS_HOST_CHURN_PROFILE_SMALL_FILES
 #define MAX_CHURN_FILE_SIZE FFFS_HOST_CHURN_SMALL_MAX_SIZE
 #else
@@ -993,6 +995,20 @@ static int run_churn(enum ffsv_flash_preset preset, const char *profile_name) {
             uint64_t after = ffsv_flash_time_ns(flash);
             snapshot_ops(flash, after_ops);
             if (err != FFFS_OK) {
+                struct op_summary churn_so_far[FFSV_OP_COUNT];
+                diff_ops(churn_before_ops, after_ops, churn_so_far);
+                fprintf(stderr,
+                        "no_space timing time=%9.3f ms "
+                        "flash_ops=r%llu/p%llu/e%llu/bc%llu\n",
+                        (double)(after - churn_before) / 1000000.0,
+                        (unsigned long long)
+                            churn_so_far[FFSV_OP_READ].calls,
+                        (unsigned long long)
+                            churn_so_far[FFSV_OP_PROGRAM].calls,
+                        (unsigned long long)
+                            churn_so_far[FFSV_OP_ERASE].calls,
+                        (unsigned long long)
+                            churn_so_far[FFSV_OP_BLANK_CHECK].calls);
                 if (err == FFFS_ERR_NO_SPACE) {
                     print_no_space_diagnostics(&fs, &model, &event);
                 }
