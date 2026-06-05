@@ -523,9 +523,11 @@ static int run_churn_gc(benchfs_t *b, benchfs_churn_event_t event,
     benchfs_gc_stats_t local = {0};
     int rc = b->ops->run_gc(b->ctx, event, file_size, &local);
     add_gc_stats(&b->gc_total, &local);
+    /*
     if (local.steps > 0) {
         log_gc_stats(b, "churn idle", &local);
     }
+    */
     return rc;
 }
 

@@ -461,9 +461,11 @@ static int adapter_run_gc(void *ctx, benchfs_churn_event_t event,
     } else {
         a->gc_scan_debt -= scan_progress;
     }
+    /*
     ESP_LOGI(TAG, "churn gc debt reclaim=%lu scan=%lu",
              (unsigned long)a->gc_reclaim_debt,
              (unsigned long)a->gc_scan_debt);
+    */
 #endif
     return FFFS_OK;
 }
