@@ -53,7 +53,7 @@ GC, but is much faster with it.
 - Host tools for creating, loading, dumping, checking, probing, and sweeping
   FASTFFS images.
 - ESP32 S3 benchmark harnesses used to compare candidate filesystems against
-  JesFS, SPIFFS, and LittleFS.
+  LittleFS, FatFs, JesFS, and SPIFFS.
 
 ## Near Future Goals
 
@@ -68,7 +68,7 @@ GC, but is much faster with it.
 ## Concepts
 
 FASTFFS uses "sector" as its allocation, metadata, scan, and reclaim unit. The
-default sector size is 4 KiB, with the encoded sector size stored in the index
+default sector size is 4 KB, with the encoded sector size stored in the index
 headers so mounted images can discover the format.
 
 The namespace index is an append-only log of small records. Each record stores a
@@ -97,42 +97,55 @@ See `design.md` for the deeper design notes.
 
 This is a comparison of other permissively licensed filesystems that were reasonably easy to port/integrate. There are many others, but most appeared to be glued to a whole operating system.
 
-In this benchmark, the default FASTFFS debt-GC configuration writes tiny files
-about 6x faster than the fastest tested non-FASTFFS result, writes 50 KB files
-about 2x faster, performs name probes tens of times faster, and completes the
-churn workload about 1.2x faster than LittleFS and 1.4x faster than JesFS.
+Across the captured benchmark stats, FASTFFS leads every write-throughput
+measurement from 64 B through 350 KB. It writes tiny files about 5x faster than
+the fastest tested non-FASTFFS result, writes 50 KB files about 1.9x faster, and
+completes the main churn workload simulation about 1.2x faster than LittleFS,
+1.5x faster than JesFS, and 1.8x faster than FATFS.
 
-Even a minimal RAM configuration stays faster than the other tested filesystems
-on the core 64 B-50 KiB file read/write and churn workloads, while remaining
-competitive in other aspects.
+FASTFFS has the fastest tiny-file reads and stays stable across early, middle,
+and late index positions.
+
+FASTFFS mounts quickly after churn, even though it replays its compact index log
+on mount, at about 2x faster than the next tested non-FASTFFS result.
+
+By default, FASTFFS uses RAM to speed up certain operations, but these are configurable. Even a minimal-RAM configuration stays faster than the other tested filesystems
+on the fixed 64 B and 50 KB write tests, completes both churn phases, and
+remains competitive in other aspects.
+
+FASTFFS completes a small file stress test about 12x faster than SPIFFS, while LittleFS, FATFS, and JesFS failed before reaching the write target and were much slower before failing. This test writes many 1 B-5 KB files while keeping live payload around 55% of the partition size.
 
 Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
 
-FASTFFS default debt-GC runs measured GC steps between foreground operations;
-that GC time is included in total churn runtime. This roughly simulates spending
-some idle cycles on GC opportunistically, instead of forcing foreground writes to
-pay the whole reclaim cost when free space is tight.
+FASTFFS runs measured GC steps between foreground operations; that GC time is
+included in total churn runtime. This roughly simulates spending some idle cycles
+on GC opportunistically, instead of forcing foreground writes to pay the whole
+reclaim cost when free space is tight.
 
-The churn benchmark writes about 8.6 MiB of creates/replaces/deletes while keeping 105 files and about 2.4 MiB live, measuring mutation throughput during the run and final live-set read/list behavior.
+The churn benchmark writes about 8.2 MB of creates/replaces/deletes while keeping 105 files and about 2.4 MB live, measuring mutation throughput during the run and final live-set read/list behavior.
 
-| Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
-|---|---:|---:|---:|---:|---:|
-| FS memory, base + open + stack | 4,876 B + 376 B + 1,116 B | 260 B + 184 B + 1,156 B | 1,672 B + 756 B + 1,404 B | 164 B + 28 B + 1,164 B | 3,540 B + 80 B + 1,240 B |
-| Tiny-file overhead, 192 x 64 B | 16 B/file | 16 B/file | 448 B/file | 4,032 B/file | 438 B/file |
-| Write 192 x 64 B | 18.7 KiB/s | 9.66 KiB/s | 0.59 KiB/s | 2.93 KiB/s | 0.27 KiB/s |
-| Read 192 x 64 B total | 179.5 KiB/s | 35.7 KiB/s | 1.95 KiB/s | 5.20 KiB/s | 2.70 KiB/s |
-| Read 192 x 64 B open/file | 178 us | 1.52 ms | 11.1 ms | 11.9 ms | 22.9 ms |
-| Write 16 x 50 KiB | 173.9 KiB/s | 122.4 KiB/s | 90.2 KiB/s | 73.0 KiB/s | 65.8 KiB/s |
-| Read 16 x 50 KiB total | 4,427 KiB/s | 4,378 KiB/s | 2,116 KiB/s | 1,274 KiB/s | 322.3 KiB/s |
-| List 208 files | 33.2 ms | 111 ms | 306 ms | 26.5 ms | 123 ms |
-| Existing-name probe | 163 us | 1.50 ms | 20.0 ms | 12.0 ms | 24.6 ms |
-| Missing-name probe | 78 us | 2.36 ms | 16.6 ms | 26.5 ms | 121 ms |
-| Churn total wall time | 106.457 s | 148.656 s | 125.214 s | 152.325 s | 756.491 s |
-| Churn 10-20 KiB write | 139.4 KiB/s | 79.4 KiB/s | 53.7 KiB/s | 54.8 KiB/s | 14.4 KiB/s |
-| Churn 20-60 KiB write | 160.3 KiB/s | 104.9 KiB/s | 70.8 KiB/s | 62.2 KiB/s | 19.5 KiB/s |
-| Churn 350 KiB write | 108.5 KiB/s | 68.3 KiB/s | 82.5 KiB/s | 55.4 KiB/s | 9.02 KiB/s |
-| Churn final cold list, 105 files | 16.0 ms | 96.9 ms | 173 ms | 13.6 ms | 115 ms |
-| Churn cold read 350 KiB total | 4,508 KiB/s | 4,501 KiB/s | 2,560 KiB/s | 3,193 KiB/s | 828.2 KiB/s |
+| Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | FATFS + ESP-IDF WL | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
+|---|---:|---:|---:|---:|---:|---:|
+| FS memory, base + open + stack | 4,924 B + 360 B + 1,284 B | 308 B + 168 B + 1,244 B | 1,672 B + 756 B + 1,444 B | 9,996 B + n/a + 1,344 B | 164 B + 28 B + 1,236 B | 3,540 B + 80 B + 1,328 B |
+| Tiny-file overhead, 192 x 64 B | 16 B/file | 16 B/file | 448 B/file | 4,032 B/file | 4,032 B/file | 438 B/file |
+| Write 192 x 64 B | 15.0 KiB/s | 8.64 KiB/s | 0.59 KiB/s | 0.23 KiB/s | 2.93 KiB/s | 0.27 KiB/s |
+| Read 192 x 64 B total | 148.1 KiB/s | 33.8 KiB/s | 1.95 KiB/s | 48.3 KiB/s | 5.21 KiB/s | 2.70 KiB/s |
+| Read 192 x 64 B open/file | 259 us | 1.62 ms | 11.1 ms | 580 us | 11.9 ms | 22.9 ms |
+| Write 16 x 50 KiB | 174.9 KiB/s | 127.6 KiB/s | 92.2 KiB/s | 60.7 KiB/s | 72.9 KiB/s | 65.8 KiB/s |
+| Read 16 x 50 KiB total | 4,403 KiB/s | 4,367 KiB/s | 2,115 KiB/s | 4,595 KiB/s | 1,276 KiB/s | 322.5 KiB/s |
+| List 208 files | 32.0 ms | 107 ms | 307 ms | 8.29 ms | 26.4 ms | 123 ms |
+| Existing-name probe | 158 us | 1.52 ms | 20.0 ms | 951 us | 12.0 ms | 24.6 ms |
+| Missing-name probe | 77 us | 2.40 ms | 16.6 ms | 1.02 ms | 26.4 ms | 121 ms |
+| Churn total wall time | 100.792 s | 133.416 s | 121.812 s | 183.485 s | 153.217 s | 757.174 s |
+| Churn 10-20 KiB write | 151.6 KiB/s | 93.8 KiB/s | 57.7 KiB/s | 31.2 KiB/s | 54.6 KiB/s | 14.4 KiB/s |
+| Churn 20-60 KiB write | 165.4 KiB/s | 104.5 KiB/s | 73.4 KiB/s | 53.7 KiB/s | 62.1 KiB/s | 19.5 KiB/s |
+| Churn 350 KiB write | 123.0 KiB/s | 82.4 KiB/s | 82.6 KiB/s | 74.2 KiB/s | 55.2 KiB/s | 9.02 KiB/s |
+| Mount after churn | 6.80 ms | 7.81 ms | 13.4 ms | 14.7 ms | 77.2 ms | 231 ms |
+| Churn final cold list, 105 files | 15.5 ms | 93.9 ms | 274 ms | 7.29 ms | 13.7 ms | 115 ms |
+| Churn cold read 350 KiB total | 4,517 KiB/s | 4,528 KiB/s | 2,554 KiB/s | 5,662 KiB/s | 3,194 KiB/s | 828.8 KiB/s |
+| Smallfiles result | completed | completed | 33% (failed) | 7% (failed) | 34% (failed) | completed |
+| Smallfiles total wall time | 202.509 s | 1355.535 s | 201.470 s | 75.850 s | 102.159 s | 2485.149 s |
+| Smallfiles write 1-5120 B | 49.8 KiB/s | 6.73 KiB/s | 13.7 KiB/s | 8.08 KiB/s | 27.3 KiB/s | 3.51 KiB/s |
 
 ## Power Loss And Corruption Testing
 

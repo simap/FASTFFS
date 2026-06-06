@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-LOG_TS_RE = re.compile(r"I \((\d+)\) [^:]+: (.*)")
+LOG_TS_RE = re.compile(r"[A-Z] \((\d+)\) [^:]+: (.*)")
 KV_RE = re.compile(r"([A-Za-z0-9_]+)=([^ ]+)")
 RUN_TS_RE = re.compile(r"(\d{8})_(\d{6})")
 
@@ -28,6 +28,7 @@ SIZE_CLASSES = {
     "small_10_20k": "10-20 KiB",
     "medium_20_60k": "20-60 KiB",
     "large_350k": "350 KiB",
+    "small_1_5120b": "1-5120 B",
 }
 
 
@@ -121,6 +122,24 @@ HTML_UNRANKED_ROWS = {
     "Churn unaccounted time",
     "Churn GC steps",
     "Churn GC erased sectors",
+    "Smallfiles result",
+    "Smallfiles ops",
+    "Smallfiles bytes written",
+    "Smallfiles final live bytes",
+    "Smallfiles final live files",
+    "Smallfiles creates",
+    "Smallfiles replaces",
+    "Smallfiles deletes",
+    "Smallfiles written target",
+    "Smallfiles live target",
+    "Smallfiles file slots",
+    "Smallfiles accounted time",
+    "Smallfiles delete time",
+    "Smallfiles GC step time",
+    "Smallfiles benchmark overhead",
+    "Smallfiles unaccounted time",
+    "Smallfiles GC steps",
+    "Smallfiles GC erased sectors",
     "FS base memory",
     "FS open file memory",
     "FS stack memory",
@@ -152,6 +171,17 @@ HTML_LOWER_IS_BETTER_ROWS = {
     "Churn cold read 350 KiB open/file",
     "Churn cold exists existing avg",
     "Churn cold exists missing avg",
+    "Smallfiles total wall time",
+    "Smallfiles delete avg",
+    "Smallfiles delete p50",
+    "Smallfiles delete p95",
+    "Smallfiles delete max",
+    "Smallfiles final list",
+    "Smallfiles cold mount",
+    "Smallfiles cold list",
+    "Smallfiles cold read 1-5120 B open/file",
+    "Smallfiles cold exists existing avg",
+    "Smallfiles cold exists missing avg",
 }
 
 
@@ -224,6 +254,8 @@ class ParsedLog:
         self._churn_target_ms: int | None = None
         self._churn_summary_ms: int | None = None
         self._seen_churn_cold_mount = False
+        self._seen_smallfiles = False
+        self._smallfiles_failed = False
 
     def setdefault(self, key: str, value: str) -> None:
         if value and key not in self.data:
@@ -445,6 +477,115 @@ class ParsedLog:
             self.set("Churn cold exists missing avg",
                      time_us(kvs(msg).get("avg_us")))
             return
+
+        if "smallfiles target " in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            self.set("Smallfiles written target", integer(d.get("written_target")))
+            self.set("Smallfiles live target", integer(d.get("target_live_bytes")))
+            self.set("Smallfiles file slots", integer(d.get("files")))
+            return
+        if "smallfiles write failed " in msg:
+            self._seen_smallfiles = True
+            self._smallfiles_failed = True
+            rc_match = re.search(r" rc=(.*?) total_written=", msg)
+            rc = rc_match.group(1) if rc_match else kvs(msg).get("rc", "")
+            self.set("Smallfiles result", f"failed: {rc}")
+            return
+        if "smallfiles summary " in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            self.set("Smallfiles ops", d.get("ops", ""))
+            self.set("Smallfiles bytes written", integer(d.get("written")))
+            self.set("Smallfiles final live bytes", integer(d.get("live")))
+            self.set("Smallfiles final live files", integer(d.get("live_files")))
+            self.set("Smallfiles creates", d.get("creates", ""))
+            self.set("Smallfiles replaces", d.get("replaces", ""))
+            self.set("Smallfiles deletes", d.get("deletes", ""))
+            return
+        if "smallfiles accounting " in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            gc_us = d.get("gc_step_us", d.get("scheduled_gc_us"))
+            self.set("Smallfiles total wall time", seconds(d.get("wall_us")))
+            self.set("Smallfiles accounted time", seconds(d.get("accounted_us")))
+            self.set("Smallfiles write time", seconds(d.get("write_us")))
+            self.set("Smallfiles delete time", seconds(d.get("delete_us")))
+            self.set("Smallfiles GC step time", seconds(gc_us))
+            self.set("Smallfiles benchmark overhead",
+                     seconds(d.get("benchmark_overhead_us",
+                                   d.get("unaccounted_us"))))
+            self.set("Smallfiles unaccounted time", seconds(d.get("unaccounted_us")))
+            return
+        if "smallfiles write class=" in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
+            self.set(f"Smallfiles write {cls}",
+                     throughput_kib_s(d.get("bytes"), d.get("time_us")))
+            return
+        if "smallfiles create write class=" in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
+            self.set(f"Smallfiles write new {cls}",
+                     throughput_kib_s(d.get("bytes"), d.get("time_us")))
+            return
+        if "smallfiles replace write class=" in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
+            self.set(f"Smallfiles write replace {cls}",
+                     throughput_kib_s(d.get("bytes"), d.get("time_us")))
+            return
+        if "smallfiles delete latency " in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            self.set("Smallfiles delete avg", time_us(d.get("avg_us")))
+            self.set("Smallfiles delete p50", time_us(d.get("p50_us")))
+            self.set("Smallfiles delete p95", time_us(d.get("p95_us")))
+            self.set("Smallfiles delete max", time_us(d.get("max_us")))
+            return
+        if "smallfiles total gc " in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            self.set("Smallfiles GC steps", integer(d.get("steps")))
+            self.set("Smallfiles GC erased sectors", integer(d.get("erased")))
+            if "Smallfiles GC step time" not in self.data:
+                self.set("Smallfiles GC step time", seconds(d.get("time_us")))
+            return
+        if msg.startswith("smallfiles list entries="):
+            self._seen_smallfiles = True
+            key = "Smallfiles cold list" if "Smallfiles cold mount" in self.data else "Smallfiles final list"
+            self.setdefault(key, time_us(kvs(msg).get("time_us")))
+            return
+        if "smallfiles cold mount rc=" in msg:
+            self._seen_smallfiles = True
+            self.set("Smallfiles cold mount", time_us(kvs(msg).get("time_us")))
+            return
+        if "smallfiles cold read split class=" in msg:
+            self._seen_smallfiles = True
+            d = kvs(msg)
+            cls = SIZE_CLASSES.get(d.get("class", ""), d.get("class", ""))
+            self.set(f"Smallfiles cold read {cls} total",
+                     throughput_kib_s(d.get("bytes"), d.get("total_us")))
+            files = int(d.get("files", "0"))
+            if files:
+                self.set(f"Smallfiles cold read {cls} open/file",
+                         time_us(round(int(d["open_us"]) / files)))
+            self.set(f"Smallfiles cold read {cls} after open",
+                     throughput_kib_s(d.get("bytes"), d.get("read_us")))
+            return
+        if "exists smallfiles cold existing" in msg:
+            self._seen_smallfiles = True
+            self.set("Smallfiles cold exists existing avg",
+                     time_us(kvs(msg).get("avg_us")))
+            return
+        if "exists smallfiles cold missing" in msg:
+            self._seen_smallfiles = True
+            self.set("Smallfiles cold exists missing avg",
+                     time_us(kvs(msg).get("avg_us")))
+            return
         if msg.startswith("memory "):
             d = kvs(msg)
             if d.get("base_valid") == "1":
@@ -460,6 +601,8 @@ class ParsedLog:
             if self._churn_target_ms is not None and self._churn_summary_ms is not None:
                 elapsed_us = (self._churn_summary_ms - self._churn_target_ms) * 1000
                 self.data["Churn total wall time"] = seconds(elapsed_us) + " (from log timestamps)"
+        if self._seen_smallfiles and not self._smallfiles_failed:
+            self.data.setdefault("Smallfiles result", "completed")
 
 
 def parse_log(spec: str) -> ParsedLog:
@@ -530,6 +673,41 @@ ROWS = [
     "Churn delete max",
     "Churn GC steps",
     "Churn GC erased sectors",
+    "Smallfiles result",
+    "Smallfiles ops",
+    "Smallfiles bytes written",
+    "Smallfiles final live bytes",
+    "Smallfiles final live files",
+    "Smallfiles creates",
+    "Smallfiles replaces",
+    "Smallfiles deletes",
+    "Smallfiles written target",
+    "Smallfiles live target",
+    "Smallfiles file slots",
+    "Smallfiles total wall time",
+    "Smallfiles accounted time",
+    "Smallfiles write time",
+    "Smallfiles delete time",
+    "Smallfiles GC step time",
+    "Smallfiles benchmark overhead",
+    "Smallfiles unaccounted time",
+    "Smallfiles write 1-5120 B",
+    "Smallfiles write new 1-5120 B",
+    "Smallfiles write replace 1-5120 B",
+    "Smallfiles delete avg",
+    "Smallfiles delete p50",
+    "Smallfiles delete p95",
+    "Smallfiles delete max",
+    "Smallfiles GC steps",
+    "Smallfiles GC erased sectors",
+    "Smallfiles final list",
+    "Smallfiles cold mount",
+    "Smallfiles cold list",
+    "Smallfiles cold read 1-5120 B total",
+    "Smallfiles cold read 1-5120 B open/file",
+    "Smallfiles cold read 1-5120 B after open",
+    "Smallfiles cold exists existing avg",
+    "Smallfiles cold exists missing avg",
     "Churn final list",
     "Churn cold mount",
     "Churn final cold list",
