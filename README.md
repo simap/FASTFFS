@@ -100,7 +100,7 @@ This is a comparison of other permissively licensed filesystems that were reason
 Across the captured benchmark stats, FASTFFS leads every write-throughput
 measurement from 64 B through 350 KB. It writes tiny files about 5x faster than
 the fastest tested non-FASTFFS result, writes 50 KB files about 1.9x faster, and
-completes the main churn workload simulation about 1.2x faster than LittleFS,
+completes the churn workload simulation about 1.2x faster than LittleFS,
 1.5x faster than JesFS, and 1.8x faster than FATFS.
 
 FASTFFS has the fastest tiny-file reads and stays stable across early, middle,
@@ -109,13 +109,9 @@ and late index positions.
 FASTFFS mounts quickly after churn, even though it replays its compact index log
 on mount, at about 2x faster than the next tested non-FASTFFS result.
 
-By default, FASTFFS uses RAM to speed up certain operations, but these are configurable. Even a minimal-RAM configuration stays faster than the other tested filesystems
-on the fixed 64 B and 50 KB write tests, completes both churn phases, and
-remains competitive in other aspects.
-
 FASTFFS completes a small file stress test about 12x faster than SPIFFS, while LittleFS, FATFS, and JesFS failed before reaching the write target and were much slower before failing. This test writes many 1 B-5 KB files while keeping live payload around 55% of the partition size.
 
-Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
+By default, FASTFFS uses RAM to speed up certain operations, but these are configurable. Even a minimal-RAM configuration stays faster than the other tested filesystems on the fixed 64 B and 50 KB write tests, completes the small files stress test, and remains competitive in other aspects.
 
 FASTFFS runs measured GC steps between foreground operations; that GC time is
 included in total churn runtime. This roughly simulates spending some idle cycles
@@ -123,6 +119,37 @@ on GC opportunistically, instead of forcing foreground writes to pay the whole
 reclaim cost when free space is tight.
 
 The churn benchmark writes about 8.2 MB of creates/replaces/deletes while keeping 105 files and about 2.4 MB live, measuring mutation throughput during the run and final live-set read/list behavior.
+
+Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
+
+<p>
+  <img src="benchmarks/results/graphs/read_64b_throughput.png" width="49%" alt="64 B file read throughput">
+  <img src="benchmarks/results/graphs/write_64b_throughput.png" width="49%" alt="64 B file write throughput">
+</p>
+
+<p>
+  <img src="benchmarks/results/graphs/read_50k_throughput.png" width="49%" alt="50 KiB file read throughput">
+  <img src="benchmarks/results/graphs/write_50k_throughput.png" width="49%" alt="50 KiB file write throughput">
+</p>
+
+<p>
+  <img src="benchmarks/results/graphs/read_throughput_by_file_class.png" width="49%" alt="Churn read throughput by file class">
+  <img src="benchmarks/results/graphs/write_throughput_by_file_class.png" width="49%" alt="Churn write throughput by file class">
+</p>
+
+<p>
+  <img src="benchmarks/results/graphs/churn_wall_time.png" width="49%" alt="Churn wall time">
+  <img src="benchmarks/results/graphs/exists_time.png" width="49%" alt="Churn exists and missing name probe time">
+</p>
+
+<p>
+  <img src="benchmarks/results/graphs/mount_time.png" width="49%" alt="Churn mount time">
+  <img src="benchmarks/results/graphs/list_time.png" width="49%" alt="Churn list time">
+</p>
+
+<p>
+  <img src="benchmarks/results/graphs/smallfiles_wall_time_extrapolated.png" width="100%" alt="Small Files stress test wall time extrapolated to full write target">
+</p>
 
 | Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | FATFS + ESP-IDF WL | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |
 |---|---:|---:|---:|---:|---:|---:|
