@@ -62,6 +62,10 @@ FFFS_CRASH_SWEEP_SRCS = \
 FFFS_API_CRASH_SWEEP_SRCS = \
 	tools/fffs_api_crash_sweep.c
 
+FFFS_SLOT_RESOLUTION_PROBE_SRCS = \
+	tools/fffs_slot_resolution_probe.c
+FFFS_SLOT_RESOLUTION_PROBE_CFLAGS ?= -O3
+
 CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 HOST_OBJS = $(HOST_SRCS:%.c=$(BUILD_DIR)/%.o)
 LITTLEFS_OBJS = $(LITTLEFS_SRCS:%.c=$(BUILD_DIR)/%.o)
@@ -73,6 +77,7 @@ FFFS_TIME_PROBE_OBJS = $(FFFS_TIME_PROBE_SRCS:%.c=$(BUILD_DIR)/%.o)
 FFFS_CHURN_PROBE_OBJS = $(FFFS_CHURN_PROBE_SRCS:%.c=$(BUILD_DIR)/%.o)
 FFFS_CRASH_SWEEP_OBJS = $(FFFS_CRASH_SWEEP_SRCS:%.c=$(BUILD_DIR)/%.o)
 FFFS_API_CRASH_SWEEP_OBJS = $(FFFS_API_CRASH_SWEEP_SRCS:%.c=$(BUILD_DIR)/%.o)
+FFFS_SLOT_RESOLUTION_PROBE_OBJS = $(FFFS_SLOT_RESOLUTION_PROBE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 VERIFY_FLASH_LINK_OBJS = \
 	$(BUILD_DIR)/src/verify_flash.o \
@@ -113,6 +118,9 @@ FFFS_API_CRASH_SWEEP_LINK_OBJS = \
 	$(CHURN_OBJS) \
 	$(FFFS_API_CRASH_SWEEP_OBJS)
 
+FFFS_SLOT_RESOLUTION_PROBE_LINK_OBJS = \
+	$(FFFS_SLOT_RESOLUTION_PROBE_OBJS)
+
 ALL_OBJS = \
 	$(CORE_OBJS) \
 	$(HOST_OBJS) \
@@ -124,7 +132,8 @@ ALL_OBJS = \
 	$(FFFS_TIME_PROBE_OBJS) \
 	$(FFFS_CHURN_PROBE_OBJS) \
 	$(FFFS_CRASH_SWEEP_OBJS) \
-	$(FFFS_API_CRASH_SWEEP_OBJS)
+	$(FFFS_API_CRASH_SWEEP_OBJS) \
+	$(FFFS_SLOT_RESOLUTION_PROBE_OBJS)
 
 DEPS = $(ALL_OBJS:.o=.d)
 
@@ -140,7 +149,8 @@ DEPS = $(ALL_OBJS:.o=.d)
 all: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 	$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_time_probe \
 	$(BUILD_DIR)/fffs_churn_probe $(BUILD_DIR)/fffs_crash_sweep \
-	$(BUILD_DIR)/fffs_api_crash_sweep
+	$(BUILD_DIR)/fffs_api_crash_sweep \
+	$(BUILD_DIR)/fffs_slot_resolution_probe
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -154,6 +164,11 @@ $(BUILD_DIR)/tools/fffs_churn_probe.o: tools/fffs_churn_probe.c
 $(BUILD_DIR)/tools/fffs_api_crash_sweep.o: tools/fffs_api_crash_sweep.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PTHREAD_CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tools/fffs_slot_resolution_probe.o: tools/fffs_slot_resolution_probe.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FFFS_SLOT_RESOLUTION_PROBE_CFLAGS) \
+		$(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/test_verify_flash: $(TEST_VERIFY_FLASH_LINK_OBJS)
 	$(LINK.o) $^ $(LDLIBS) -o $@
@@ -175,6 +190,9 @@ $(BUILD_DIR)/fffs_crash_sweep: $(FFFS_CRASH_SWEEP_LINK_OBJS)
 
 $(BUILD_DIR)/fffs_api_crash_sweep: $(FFFS_API_CRASH_SWEEP_LINK_OBJS)
 	$(LINK.o) $^ $(PTHREAD_LDLIBS) $(LDLIBS) -o $@
+
+$(BUILD_DIR)/fffs_slot_resolution_probe: $(FFFS_SLOT_RESOLUTION_PROBE_LINK_OBJS)
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
 test: $(BUILD_DIR)/test_verify_flash $(BUILD_DIR)/test_fastffs \
 		$(BUILD_DIR)/fffs_tool $(BUILD_DIR)/fffs_crash_sweep
