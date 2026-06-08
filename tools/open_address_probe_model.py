@@ -63,13 +63,22 @@ def logsumexp(log_terms: list[float]) -> float:
     )
 
 
-def p_insert_fail_linear_probing(
+def logdiffexp(a: float, b: float) -> float:
+    """
+    Return log(exp(a) - exp(b)), assuming a > b.
+    """
+    if b >= a:
+        raise ValueError("expected a > b")
+    return a + math.log1p(-math.exp(b - a))
+
+
+def log_p_insert_fail_linear_probing(
     table_size: int,
     entry_count: int,
     probe_limit: int,
 ) -> float:
     """
-    Estimate P(insert fail) for a linear-probing hash table.
+    Estimate log(P(insert fail)) for a linear-probing hash table.
 
     Assumptions:
       - table_size slots
@@ -96,10 +105,10 @@ def p_insert_fail_linear_probing(
         raise ValueError("probe_limit must be <= table_size")
 
     if n < probe_window:
-        return 0.0
+        return float("-inf")
 
     if n >= m:
-        return 1.0
+        return 0.0
 
     log_terms = []
 
@@ -155,7 +164,64 @@ def p_insert_fail_linear_probing(
 
         log_terms.append(log_probability_contribution)
 
-    return math.exp(logsumexp(log_terms))
+    return logsumexp(log_terms)
+
+
+def p_insert_fail_linear_probing(
+    table_size: int,
+    entry_count: int,
+    probe_limit: int,
+) -> float:
+    log_p = log_p_insert_fail_linear_probing(
+        table_size=table_size,
+        entry_count=entry_count,
+        probe_limit=probe_limit,
+    )
+    if log_p == float("-inf"):
+        return 0.0
+    return math.exp(log_p)
+
+
+def log_p_insert_fail_churn_delete_corrected(
+    table_size: int,
+    entry_count: int,
+    probe_limit: int,
+) -> float:
+    m = table_size
+    n = entry_count
+    L = probe_limit + 1
+
+    if n < L:
+        return float("-inf")
+
+    if n >= m:
+        return 0.0
+
+    log_p_n = log_p_insert_fail_linear_probing(m, n, probe_limit)
+    log_p_np1 = log_p_insert_fail_linear_probing(m, n + 1, probe_limit)
+
+    log_delta_p = logdiffexp(log_p_np1, log_p_n)
+
+    return (
+        math.log(n + 1 - L)
+        - math.log(L)
+        + log_delta_p
+    )
+
+
+def p_insert_fail_churn_delete_corrected(
+    table_size: int,
+    entry_count: int,
+    probe_limit: int,
+) -> float:
+    log_p = log_p_insert_fail_churn_delete_corrected(
+        table_size=table_size,
+        entry_count=entry_count,
+        probe_limit=probe_limit,
+    )
+    if log_p == float("-inf"):
+        return 0.0
+    return math.exp(log_p)
 
 
 def p_early_failure_over_lifetime(
@@ -295,22 +361,39 @@ def main() -> None:
         help="Comma-separated entry counts, e.g. 10000,12000,14000,32768",
     )
 
+    parser.add_argument(
+        "--failure-model",
+        choices=["insert-only", "churn-delete"],
+        default="insert-only",
+        help="Failure model. insert-only uses the classic clustered "
+             "linear-probing model; churn-delete applies the delete-hole "
+             "load-step correction. Default: insert-only",
+    )
+
     args = parser.parse_args()
 
     print(f"table_size       = {args.table_size:,}")
     print(f"probe_limit      = {args.probe_limit:,}")
     print(f"lifetime_inserts = {args.lifetime_inserts:,} per file")
+    print(f"failure_model    = {args.failure_model}")
     print()
 
     rows = []
     for entry_count in args.entries:
         load_factor = entry_count / args.table_size
 
-        p_insert_fail = p_insert_fail_linear_probing(
-            table_size=args.table_size,
-            entry_count=entry_count,
-            probe_limit=args.probe_limit,
-        )
+        if args.failure_model == "churn-delete":
+            p_insert_fail = p_insert_fail_churn_delete_corrected(
+                table_size=args.table_size,
+                entry_count=entry_count,
+                probe_limit=args.probe_limit,
+            )
+        else:
+            p_insert_fail = p_insert_fail_linear_probing(
+                table_size=args.table_size,
+                entry_count=entry_count,
+                probe_limit=args.probe_limit,
+            )
 
         p_early_failure = p_early_failure_over_lifetime(
             p_insert_fail=p_insert_fail,
