@@ -179,7 +179,7 @@ static int read_record_before(const struct fffs_backend *backend,
 
 static int discover(const struct fffs_backend *backend,
         struct fffs_inspect_summary *summary) {
-    if (!backend || !backend->ctx || !backend->size || !backend->read) {
+    if (!backend || !backend->size || !backend->read) {
         return FFFS_ERR_INVALID;
     }
 
