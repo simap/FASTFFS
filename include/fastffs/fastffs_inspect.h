@@ -59,6 +59,14 @@ struct fffs_workload_summary {
 
 int fffs_inspect_check(const struct fffs_backend *backend,
         struct fffs_inspect_summary *summary);
+/*
+ * Per-page liveness map for visualization/tooling. Fills page_state[0..page_count)
+ * with: 0 erased, 1 metadata, 2 obsolete, 3 live-data. Reuses the same index
+ * reachability walk as fffs_inspect_check, so orphaned old versions are correctly
+ * classified as obsolete. page_count must be backend size / page_size.
+ */
+int fffs_inspect_live_map(const struct fffs_backend *backend,
+        uint8_t *page_state, size_t page_count, size_t page_size);
 int fffs_inspect_dump(const struct fffs_backend *backend, FILE *out);
 int fffs_inspect_fragstats_dump(const struct fffs_backend *backend,
         FILE *out);

@@ -547,6 +547,129 @@ int fffs_inspect_check(const struct fffs_backend *backend,
     return FFFS_OK;
 }
 
+static void livemap_mark(uint8_t *page_state, size_t page_count,
+        size_t page_size, size_t base, size_t len, uint8_t val) {
+    if (len == 0) {
+        return;
+    }
+    size_t p0 = base / page_size;
+    size_t p1 = (base + len - 1) / page_size;
+    for (size_t p = p0; p <= p1 && p < page_count; p++) {
+        if (val > page_state[p]) {
+            page_state[p] = val;
+        }
+    }
+}
+
+int fffs_inspect_live_map(const struct fffs_backend *backend,
+        uint8_t *page_state, size_t page_count, size_t page_size) {
+    if (!backend || !page_state || !page_size) {
+        return FFFS_ERR_INVALID;
+    }
+    struct fffs_inspect_summary tmp;
+    int err = discover(backend, &tmp);
+    if (err != FFFS_OK) {
+        return err;
+    }
+    memset(page_state, 0, page_count);
+
+    uint16_t *live_heads = calloc(FFFS_SLOT_COUNT, sizeof(*live_heads));
+    bool *seen_root = calloc(FFFS_SLOT_COUNT, sizeof(*seen_root));
+    bool *reachable = calloc(tmp.sector_count, sizeof(*reachable));
+    bool *span_heads = calloc(tmp.sector_count, sizeof(*span_heads));
+    if (!live_heads || !seen_root || !reachable || !span_heads) {
+        free(span_heads); free(reachable); free(seen_root); free(live_heads);
+        return FFFS_ERR_NOMEM;
+    }
+
+    err = inspect_index(backend, &tmp, live_heads);
+    if (err == FFFS_OK) {
+        err = mark_live_chains(backend, &tmp, live_heads, reachable,
+                span_heads, seen_root);
+    }
+    if (err != FFFS_OK) {
+        goto done;
+    }
+
+    /* index area holds the namespace records — metadata */
+    for (size_t s = 0; s < tmp.index_sectors; s++) {
+        livemap_mark(page_state, page_count, page_size,
+                s * tmp.sector_size, tmp.sector_size, 1);
+    }
+
+    for (size_t sector = tmp.index_sectors; sector < tmp.sector_count; sector++) {
+        uint8_t footer[FFFS_SECTOR_FOOTER_SIZE];
+        size_t footer_off = sector * tmp.sector_size +
+            tmp.sector_size - FFFS_SECTOR_FOOTER_SIZE;
+        err = backend_read(backend, footer_off, footer, sizeof(footer));
+        if (err != FFFS_OK) {
+            goto done;
+        }
+        struct fffs_sector_footer view;
+        fffs_decode_sector_footer(footer, &view);
+        if (view.erased) {
+            continue;                                  /* blank sector */
+        }
+        if (!valid_footer(&view, NULL)) {
+            continue;                                  /* corrupt / non-file */
+        }
+        if (view.tombstone_bits == FFFS_BITMIRROR_CLEARED) {
+            livemap_mark(page_state, page_count, page_size,
+                    sector * tmp.sector_size, tmp.sector_size, 2); /* dead sector */
+            continue;
+        }
+
+        /* owned sector: footer is live metadata, then walk its records */
+        livemap_mark(page_state, page_count, page_size, footer_off,
+                FFFS_SECTOR_FOOTER_SIZE, 1);
+        size_t cursor = tmp.sector_size - FFFS_SECTOR_FOOTER_SIZE;
+        size_t claimed_data_end = 0;
+        while (cursor > FFFS_SECTOR_FOOTER_SIZE) {
+            struct decoded_md decoded;
+            enum md_state state;
+            size_t record_start = 0;
+            err = read_record_before(backend, &tmp, sector, cursor,
+                    &decoded, &state, &record_start);
+            if (err != FFFS_OK) {
+                goto done;
+            }
+            if (state == MD_ERASED || state == MD_CORRUPT) {
+                break;
+            }
+            livemap_mark(page_state, page_count, page_size,
+                    sector * tmp.sector_size + record_start,
+                    cursor - record_start, 1);          /* md record: metadata */
+            cursor = record_start;
+            size_t data_end = (size_t)decoded.data_off + decoded.data_len;
+            if (data_end > claimed_data_end) {
+                claimed_data_end = data_end;
+            }
+            uint8_t dval;
+            if (state == MD_TOMBSTONED || state == MD_UNCOMMITTED) {
+                dval = 2;
+            } else {
+                bool live = false;
+                err = record_reachable_for_slot(backend, &tmp, live_heads,
+                        decoded.slot, sector, &live);
+                if (err != FFFS_OK) {
+                    goto done;
+                }
+                dval = live ? 3 : 2;
+            }
+            livemap_mark(page_state, page_count, page_size,
+                    sector * tmp.sector_size + decoded.data_off,
+                    decoded.data_len, dval);
+            if (cursor <= claimed_data_end) {
+                break;
+            }
+        }
+    }
+
+done:
+    free(span_heads); free(reachable); free(seen_root); free(live_heads);
+    return err;
+}
+
 enum frag_pin_class {
     FRAG_ROOT_ONLY = 0,
     FRAG_CONTINUATION_ONLY = 1,
