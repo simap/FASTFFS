@@ -394,12 +394,20 @@ static int gc_classify_record(struct fffs *fs, size_t sector,
 }
 
 static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
-        bool use_map) {
+        bool use_map, bool *out_cheap_skip) {
     if (!fs) {
         return FFFS_ERR_INVALID;
     }
     if (out_action) {
         *out_action = FFFS_GC_IDLE;
+    }
+    /*
+     * "Cheap skip" means this call classified the sector from in-memory state
+     * alone (no flash access): the alloc map, the compaction reservation, or a
+     * writer holding it in flight.
+     */
+    if (out_cheap_skip) {
+        *out_cheap_skip = true;
     }
     if (fs->sector_count <= fs->index_sectors) {
         return FFFS_OK;
@@ -436,6 +444,10 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
             *out_action = FFFS_GC_SCANNED;
         }
         return FFFS_OK;
+    }
+
+    if (out_cheap_skip) {
+        *out_cheap_skip = false; //past the cheap in-memory cases.
     }
     uint8_t window_buf[FFFS_MD_PRELOAD_MAX];
     struct fffs_sector_reader window = {
@@ -643,7 +655,24 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
 }
 
 int fffs_gc_step(struct fffs *fs, enum fffs_gc_action *out_action) {
-    return gc_step(fs, out_action, true);
+    if (!fs) {
+        return FFFS_ERR_INVALID;
+    }
+    /*
+     * Keep scanning past sectors that gc_step() can classify cheaply so a
+     * single public step lands on real GC work instead of being spent on a 
+     * cheap skip. We stop after one full pass around the ring rather than 
+     * spinning.
+     */
+    size_t data_sectors = fs->sector_count > fs->index_sectors ?
+        fs->sector_count - fs->index_sectors : 0;
+    for (size_t skipped = 0;; skipped++) {
+        bool cheap_skip = false;
+        int err = gc_step(fs, out_action, true, &cheap_skip);
+        if (err != FFFS_OK || !cheap_skip || skipped + 1 >= data_sectors) {
+            return err;
+        }
+    }
 }
 
 int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector) {
@@ -668,7 +697,7 @@ int fffs_gc_until_erased(struct fffs *fs, uint16_t *erased_sector) {
         while (advanced < data_sectors) {
             size_t before = normalized_data_cursor(fs, fs->gc_cursor);
             enum fffs_gc_action action;
-            int err = gc_step(fs, &action, use_map);
+            int err = gc_step(fs, &action, use_map, NULL);
             if (err != FFFS_OK) {
                 return err;
             }
