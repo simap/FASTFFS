@@ -1124,6 +1124,42 @@ Wear leveling is intentionally simple in the baseline. Index rotation spreads in
 
 Local tombstones are hints for reclaim and compaction; the global index remains the authoritative namespace state.
 
+### Future Reclaim Scheduling: Clean Scan Counter, Delete Queue, Erased Bitmap
+
+A smart GC mode is desirable in FASTFFS. During quiescent periods, background GC should settle to no-ops, not 0.6 ms sector scans forever. GC should be smart about where it spends its time.
+
+#### Garbage Sources
+
+- Garbage is created by delete, overwrite, failed/dangling writes, and partial-write power loss. The first two are covered in normal operation.
+- If a file never closes, it's not reclaimable anyway. A failed close gets cleaned on next boot with the other power-loss scenarios.
+
+#### GC Clean Scan Counter
+
+Keep a GC `clean_scan` counter, reset on normal-operation garbage-creating events left untracked by the delete queue (delete, overwrite, or a future close-abandon). Incremented **after** GC completes scanning a sector (not each step). When `clean_scan >= data_sectors`, GC does not need to scan sectors anymore, and can no-op and return idle.
+
+This is a cheap option that solves the biggest issue with background gc steps on a quiescent system: burning time/cycles re-checking the same sectors over and over. On boot it still scans each sector once to clean up any previous leftover garbage.
+
+#### GC Delete Queue
+
+Add a configurable size unique queue of `n` tombstoned file heads. GC steps work on these first over starting new sector scans. It's a new type of scan that walks link/span info of tombstoned files with heads in the queued sector.
+
+- Queued item is popped and turned into gc step state. If the same sector is queued again while scanning, it is queued like normal and gets another scan later.
+- Don't live-reachability check every file in the walked sectors, just use the tombstone bits. Regular sector scans catch orphaned non-tombstoned data.
+- Still read what is in each sector before erasing it, and check tombstone bits. Stop walking for that file if the slot is not tombstoned or missing (e.g. reused already).
+- A pointer to a sector could have multiple tombstoned heads; GC has to scan each, since a queued sector alone is ambiguous.
+- Previously deleted mid/tail sectors dead-end this walk early, when GC doesn't find that tombstoned slot in the sector anymore.
+- The queue pushes out old entries when it overflows, which must clear the clean_scan counter.
+- Alloc-pressure-triggered GC can use the recent delete queue for fast pressure relief, then fall back to sector-by-sector sweeps.
+- Erase from the file tail, so that the link/span information isn't severed.
+- Since this has no live-reachability check and the walk is not very expensive, a single step in this mode could walk multiple sectors for a file, possibly to the tail each step. Keep tail reclaim to its own step. A 350K file walk is about 6.2ms.
+- After all tombstoned files are reduced to heads, the sector itself is considered for reclaim per normal GC rules.
+
+#### Known Erased+Free Bitmap — optional
+
+Record a known erased + free bitmap, shared and usable between alloc and GC.
+
+Improves the GC sector scan in degraded cases when above optimizations fail/overload or are disabled, and alloc in normal cases. Churn/thrash workloads would benefit from the bitmap. GC effectively hands off sectors to alloc.
+
 ## Corruption and Errors
 
 Corruption is defined as invalid state that can cause a loss of previously successfully committed filesystem data/metadata. Partial writes due to power loss or crash must not cause corruption. Partial write crash recovery is normal/expected, and not considered corruption as long as only the partially written or uncommitted data/metadata is lost. Once an operation that commits data/metadata returns a non-error value, that data/metadata must not be lost/corrupted.
