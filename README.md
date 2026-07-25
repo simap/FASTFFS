@@ -32,7 +32,7 @@ GC, but is much faster with it.
 2. Safe, crash/power failure resilient, atomic updates of file data and metadata.
 3. Fast, reduce file read/write overhead as much as possible.
 4. Optimal for its designed workload.
-5. Reasonable flash wear leveling. 
+5. Reasonable flash wear leveling.
 6. Usable in a variety of use cases, without trying to be everything.
 
 ## What Exists Now
@@ -55,15 +55,17 @@ GC, but is much faster with it.
 - ESP32 S3 benchmark harnesses used to compare candidate filesystems against
   LittleFS, FatFs, JesFS, and SPIFFS.
 
-## Near Future Goals
+## Possible Future Goals
 
 - Optional CRC32 protected file data + metadata.
 - Multi file atomic transactions.
 - Accelerated directory listing. FASTFFS already supports prefix filtering.
-- Sector compaction of live data.
 - Attribute and long name support.
 - Append oriented workloads like logs, data loggers, etc.
 - Key Value optimized workloads, like extra tiny files.
+- Caching of more file metadata to speed up listing, seeks, etc.
+- Better reclaim scheduling for background GC: track clean GC sweeps, time budget options, delete queue, free/erased tracking.
+- Static wear leveling.
 
 ## Concepts
 
