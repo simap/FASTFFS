@@ -180,7 +180,6 @@ static int adapter_setup(void *ctx)
     a->backend = (struct fffs_backend){
         .ctx = (void *)a->part,
         .size = a->part->size,
-        .read_granule = 1,
         .program_granule = 1,
         .read = partition_read,
         .program = partition_program,

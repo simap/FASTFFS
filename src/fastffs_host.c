@@ -25,7 +25,6 @@ int fffs_host_backend_from_verify_flash(struct fffs_backend *backend,
     *backend = (struct fffs_backend){
         .ctx = flash,
         .size = ffsv_flash_size(flash),
-        .read_granule = cfg->read_granule,
         .program_granule = cfg->program_granule,
         .read = host_read,
         .program = host_program,

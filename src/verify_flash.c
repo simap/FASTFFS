@@ -45,12 +45,11 @@ static size_t initial_log_capacity(size_t limit) {
 
 static int checked_config(const struct ffsv_flash_config *cfg) {
     if (!cfg || cfg->total_size == 0 || cfg->sector_size == 0 ||
-            cfg->program_granule == 0 || cfg->read_granule == 0) {
+            cfg->program_granule == 0) {
         return FFSV_ERR_INVALID;
     }
     if (cfg->total_size % cfg->sector_size != 0 ||
-            cfg->sector_size % cfg->program_granule != 0 ||
-            cfg->sector_size % cfg->read_granule != 0) {
+            cfg->sector_size % cfg->program_granule != 0) {
         return FFSV_ERR_INVALID;
     }
     return FFSV_OK;
@@ -66,7 +65,6 @@ int ffsv_flash_config_preset(struct ffsv_flash_config *cfg,
         .total_size = total_size,
         .sector_size = 4096,
         .program_granule = 4,
-        .read_granule = 1,
         .erased_value = 0xff,
         .erase_cycles = 100000,
         .timing = {
@@ -719,13 +717,13 @@ int ffsv_flash_create(struct ffsv_flash **out,
         .prog = lfs_emubd_prog,
         .erase = lfs_emubd_erase,
         .sync = lfs_emubd_sync,
-        .read_size = (lfs_size_t)cfg->read_granule,
+        .read_size = 1,
         .prog_size = (lfs_size_t)cfg->program_granule,
         .block_size = (lfs_size_t)cfg->sector_size,
         .block_count = (lfs_size_t)flash->sector_count,
     };
     flash->emu_cfg = (struct lfs_emubd_config){
-        .read_size = (lfs_size_t)cfg->read_granule,
+        .read_size = 1,
         .prog_size = (lfs_size_t)cfg->program_granule,
         .erase_size = (lfs_size_t)cfg->sector_size,
         .erase_count = (lfs_size_t)flash->sector_count,
@@ -794,9 +792,6 @@ int ffsv_flash_read(struct ffsv_flash *flash, size_t offset,
         return FFSV_ERR_INVALID;
     }
     int err = check_range(flash, offset, size);
-    if (!err) {
-        err = check_alignment(offset, size, flash->cfg.read_granule);
-    }
 
     size_t original_size = size;
     bool inject = false;
@@ -839,9 +834,6 @@ int ffsv_flash_blank_check(struct ffsv_flash *flash, size_t offset,
         return FFSV_ERR_INVALID;
     }
     int err = check_range(flash, offset, size);
-    if (!err) {
-        err = check_alignment(offset, size, flash->cfg.read_granule);
-    }
 
     bool inject = false;
     struct ffsv_op_record *rec = begin_op(flash, FFSV_OP_BLANK_CHECK,

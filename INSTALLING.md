@@ -37,7 +37,6 @@ static int flash_erase(void *ctx, size_t off, size_t len);
 static struct fffs_backend backend = {
     .ctx = (void *) 0, //or pass some data you want to give to your driver
     .size = 2097152, //the flash/partition size
-    .read_granule = 1, //keep at 1, see below
     .program_granule = 1, //if your flash requires a minimum size/alignment for programming
     .read = flash_read,
     .program = flash_program,
@@ -48,7 +47,7 @@ static struct fffs_backend backend = {
 Backend driver contract:
 
 - All three callbacks are synchronous and blocking: the operation must be fully complete on flash when the callback returns. FASTFFS immediately reuses source buffers and reads back what it just wrote, so queued or lazy writeback and fire-and-forget DMA will corrupt data. DMA is fine only if the adapter waits for completion before returning. Never report success for queued work.
-- `read()` copies exactly `len` bytes to `buf` from `off`. FASTFFS currently requires byte-readable access: set `read_granule` to 1 (it must be nonzero, and the core does not align reads to larger values). If the raw flash driver has stricter read alignment, hide that inside the adapter with a temporary aligned read and copy-out. FASTFFS will eagerly read larger areas when it might scan nearby, and tiny reads when it doesn't need more.
+- `read()` copies exactly `len` bytes to `buf` from `off`. FASTFFS requires byte-readable access: reads can be any size or offset, with no alignment guarantees. If the raw flash driver has stricter read alignment, hide that inside the adapter with a temporary aligned read and copy-out. FASTFFS will eagerly read larger areas when it might scan nearby, and tiny reads when it doesn't need more.
 - `program()` programs exactly `len` bytes from `buf` to `off` and never erases. FASTFFS aligns calls to `program_granule`, but may pass multiples of this number. Split large writes in the adapter if needed. Programming must only clear bits from `1` to `0` and FASTFFS will overwrite already programmed areas intentionally. FASTFFS handles blank checking when it expects empty space with read calls.
 - `erase()` erases exactly the requested range to `0xff`, `off` will be aligned to sectors, and `len` will be a multiple of sector size. The driver may issue larger block erases to the flash if they are fully encompassed in the range. Pick a FASTFFS `sector_size` that your erase path can support without erasing neighboring FASTFFS sectors.
 - Reject out-of-range operations and propagate driver failures by returning nonzero. FASTFFS maps any nonzero backend result to `FFFS_ERR_IO`.

@@ -25,23 +25,23 @@ use `ffsv_flash_create_with_preset()`.
 
 - total image size
 - erase sector size
-- program and read granules
+- program granule
 - erased byte value
 - erase-cycle limit passed through to `emubd`
 - fake timing coefficients
 - maximum operation log entries
 
 The config must describe an integral number of sectors, and sector size must be
-divisible by both the program and read granules.
+divisible by the program granule.
 
 Two presets are available:
 
 - `FFSV_PRESET_TARGET_NOR_NOTES`: default target NOR model, 4 KiB sectors,
-  4-byte program granule, 1-byte read granule, `0xff` erased value, and timing
-  values derived from the notes in `design.md`.
+  4-byte program granule, `0xff` erased value, and timing values derived from
+  the notes in `design.md`.
 - `FFSV_PRESET_ESP32S3_MEASURED`: 4 KiB sectors, 16-byte program granule,
-  1-byte read granule, `0xff` erased value, and timing values from the measured
-  ESP32-S3 flash snapshot.
+  `0xff` erased value, and timing values from the measured ESP32-S3 flash
+  snapshot.
 
 Tests may override fields after `ffsv_flash_config_preset()` and before
 `ffsv_flash_create()`. `tools/fffs_api_crash_sweep` does this for configurable
@@ -61,8 +61,8 @@ Public operations are byte-addressed:
 - `ffsv_flash_corrupt()`
 - `ffsv_flash_xor()`
 
-Reads and blank checks must be aligned to `read_granule`. Programs and staged
-programs must be aligned to `program_granule`. Erases must be sector-aligned.
+Reads and blank checks are byte-addressed. Programs and staged programs must be
+aligned to `program_granule`. Erases must be sector-aligned.
 
 Normal program operations delegate to `lfs_emubd_prog()`, which programs by
 ANDing bytes into the current block image. In other words, normal programming

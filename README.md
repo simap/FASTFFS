@@ -123,32 +123,32 @@ The churn benchmark writes about 8.2 MB of creates/replaces/deletes while keepin
 Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
 
 <p>
-  <img src="benchmarks/results/graphs/read_64b_throughput.png" width="49%" alt="64 B file read throughput">
-  <img src="benchmarks/results/graphs/write_64b_throughput.png" width="49%" alt="64 B file write throughput">
+  <img src="benchmarks/results/graphs/read_64b_throughput.png" width="49%" alt="64 B read throughput, KiB/s: FFFS 148, FFFS min 34, LittleFS 2.0, FAT 48, JesFS 5.2, SPIFFS 2.7">
+  <img src="benchmarks/results/graphs/write_64b_throughput.png" width="49%" alt="64 B write throughput, KiB/s: FFFS 15, FFFS min 8.6, LittleFS 0.59, FAT 0.23, JesFS 2.9, SPIFFS 0.27">
 </p>
 
 <p>
-  <img src="benchmarks/results/graphs/read_50k_throughput.png" width="49%" alt="50 KiB file read throughput">
-  <img src="benchmarks/results/graphs/write_50k_throughput.png" width="49%" alt="50 KiB file write throughput">
+  <img src="benchmarks/results/graphs/read_50k_throughput.png" width="49%" alt="50 KiB read throughput, KiB/s: FFFS 4403, FFFS min 4367, LittleFS 2115, FAT 4595, JesFS 1276, SPIFFS 323">
+  <img src="benchmarks/results/graphs/write_50k_throughput.png" width="49%" alt="50 KiB write throughput, KiB/s: FFFS 175, FFFS min 128, LittleFS 92, FAT 61, JesFS 73, SPIFFS 66">
 </p>
 
 <p>
-  <img src="benchmarks/results/graphs/read_throughput_by_file_class.png" width="49%" alt="Churn read throughput by file class">
-  <img src="benchmarks/results/graphs/write_throughput_by_file_class.png" width="49%" alt="Churn write throughput by file class">
+  <img src="benchmarks/results/graphs/read_throughput_by_file_class.png" width="49%" alt="Churn read throughput 10-20/20-60/350 KiB, KiB/s: FFFS 4102/4339/4517, FFFS min 3010/3698/4528, LittleFS 616/1460/2554, FAT 3051/4363/5662, JesFS 1632/2315/3194, SPIFFS 240/483/829">
+  <img src="benchmarks/results/graphs/write_throughput_by_file_class.png" width="49%" alt="Churn write throughput 10-20/20-60/350 KiB, KiB/s: FFFS 152/165/123, FFFS min 94/105/82, LittleFS 58/73/83, FAT 31/54/74, JesFS 55/62/55, SPIFFS 14/20/9">
 </p>
 
 <p>
-  <img src="benchmarks/results/graphs/churn_wall_time.png" width="49%" alt="Churn wall time">
-  <img src="benchmarks/results/graphs/exists_time.png" width="49%" alt="Churn exists and missing name probe time">
+  <img src="benchmarks/results/graphs/churn_wall_time.png" width="49%" alt="Churn wall time, seconds: FFFS 101 with 38 GC, FFFS min 133 with 38 GC, LittleFS 122, FAT 183, JesFS 153, SPIFFS 757">
+  <img src="benchmarks/results/graphs/exists_time.png" width="49%" alt="Churn name probe existing/missing: FFFS 151/50 us, FFFS min 1.9/3.4 ms, LittleFS 4.9/1.2 ms, FAT 201 us/2.1 ms, JesFS 5.5/13.6 ms, SPIFFS 53.9/115 ms">
 </p>
 
 <p>
-  <img src="benchmarks/results/graphs/mount_time.png" width="49%" alt="Churn mount time">
-  <img src="benchmarks/results/graphs/list_time.png" width="49%" alt="Churn list time">
+  <img src="benchmarks/results/graphs/mount_time.png" width="49%" alt="Mount after churn, ms: FFFS 6.8, FFFS min 7.8, LittleFS 13.4, FAT 14.7, JesFS 77.2, SPIFFS 231">
+  <img src="benchmarks/results/graphs/list_time.png" width="49%" alt="List after churn, ms: FFFS 15.5, FFFS min 93.9, LittleFS 274, FAT 7.3, JesFS 13.7, SPIFFS 115">
 </p>
 
 <p>
-  <img src="benchmarks/results/graphs/smallfiles_wall_time_extrapolated.png" width="100%" alt="Small Files stress test wall time extrapolated to full write target">
+  <img src="benchmarks/results/graphs/smallfiles_wall_time_extrapolated.png" width="100%" alt="Small files wall time: FFFS completed 203s, FFFS min completed 1356s, LittleFS failed at 33% est 606s, FAT failed at 7% est 1016s, JesFS failed at 34% est 301s, SPIFFS completed 2485s">
 </p>
 
 | Metric | FASTFFS default debt-GC | FASTFFS minimal debt-GC | [LittleFS](https://github.com/littlefs-project/littlefs) | FATFS + ESP-IDF WL | [JesFS](https://github.com/joembedded/JesFs) | [SPIFFS](https://github.com/pellepl/spiffs) |

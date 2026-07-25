@@ -122,8 +122,7 @@ int fffs_mount(struct fffs *fs, const struct fffs_backend *backend,
     index_heads = index_cache;
 #endif
     size_t index_hash_table_size = options->index_hash_table_size;
-    if (!options->scratch || options->scratch_size < FFFS_MIN_SCRATCH_SIZE ||
-            options->scratch_size < backend->read_granule) {
+    if (!options->scratch || options->scratch_size < FFFS_MIN_SCRATCH_SIZE) {
         return FFFS_ERR_INVALID;
     }
     *fs = (struct fffs){0};

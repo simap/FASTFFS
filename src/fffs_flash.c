@@ -16,11 +16,9 @@ int fffs_map_backend_status(int status) {
 }
 
 bool fffs_valid_backend(const struct fffs_backend *backend) {
-    return backend && backend->size &&
-        backend->read_granule && backend->program_granule &&
+    return backend && backend->size && backend->program_granule &&
         backend->program_granule <= FFFS_FILE_CACHE_SIZE &&
         backend->size % backend->program_granule == 0 &&
-        backend->program_granule % backend->read_granule == 0 &&
         backend->read && backend->program && backend->erase;
 }
 

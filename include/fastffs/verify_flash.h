@@ -67,7 +67,6 @@ struct ffsv_flash_config {
     size_t total_size;
     size_t sector_size;
     size_t program_granule;
-    size_t read_granule;
     uint8_t erased_value;
     uint32_t erase_cycles;
     struct ffsv_timing timing;

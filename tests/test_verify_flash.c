@@ -38,7 +38,6 @@ static struct ffsv_flash_config test_cfg(void) {
         .total_size = 4096 * 4,
         .sector_size = 4096,
         .program_granule = 4,
-        .read_granule = 1,
         .erased_value = 0xff,
         .erase_cycles = 100000,
         .timing = {

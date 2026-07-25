@@ -1005,7 +1005,7 @@ choices, or format-time image choices. Current implemented knobs:
 |---|---|---|
 | `sector_size` | format-time | Allocation/index/reclaim unit; encoded as `256 << sector_shift`, default 4 KB |
 | `index_sectors` | format-time | Number of rotating index sectors; must be at least 2 |
-| backend geometry | runtime | Backend size and read/program/erase granules; FASTFFS sector size must fit backend constraints |
+| backend geometry | runtime | Backend size, byte-readable reads, program granule, and erase-sector constraints; FASTFFS sector size must fit backend constraints |
 | `strict` mount | runtime | Controls whether narrow non-strict recovery exceptions are allowed |
 | caller-provided scratch | runtime | Required working buffer; keeps the embedded core usable without `malloc`/`free` |
 | `FFFS_INDEX_CACHE_MODE` | compile-time | Selects no-cache, hash `(slot, head)` cache, or full slot-head cache |

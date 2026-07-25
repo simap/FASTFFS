@@ -131,7 +131,6 @@ typedef void (*fffs_profile_trace_fn)(struct fffs *fs,
 struct fffs_backend {
     void *ctx;
     size_t size;
-    size_t read_granule;
     size_t program_granule;
     int (*read)(void *ctx, size_t offset, void *buffer, size_t size);
     int (*program)(void *ctx, size_t offset, const void *buffer, size_t size);
