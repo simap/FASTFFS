@@ -474,9 +474,9 @@ static void adapter_log_config(void *ctx)
 {
     (void)ctx;
     ESP_LOGI(TAG,
-             "config index_cache_mode=%d index_heads=%u scratch=%u file_write_buffer=%u alloc_map_mode=%d alloc_map_words=%u gc_policy=%s fixed_steps=%d debt_max_steps=%d debt_scan_multiplier=%d",
+             "config index_cache_mode=%d index_heads=%u scratch=%u file_cache=%u alloc_map_mode=%d alloc_map_words=%u gc_policy=%s fixed_steps=%d debt_max_steps=%d debt_scan_multiplier=%d",
              FFFS_INDEX_CACHE_MODE, FASTFFS_INDEX_HEADS,
-             FASTFFS_SCRATCH_SIZE, FFFS_FILE_WRITE_BUFFER,
+             FASTFFS_SCRATCH_SIZE, FFFS_FILE_CACHE_SIZE,
              FFFS_ALLOC_MAP_MODE,
 #if FFFS_ALLOC_MAP_MODE == FFFS_ALLOC_MAP_FULL_BITMAP
              FASTFFS_ALLOC_MAP_WORDS,

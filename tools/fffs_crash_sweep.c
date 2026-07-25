@@ -9,6 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef FFFS_INDEX_HASH_TABLE_SIZE
+#define FFFS_INDEX_HASH_TABLE_SIZE 1024
+#endif
+
 #if FFFS_INDEX_CACHE_MODE == FFFS_INDEX_CACHE_FULL_SLOT_HEADS
 #define SWEEP_INDEX_HEADS FFFS_SLOT_COUNT
 #else

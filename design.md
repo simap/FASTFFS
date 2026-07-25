@@ -1010,7 +1010,7 @@ choices, or format-time image choices. Current implemented knobs:
 | caller-provided scratch | runtime | Required working buffer; keeps the embedded core usable without `malloc`/`free` |
 | `FFFS_INDEX_CACHE_MODE` | compile-time | Selects no-cache, hash `(slot, head)` cache, or full slot-head cache |
 | `index_hash_table_size` | runtime | Cache entry count for the selected index mode; hash mode requires a bounded power-of-two count, full slot-head mode requires `FFFS_SLOT_COUNT` |
-| `FFFS_INDEX_HASH_TABLE_SIZE` / `FFFS_INDEX_HASH_TABLE_SIZE_MAX` | compile-time | Default and upper bound for hash-cache sizing |
+| `FFFS_INDEX_HASH_TABLE_SIZE_MAX` | compile-time | Upper bound for the mount-time hash table size; the core has no compile-time default, applications pick their own table size |
 | `FFFS_ALLOC_MAP_MODE` | compile-time | Selects no allocation map or full in-memory bitmap hints |
 | `alloc_map` / `alloc_map_words` | runtime | Caller-provided RAM storage for the full bitmap when compiled in |
 | `FFFS_ALLOC_RECOVERY_LOOKAHEAD` | compile-time | Bounds allocator cursor recovery from recent index heads |
