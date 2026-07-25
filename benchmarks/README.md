@@ -1,7 +1,6 @@
 # FASTFFS Candidate Benchmarks
 
-This directory contains ESP32-S3 benchmark harnesses used to compare FASTFFS
-against small NOR-flash filesystem candidates.
+ESP32-S3 benchmark harnesses comparing FASTFFS against small NOR-flash filesystem candidates.
 
 Current hardware/software baseline:
 
@@ -10,74 +9,25 @@ Current hardware/software baseline:
 - 8 MB built-in flash
 - 4 MB benchmark data partition at offset `0x190000`
 
+## Benchmark Runner
+
+`benchfs/` is the shared benchmark runner. It owns workload generation, timing, accounting, churn modeling, stats, and table-log output. Each project provides a filesystem adapter: format/mount/unmount, file operations, listing/existence checks, and optional fsinfo, GC stepping, and memory reporting.
+
+The workload covers format/mount, tiny and medium file write/read (192 x 64 B, 16 x 50 KB), storage overhead, listing, early/middle/late lookup behavior, exists probes for existing and missing names, cold remount probes, a deterministic churn phase (about 8.2 MB written, 2.2-2.4 MB live), a small-file churn phase (1 B-5 KB files, 5,000 slots, 8 MB write target), and write health counters.
+
 ## Projects
 
-### `esp32s3_jesfs`
+- `esp32s3_fastffs`: FASTFFS. One project builds all FASTFFS configurations; `benchidf.sh --list` shows the variants (default, no-alloc-map, minimal, inline vs debt GC, raw stack probe).
+- `esp32s3_jesfs`: JesFS from `third_party/JesFs`, on a data partition named `jesfs`.
+- `esp32s3_littlefs`: LittleFS via the `joltwallet/littlefs` component. Uses the shared VFS adapter.
+- `esp32s3_spiffs`: ESP-IDF's built-in SPIFFS. Uses the shared VFS adapter; `sdkconfig.defaults` pins the SPIFFS tuning used for current measurements.
+- `esp32s3_fatfs`: FatFs over the ESP-IDF wear-levelling layer with 4 KB sectors. Uses the shared VFS adapter.
 
-Standalone ESP-IDF benchmark for JesFS.
-
-- Uses `third_party/JesFs`.
-- Mounts a data partition named `jesfs`.
-- Uses a JesFS-specific harness in `main/main.c`.
-- Runs the raw partition timing probes before filesystem tests.
-
-### `esp32s3_littlefs`
-
-ESP-IDF VFS benchmark for LittleFS.
-
-- Uses `joltwallet/littlefs` through the ESP-IDF component manager.
-- Mounts a data partition named `storage` at `/fs`.
-- Uses `benchmarks/vfs_bench_common`.
-- Generated `managed_components/`, `dependencies.lock`, and `sdkconfig` are
-  local build artifacts.
-
-### `esp32s3_spiffs`
-
-ESP-IDF VFS benchmark for SPIFFS.
-
-- Uses ESP-IDF's built-in SPIFFS component.
-- Mounts a data partition named `storage` at `/fs`.
-- Uses `benchmarks/vfs_bench_common`.
-- `sdkconfig.defaults` pins the SPIFFS tuning used for current measurements.
-
-### `esp32s3_fatfs`
-
-ESP-IDF VFS benchmark for FatFs on the ESP-IDF wear-levelling layer.
-
-- Uses ESP-IDF's built-in FatFs VFS integration and `wear_levelling`.
-- Mounts a data partition named `storage` at `/fs`.
-- Uses `benchmarks/vfs_bench_common`.
-- Uses ESP-IDF wear-levelling defaults, including 4 KiB sectors.
-
-## Shared VFS Workload
-
-`vfs_bench_common` is used by the LittleFS, SPIFFS, and FATFS projects. It measures:
-
-- initial mount
-- format and mount
-- filesystem info and storage overhead
-- 192 tiny file writes and reads, 64 bytes each
-- 16 medium file writes and reads, 50 KiB each
-- directory listing
-- early/middle/late tiny-file lookup behavior
-- `stat()` probes for existing and missing names
-- cold remount plus read/list probes
-- churn workload writing about 8 MiB total while keeping about 2.2 MiB live
-- small-file churn workload with a 5,000-slot cap, 1 B-5 KiB file sizes, an
-  8 MiB write target, a 2,308,848 B live target, 32 KiB slack, milestone
-  list/fsinfo probes at 1, 10, 100, 1,000, and 5,000 live files, and continued
-  writes/replacements/deletes to exercise fragmentation and GC
-- write health counters for short writes, retry loops, flush failures, and close
-  failures
-
-The churn mix is mostly 10-20 KiB files, some 20-60 KiB files, and one forced
-350 KiB file late in the run.
+`vfs_bench_common/` is the shared VFS adapter used by the LittleFS, SPIFFS, and FATFS projects. Their data partitions are named `storage` and mount at `/fs`.
 
 ## Build And Run
 
-Use `benchidf.sh` from the repo root. It activates ESP-IDF, owns the project and
-build-directory arguments, keeps build trees under each benchmark project, and
-captures monitor output under `benchmarks/results/`.
+Use `benchidf.sh` from the repo root. It activates ESP-IDF, owns the project and build-directory arguments, keeps build trees under each benchmark project, and captures monitor output under `benchmarks/results/`.
 
 ```sh
 benchmarks/benchidf.sh --list
@@ -104,26 +54,19 @@ Use `--port` or `ESPPORT` for a different attached board:
 benchmarks/benchidf.sh fastffs-debt --port /dev/cu.usbserial-10 flash monitor
 ```
 
-The wrapper adds monitor exits for crashes and the benchmark completion line
-unless those specific monitor options are already supplied. Timestamped logs are
-named like `benchmarks/results/20260518_143210_fastffs_default.log`.
+The wrapper adds monitor exits for crashes and the benchmark completion line unless those specific monitor options are already supplied. Timestamped logs are named like `benchmarks/results/20260518_143210_fastffs_default.log`.
 
-Build directories are named `build-<variant>` and are always placed under the
-selected benchmark project, for example
-`benchmarks/esp32s3_fastffs/build-fastffs-default`. Do not pass `idf.py -B` or
-`idf.py -C` directly for benchmark runs.
+Build directories are named `build-<variant>` and are always placed under the selected benchmark project, for example `benchmarks/esp32s3_fastffs/build-fastffs-default`. Do not pass `idf.py -B` or `idf.py -C` directly for benchmark runs.
 
 ## Output Files
 
 Local benchmark outputs are intentionally not tracked:
 
-- `benchmarks/*/build/`
+- `benchmarks/*/build-*/`
 - `benchmarks/*/sdkconfig`
 - `benchmarks/*/sdkconfig.old`
 - `benchmarks/*/dependencies.lock`
 - `benchmarks/*/managed_components/`
 - `benchmarks/results/*.log`
 
-Keep reproducible configuration in `sdkconfig.defaults`, not in generated
-`sdkconfig` files. Result logs can be kept under `benchmarks/results/` for local
-comparison, but they are treated as run artifacts.
+Keep reproducible configuration in `sdkconfig.defaults`, not in generated `sdkconfig` files. Result logs can be kept under `benchmarks/results/` for local comparison, but they are treated as run artifacts.

@@ -6,7 +6,7 @@ Design notes for a small NOR-flash filesystem optimized for named file replaceme
 
 - 2-12 MB NOR flash.
 - Hundreds to low thousands of files.
-- Many tiny files, many files up to ~50 KB, a few larger files around ~300 KB.
+- Many tiny files, many files up to ~50 KB, a few larger files around ~350 KB.
 - Common operations:
   - list files
   - read whole files
@@ -28,7 +28,7 @@ Design notes for a small NOR-flash filesystem optimized for named file replaceme
 - Expected NOR endurance is around 100K erase cycles, so v1 should prefer simple rotating allocation over moving otherwise-stable data solely for static wear leveling.
 - Flash will have an erasable unit that is some power of 2.
  
-FASTFFS uses "sector" for its logical allocation, index, scan, and reclaim unit. This must be >= to the minimum backend flash erase unit. The sector size is encoded as `256 << sector_shift`; the default is 4 KB (`sector_shift = 4`).
+FASTFFS uses "sector" for its logical allocation, index, scan, and reclaim unit. This must be >= the minimum backend flash erase unit. The sector size is encoded as `256 << sector_shift`; the default is 4 KB (`sector_shift = 4`).
 
 Measured / datasheet timing notes for the target NOR flash:
 
@@ -143,17 +143,17 @@ For an 8 MB flash with 256-byte pages:
 - At 100-1000 files, collision/probe cost is effectively negligible.
 - Larger hash/slot widths can be a compile-time option for much larger namespaces.
 
-Expected 16-bit collision/probe behavior:
+Expected 16-bit collision/probe behavior, simulated with the resolution rules by `tools/slot_collision_table.py`:
 
 | Live Files | Expected Extra Colliding Names | Extra as % of Files | Slot Load | Existing Lookup Probes | Missing/New Lookup Probes |
 |---:|---:|---:|---:|---:|---:|
 | 100 | 0.08 | 0.08% | 0.15% | ~1.00 | ~1.00 |
 | 500 | 1.90 | 0.38% | 0.76% | ~1.00 | ~1.01 |
-| 1,000 | 7.58 | 0.76% | 1.53% | ~1.01 | ~1.02 |
-| 2,000 | 30.2 | 1.51% | 3.05% | ~1.02 | ~1.03 |
-| 5,000 | 185.9 | 3.72% | 7.63% | ~1.04 | ~1.08 |
-| 10,000 | 725.5 | 7.26% | 15.26% | ~1.08 | ~1.18 |
-| 32,768 | 9,873.5 | 30.13% | 50.00% | ~1.39 | ~2.00 |
+| 1,000 | 7.76 | 0.78% | 1.53% | ~1.01 | ~1.02 |
+| 2,000 | 30.4 | 1.52% | 3.05% | ~1.02 | ~1.03 |
+| 5,000 | 190.6 | 3.81% | 7.63% | ~1.04 | ~1.09 |
+| 10,000 | 764.2 | 7.64% | 15.26% | ~1.09 | ~1.20 |
+| 32,768 | 8,192.3 | 25.00% | 50.00% | ~1.50 | ~2.50 |
 
 The last row is the physical maximum number of one-page files on an 8 MB flash before accounting for metadata, free space, obsolete versions, and GC headroom. For the expected hundreds-to-low-thousands file count, 16-bit slots keep the index compact while collision cost stays low.
 
@@ -209,7 +209,7 @@ Compaction can also be done independently. This is mostly a future concern. For 
 When compacting a sector, compact the oldest valid sector, `1`, into the current sector `2` (if there is room) and any overflow to the erased/free sector, `3`: 
    1. Start reading entries from the oldest sector `1`.
    2. Omit entries from `1` that are no longer current. Existing slot + head pairs that match current data from index replay are copied forward. Deletes do not get carried forward, since they can only impact the validity of past events.
-   3. Write the surviving entries into `2` and overlowing into `3` when `2` is full.
+   3. Write the surviving entries into `2` and overflowing into `3` when `2` is full.
    4. Program the new sector header/magic in `3` last, with a serial newer than sector `2`.
    5. Tombstone sector `1`.
    6. Let background erase reclaim sector `1` when idle.
@@ -342,7 +342,7 @@ Startup caching is configurable:
 - Default mode caches the replayed index in a hash table of
   `(slot, head)` entries, which makes missing lookups cheap without metadata
   reads.
-- Larger-MCU mode can cache live root metadata and/or extent lists to make `stat`, `ls`, open, and seek mostly RAM operations.
+- Larger-MCU mode can cache live root metadata and/or span lists to make `stat`, `ls`, open, and seek mostly RAM operations.
 
 The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
 
@@ -413,7 +413,7 @@ fsck/check should report them and directory compaction can remove them.
 Directory entries are append/tombstone oriented. A removed child entry can be
 programmed from its slot value to `0x0000` to remove it. 
 
-Eventually the directory object either grows to another sector/extent or is
+Eventually the directory object either grows to another sector/span or is
 compacted copy-on-write into a new object and republished through the main
 index.
 
@@ -443,7 +443,7 @@ transactions, the directory should be created and populated first. With transact
 
 If an existing directory object can append the child slot in place without
 moving its head, the main index entry for that directory does not need to be
-rewritten. If the directory grows through linked extents under a stable head,
+rewritten. If the directory grows through linked spans under a stable head,
 growth may also avoid a directory index update. If growth or compaction
 publishes a replacement head, that directory index update should participate in
 the same transaction as the related file operation when atomic directory
@@ -490,12 +490,10 @@ window large enough for a new root record plus `FFFS_ALLOC_MIN_USABLE_FREE`.
 The footer full bit by itself is not enough to update the bitmap, because the
 sector may only contain obsolete or tombstoned data that GC should reclaim.
 
-A full bitmap does require a decent chunk of memory. With 4K sectors, you'd need 256 bytes to cover an 8MB filesystem.
-
-A coarse bitmap could compress this down significiantly, while still having some benefit and avoiding scanning some areas that are full for alloc or GC. For example, a 64 bit wide map could cover an 8MB filesystem using 32 sector wide buckets per bit.
+A coarse bitmap could compress the full bitmap down significantly, while still having some benefit and avoiding scanning some areas that are full for alloc or GC. For example, a 64 bit wide map could cover an 8MB filesystem using 32 sector wide buckets per bit.
 
 Coarse map variants should use conservative "proven full bucket" semantics,
-not "some live sector was full" semantics. Since allocation attempts to fill sequentially, there should be many contiguous, completely full blocks of sectors that can be skipped over. There would still be some partially full buckets, but it would still be less scanning that scanning every sector.
+not "some live sector was full" semantics. Since allocation attempts to fill sequentially, there should be many contiguous, completely full blocks of sectors that can be skipped over. There would still be some partially full buckets, but it would still be less scanning than scanning every sector.
 
 The allocator also keeps an `alloc_cursor`, the next sector to try for foreground allocation. Allocation is first-available from that cursor. New file roots and whole small files can share sectors with other roots. Continuations require an empty sector in normal allocation, so that compaction can do COW prefix compaction on a single sector. When allocation scans a sector and sees a continuation metadata record, it skips that sector for normal allocation and marks it full in the allocation bitmap. New writes fill a usable sector until it no longer has enough free space for the largest supported metadata record plus the configured minimum useful data space, or until a soft metadata-density target suggests moving on. The allocator does not try to hunt for sparse holes before filling the current usable sector.
 
@@ -521,7 +519,7 @@ therefore identify the sector region where allocation was happening at the last
 committed write. Reading sector footers for those tail heads gives the newest
 known sector serial and a good place to resume `alloc_cursor`.
 
-It's possible some writes occured and were not commited, so scan should also look ahead a few sectors from the last commited one.
+It's possible some writes occurred and were not committed, so scan should also look ahead a few sectors from the last committed one.
 
 The sector serial is also a relative age signal for GC and wear distribution.
 Low serial sectors are older allocation candidates. 
@@ -727,9 +725,9 @@ Open for read:
 3. Verify filename.
 4. Return file handle.
 
-Sequential reads follow linked extent metadata and should be close to raw flash speed.
+Sequential reads follow linked span metadata and should be close to raw flash speed.
 
-Seek can follow the linked extent structure. If needed, cache the extent list after open or first seek.
+Seek can follow the linked span structure. If needed, cache the span list after open or first seek.
 
 ## Writes
 
@@ -752,10 +750,10 @@ The streaming write path does not need to know the final file length up front:
 
 1. Open for write and find a sector with enough free space for metadata plus a minimum amount of data.
 2. Blank-check and write data into the sector's data area.
-3. If the next contiguous sector is usable, continue the same extent and defer writing the current extent metadata.
-4. If allocation must jump to a non-contiguous sector, write the current extent metadata, pointing at the new extent head sector.
+3. If the next contiguous sector is usable, continue the same span and defer writing the current span metadata.
+4. If allocation must jump to a non-contiguous sector, write the current span metadata, pointing at the new span head sector.
 5. Repeat until close.
-6. On close, write the final extent metadata with no next pointer.
+6. On close, write the final span metadata with no next pointer.
 7. Append the global index record last.
 
 Metadata may be physically valid before the file is committed. Namespace visibility still comes only from the global index append. A crash before the index append leaves orphaned data/metadata for GC.
@@ -778,7 +776,7 @@ Allocator policy should also reserve some metadata slack for later tombstones
 and amendment records. The exact reserve is TBD. It might be configurable, with
 reserve = 0 effectively disabling MD amendment records.
 
-The allocator may temporarily reserve some sectors in a contiguous extent for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
+The allocator may temporarily reserve some sectors in a contiguous run for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
 
 Reservations don't need to be blank checked or verified until allocated.
 
@@ -809,15 +807,15 @@ These estimates assume candidate sectors are already erased or can be blank-chec
 | open existing file, metadata cached | RAM lookup only |
 | open missing file, low collision load | RAM lookup only, usually no flash read |
 | sequential read 50 KB | roughly `50 KB / 4 KB * 405 us`, about ~5 ms raw read time |
-| sequential read 300 KB | roughly `300 KB / 4 KB * 405 us`, about ~30 ms raw read time |
+| sequential read 350 KB | roughly `350 KB / 4 KB * 405 us`, about ~35 ms raw read time |
 | write 50 KB to blank pages | `50 KB / 256 * 670 us`, about ~134 ms plus metadata/index/full-hint writes |
-| write 300 KB to blank pages | `300 KB / 256 * 670 us`, about ~804 ms plus metadata/index/full-hint writes |
+| write 350 KB to blank pages | `350 KB / 256 * 670 us`, about ~938 ms plus metadata/index/full-hint writes |
 | program 4 KB blank sector | ~9.1 ms |
 | erase + program 4 KB sector | ~53 ms |
 | append one small index record | <= ~380 us |
 | program sector full hint | <= ~380 us |
 
-Sequential read/write overhead depends on the number of linked extent records and whether the open path caches an extent list. The design assumes open/read paths can cache enough file metadata to avoid repeated global scans.
+Sequential read/write overhead depends on the number of linked span records and whether the open path caches a span list. The design assumes open/read paths can cache enough file metadata to avoid repeated global scans.
 
 ## Bounded Linear Resolved Slots
 
@@ -1034,7 +1032,7 @@ Design-only or future knobs:
 | Option | Status |
 |---|---|
 | cache full file metadata at startup | Future larger-MCU mode |
-| cache extent list on open or first seek | Future per-open seek acceleration |
+| cache span list on open or first seek | Future per-open seek acceleration |
 | background blank-check scan on boot | Future map warmup; current allocation verifies candidates as needed |
 | metadata CRC32 | Planned format-time policy, not current baseline |
 | directory objects | Optional future secondary index |

@@ -118,7 +118,7 @@ included in total churn runtime. This roughly simulates spending some idle cycle
 on GC opportunistically, instead of forcing foreground writes to pay the whole
 reclaim cost when free space is tight.
 
-The churn benchmark writes about 8.2 MB of creates/replaces/deletes while keeping 105 files and about 2.4 MB live, measuring mutation throughput during the run and final live-set read/list behavior.
+The churn benchmark writes about 8.2 MB of creates/replaces/deletes while keeping about 2.2-2.4 MB live, measuring mutation throughput during the run and final live-set read/list behavior over the 105 surviving files.
 
 Tested on ESP32-S3, ESP-IDF v6.0-beta2, 4 MB data partition.
 
@@ -214,7 +214,7 @@ more typical NOR erase-sector geometry.
 
 ## Notes in no particular order
 
-JesFS really punches above it's weight. It's simple and lightweight.
+JesFS really punches above its weight. It's simple and lightweight.
 
 LittleFS has some really solid test/verification stuff, and has really improved over time. I've borrowed their flash emulation framework to verify FASTFFS.
 

@@ -62,7 +62,7 @@ Backend driver contract:
 - Ideally format once during provisioning or factory reset.
 - You can opt to format on mount failure to self-bootstrap at your peril. A blank/unformatted region and a damaged existing filesystem can both fail mount as `FFFS_ERR_CORRUPT` today.
 
-- Choose an index sector count. Use more for increased wear leveling or many files. At most `(n-1) * 1000` files per 4K sector. Keep headroom below the hard cap: deletes and overwrites also append index records, and a filesystem at exactly the live-file capacity (1022 per usable 4K index sector) can no longer commit any namespace change, including deletes.
+- Choose an index sector count `n`. Use more for increased wear leveling or many files. With 4K sectors, plan for roughly `(n-1) * 1000` files at most. Keep headroom below the hard cap: deletes and overwrites also append index records, and a filesystem at exactly the live-file capacity (1022 per usable 4K index sector) can no longer commit any namespace change, including deletes.
 - Pick `sector_size` for your flash erase geometry, a power of two from 256 to 8192. It must divide `backend.size`, and be a multiple of your flash erase unit. `fffs_format()` erases the index/discovery area (at least the first 8 KiB), the rest will be GCed as needed during normal operation.
 
 ```c
