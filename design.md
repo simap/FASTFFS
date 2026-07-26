@@ -758,6 +758,14 @@ The streaming write path does not need to know the final file length up front:
 
 Metadata may be physically valid before the file is committed. Namespace visibility still comes only from the global index append. A crash before the index append leaves orphaned data/metadata for GC.
 
+### Future Append
+
+Append is add-to-end only.
+
+A committed file can be reopened for append, continuing its chain with the reverse tail records and amendment records described in Sector Metadata. Appended data is programmed first, then a new tail record or size amendment commits it. A flush whose committing record lands in the current index-visible tail sector needs no index append, because the index still points at that sector and the newest valid record for the slot wins. A flush that moves to a new sector writes the tail record there and appends an index record republishing the slot. A crash between data programming and the committing record reverts the file to its last committed size.
+
+`FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` bounds lookup fan-out in shared sectors. Log sectors are single-slot, so they may use a separate, larger record cap whose cost is tail-read size during scans rather than lookup cost.
+
 ### Allocation Strategy
 
 Allocation should consider the following:
@@ -768,6 +776,7 @@ Allocation should consider the following:
 * Normal root allocations should skip sectors containing continuation metadata, but may share sectors containing other roots.
 * Ideally contiguous sectors are allocated when available. 
 * Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or allocation hints.
+* Append/log file spans, including the first, use continuation placement: empty exclusive sectors only. This keeps the chain single-move compactable and reserves tail runway. Log placement is encoded in the record type, so the existing continuation-skip rule keeps foreign roots out of the tail sector while open, after close, and across remount, with no new allocator state.
 
 A reasonable starting minimum data threshold is 128-256 bytes. The exact formula
 is a tunable definition, but runtime allocation should be a simple range check.
@@ -793,6 +802,14 @@ and by skipping over sectors that are reserved for or currently used by open
 writers.
 
 Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or all reservations were already zero. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
+
+## Open File Handles
+
+All open file handles register with the filesystem, including read-only handles. Reclaim and compaction treat any slot with an open handle as pinned to prevent moving/erasing a live root or span out from under an open file. Tombstoning on delete could still happen eagerly if an open file that is deleted reads through the tombstones as long as the data isn't erased, but this changes the normal corruption validation rules.
+
+Slot resolution treats any slot referenced by an open handle as occupied. Deleting an open file frees the name immediately but the slot is not granted to a new file until the last pinning handle closes. Otherwise a new file can claim the freed slot and the old open writer's close commit republishes that slot, clobbering the new file's committed mapping.
+
+Deleting an open file remains an immediate namespace tombstone. Physical reclaim of its chain defers until the last handle on that slot closes. Future delete-queue entries for a pinned slot are skipped and re-armed when the pinning handle closes.
 
 ## Expected Performance
 
@@ -1027,18 +1044,6 @@ choices, or format-time image choices. Current implemented knobs:
 | `FFFS_LAZY_DELETE_TOMBSTONES` | compile-time | Defers delete-time local tombstone programming; global index remains authoritative |
 | `FFFS_PROFILE_TRACE` | compile-time/runtime | Enables optional flash/profile trace callback |
 
-Design-only or future knobs:
-
-| Option | Status |
-|---|---|
-| cache full file metadata at startup | Future larger-MCU mode |
-| cache span list on open or first seek | Future per-open seek acceleration |
-| background blank-check scan on boot | Future map warmup; current allocation verifies candidates as needed |
-| metadata CRC32 | Planned format-time policy, not current baseline |
-| directory objects | Optional future secondary index |
-| metadata amendment records | Future metadata variant |
-| background erase scheduling helper | Future helper; current API exposes incremental GC steps |
-| wear-level erase counters | Future wear-leveling input, not part of allocation/compaction scoring today |
 
 ## Compaction and Reclaim
 
@@ -1085,7 +1090,7 @@ metadata walk.
 
 During the full allocation-pressure `fffs_gc_until_erased` scan, GC keeps a
 small sorted top-`n` list of compaction candidates. A candidate is a sector with
-live root metadata, no live continuation metadata, and no inflight writer state.
+live root metadata, no live continuation metadata, and no open file handle state.
 The recorded candidate facts are:
 
 - sector number
@@ -1116,7 +1121,7 @@ space alone. Compacting mixed continuation/root sectors, continuation-only tail
 waste, linked span prefixes, and whole files requires a separate general
 compaction design that accounts for copied bytes, destination space, source
 sectors made freeable, new trapped space, erase cost, wear, and foreground
-stall time.
+stall time. Future append files add to this category.
 
 Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
 
@@ -1136,6 +1141,8 @@ A smart GC mode is desirable in FASTFFS. During quiescent periods, background GC
 Keep a GC `clean_scan` counter, reset on normal-operation garbage-creating events left untracked by the delete queue (delete, overwrite, or a future close-abandon). Incremented **after** GC completes scanning a sector (not each step). When `clean_scan >= data_sectors`, GC does not need to scan sectors anymore, and can no-op and return idle.
 
 This is a cheap option that solves the biggest issue with background gc steps on a quiescent system: burning time/cycles re-checking the same sectors over and over. On boot it still scans each sector once to clean up any previous leftover garbage.
+
+A sector skipped because an open handle pinned it must not advance `clean_scan`, or closing a pinning handle must reset the counter; otherwise quiescent GC can idle while pinned garbage remains.
 
 #### GC Delete Queue
 
