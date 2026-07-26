@@ -3119,6 +3119,169 @@ static int test_gc_compacts_root_only_sector_under_pressure(void) {
     return 0;
 }
 
+static int test_compaction_preserves_open_reader_data(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file large_file;
+    struct fffs_file reader;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    const uint8_t value[] = {0x10, 0x11, 0x12};
+    uint8_t survivor[512];
+    uint8_t out[512];
+    size_t large_size;
+    uint8_t *large;
+    size_t nread = 0;
+    size_t total = 0;
+    uint16_t source_sector;
+    uint16_t continuation_sector;
+    uint16_t erased_sector = 0;
+    uint16_t head = 0;
+    bool found = false;
+    int rc;
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 32));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    fill_large_pattern(survivor, sizeof(survivor));
+
+    fs.alloc_cursor = fs.index_sectors;
+    ASSERT_OK(write_chunks(&fs, "f000", value, sizeof(value)));
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f000"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    source_sector = head;
+    for (size_t i = 1; i < 6; i++) {
+        char name[8];
+        snprintf(name, sizeof(name), "f%03zu", i);
+        fs.alloc_cursor = fs.index_sectors;
+        ASSERT_OK(write_chunks(&fs, name, value, sizeof(value)));
+        ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16(name), &head,
+                    &found));
+        ASSERT_TRUE(found);
+        ASSERT_TRUE(head == source_sector);
+    }
+    fs.alloc_cursor = fs.index_sectors;
+    ASSERT_OK(write_chunks(&fs, "f006", survivor, sizeof(survivor)));
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f006"), &head,
+                &found));
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(head == source_sector);
+    for (size_t i = 0; i < 6; i++) {
+        char name[8];
+        snprintf(name, sizeof(name), "f%03zu", i);
+        ASSERT_OK(fffs_delete_file(&fs, name));
+    }
+
+    large_size = fs.sector_size + 512u;
+    large = malloc(large_size);
+    ASSERT_TRUE(large != NULL);
+    fill_large_pattern(large, large_size);
+
+    fs.alloc_cursor = (uint16_t)(source_sector + 1u);
+    ASSERT_OK(fffs_open(&fs, &large_file, "large.bin",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&large_file, large, large_size));
+    ASSERT_TRUE(large_file.current != large_file.head);
+    continuation_sector = large_file.current;
+    ASSERT_OK(fffs_close(&large_file));
+
+    for (size_t sector = (size_t)continuation_sector + 1u;
+            sector < fs.sector_count; sector++) {
+        char name[16];
+        snprintf(name, sizeof(name), "fill%02zu", sector);
+        fs.alloc_cursor = sector;
+        ASSERT_OK(write_chunks(&fs, name, large,
+                    test_max_file_data_size(&fs)));
+    }
+
+    ASSERT_OK(fffs_open(&fs, &reader, "f006", FFFS_O_RDONLY));
+    ASSERT_OK(fffs_read(&reader, out, 2, &nread));
+    ASSERT_TRUE(nread == 2);
+    ASSERT_TRUE(memcmp(out, survivor, 2) == 0);
+    total = 2;
+
+    fs.alloc_cursor = continuation_sector;
+    fs.gc_cursor = source_sector;
+    rc = fffs_gc_until_erased(&fs, &erased_sector);
+    found = false;
+    head = 0;
+    ASSERT_OK(fffs_index_head_for_slot(&fs, fffs_hash16("f006"), &head,
+                &found));
+    fprintf(stderr, "open reader gc rc=%s erased=%u source=%u f006 head=%u\n",
+            fffs_status_name(rc), (unsigned)erased_sector,
+            (unsigned)source_sector, (unsigned)head);
+
+    while (total < sizeof(survivor)) {
+        nread = 0;
+        ASSERT_OK(fffs_read(&reader, out + total, 64, &nread));
+        ASSERT_TRUE(nread > 0);
+        total += nread;
+    }
+    ASSERT_TRUE(total == sizeof(survivor));
+    ASSERT_TRUE(memcmp(out, survivor, sizeof(survivor)) == 0);
+    ASSERT_OK(fffs_close(&reader));
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    free(large);
+    return 0;
+}
+
+static int test_open_writer_close_preserves_reused_slot_file(void) {
+    struct ffsv_flash *flash = NULL;
+    struct fffs_backend backend;
+    struct fffs fs;
+    struct fffs_file writer;
+    static test_index_cache_t fs_index_heads[TEST_INDEX_CACHE_WORDS];
+    uint8_t a0[16];
+    uint8_t a1[16];
+    uint8_t b[16];
+    uint8_t out[32];
+    size_t out_size = 0;
+    char peer[16];
+    bool peer_found = false;
+    uint16_t base;
+
+    memset(a0, 0xa0, sizeof(a0));
+    memset(a1, 0xa1, sizeof(a1));
+    memset(b, 0xb5, sizeof(b));
+
+    ASSERT_OK(new_backend_with_size(&flash, &backend, 4096 * 16));
+    ASSERT_OK(fffs_format(&backend, NULL));
+    ASSERT_OK(mount_fs(&fs, &backend, fs_index_heads));
+
+    base = fffs_hash16("victim");
+    ASSERT_TRUE(base != 0 && base != 0xffff);
+
+    ASSERT_OK(write_chunks(&fs, "victim", a0, sizeof(a0)));
+    ASSERT_OK(fffs_open(&fs, &writer, "victim",
+                FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC));
+    ASSERT_OK(fffs_write(&writer, a1, sizeof(a1)));
+    ASSERT_OK(fffs_delete_file(&fs, "victim"));
+
+    for (unsigned i = 0; i < 1000000u; i++) {
+        snprintf(peer, sizeof(peer), "c%06u", i);
+        if (fffs_hash16(peer) == base) {
+            peer_found = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(peer_found);
+
+    ASSERT_OK(write_chunks(&fs, peer, b, sizeof(b)));
+    ASSERT_OK(fffs_close(&writer));
+
+    ASSERT_OK(read_chunks(&fs, peer, out, sizeof(out), &out_size));
+    ASSERT_TRUE(out_size == sizeof(b));
+    ASSERT_TRUE(memcmp(out, b, sizeof(b)) == 0);
+
+    fffs_unmount(&fs);
+    ffsv_flash_destroy(flash);
+    return 0;
+}
+
 static int test_compaction_window_consumes_reserved_sector(void) {
 #if FFFS_COMPACTION_RESERVE_SECTORS <= 0
     return 0;
@@ -3529,6 +3692,8 @@ int main(void) {
     failures += test_root_alloc_skips_sector_with_continuation_record();
     failures += test_continuation_alloc_requires_empty_sector();
     failures += test_gc_compacts_root_only_sector_under_pressure();
+    failures += test_compaction_preserves_open_reader_data();
+    failures += test_open_writer_close_preserves_reused_slot_file();
     failures += test_compaction_window_consumes_reserved_sector();
     failures += test_replacement_refreshes_old_head_after_alloc_gc();
     failures += test_read_seek_single_extent();
