@@ -16,21 +16,37 @@ Design notes for a small NOR-flash filesystem optimized for named file replaceme
   - arbitrary in-place updates
   - POSIX-style seek/write/close behavior
 
-## Flash Assumptions
+## Terms
+
+- NOR flash: flash memory structured for fine-grained read and programming operations.
+- sector: in NOR flash, the smallest erasable unit. In FASTFFS, the allocation and reclaim unit, nominally one flash sector but may be larger.
+- global index: the append-only namespace log. Authoritative for file existence.
+- slot: a 16-bit ID assigned to a file based on a hash of the filename, resolved for collisions.
+- head sector: the sector the index points at for a slot. Holds the file's root metadata.
+- committed: persisted data that is readable in the future and survives power loss, etc.
+- corruption: loss of committed data.
+- tombstoned: a persisted dead marker/flag that can be added when data is no longer live.
+- orphaned/obsolete: data that is not reachable through the global index, either because it was never committed or is no longer live.
+- GC/reclaim: garbage collection. Tombstoning orphaned/obsolete data, and erasing sectors with only non-live data so that they can be used to store new data.
+- foreground op: work done inside a regular file operation, adding to that operation's time.
+- background op: work moved out of foreground operations, done later when the application has idle time. GC steps and erase are the main background ops.
+
+## Flash Properties and Assumptions
 
 - NOR erased state is all `1` bits, typically `0xff`.
-- Programming only flips bits one direction, typically `1 -> 0`.
-- Erase flips a backend erase unit back to erased state.
+- Programming only flips bits one direction, typically `1 -> 0`. Power loss during programming could leave some bits set while clearing others, and could leave bits unstable.
+- Erase flips bits back to erased state. Power loss during erase could leave bits in any state, as some flash will program remaining `1` bits so they are all the same level before an erase.
 - State transitions must be monotonic: committed/tombstoned values must be reachable by clearing bits only.
+- Erase is orders of magnitude slower than read, and much slower than program.
 - Blank checks are cheap enough to use before allocation.
-- Background erase is expected for sectors belonging only to dead/orphaned data.
 - Flash wear is on erase cycles, not programming/overwrite cycles.
-- Expected NOR endurance is around 100K erase cycles, so v1 should prefer simple rotating allocation over moving otherwise-stable data solely for static wear leveling.
+- Expected NOR endurance is around 100K erase cycles, so simple rotating allocation (dynamic wear leveling) is typically sufficient over moving otherwise-stable data solely for static wear leveling.
 - Flash will have an erasable unit that is some power of 2.
- 
-FASTFFS uses "sector" for its logical allocation, index, scan, and reclaim unit. This must be >= the minimum backend flash erase unit. The sector size is encoded as `256 << sector_shift`; the default is 4 KB (`sector_shift = 4`).
+- Some flash offers larger 32 KB or 64 KB erase units with better throughput, but they raise the minimum operation time and can block for longer. It is assumed the system has enough idle time for background GC to keep up with the write workload, so total erase throughput matters less than keeping individual operation times small.
 
-Measured / datasheet timing notes for the target NOR flash:
+FASTFFS uses "sector" for its logical allocation, index, scan, and reclaim unit. This must be >= the minimum backend flash erase unit. Supported sector sizes are 256 B through 8 KB, default 4 KB.
+
+Datasheet timing notes for the target NOR flash:
 
 | Operation | Approx Time |
 |---|---:|
@@ -45,7 +61,7 @@ Measured / datasheet timing notes for the target NOR flash:
 | erase + program 4 KB | ~53 ms |
 | blank check + program blank 4 KB | ~1.6 ms + ~9.1 ms |
 
-An erase + program cycle is around 75 KB/s for 4 KB sectors. If sectors are erased ahead of time, checking and programming blank sectors is closer to 324 KB/s. Erases can stall animation/frame timing, so background erase should be scheduled carefully.
+An erase + program cycle is around 75 KB/s for 4 KB sectors. If sectors are erased ahead of time, checking and programming blank sectors is closer to 324 KB/s.
 
 Measured timing will vary by chip, driver, OS, and test harness. One ESP32-S3 built-in flash partition snapshot measured:
 
