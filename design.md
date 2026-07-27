@@ -120,7 +120,7 @@ Meaning:
 - `abcd,0`: delete tombstone
 - `abcd,3`: recreated/newer version
 
-When replayed, the final valid entry wins. During index compaction, obsolete earlier entries are omitted. If/when compacted, this would collapse to the last entry.
+When replayed, the final valid entry wins. During index compaction, obsolete earlier entries are omitted. When compacted, this collapses to the last entry.
 
 If a second file happened to have the same hash, a conflict would occur. The next available hash-slot is chosen by incrementing. e.g. the new file would get `abce`.
 
@@ -175,7 +175,7 @@ The last row is the physical maximum number of one-page files on an 8 MB flash b
 
 ## Index Rotation
 
-The index can be treated as a circular buffer of index sectors. Compaction does not need to rebuild the whole namespace at once; it only needs to compact enough old index data to free append space.
+The index is a circular buffer of index sectors. Compaction does not rebuild the whole namespace at once; it only compacts enough old index data to free append space.
 
 With 4-byte records and the 8-byte v1 header in a 4 KB sector:
 
@@ -218,7 +218,7 @@ valid: 1, 2
 free:  3
 ```
 
-Rotation attempts to move the index head to the next sector while maintaining at least 1 free sector. This can trigger a compaction when no sector would be free. It's possible to rotate before completely filling a sector. For example we may want to reserve space for a maximum tx size and/or to reserve some usable index space during a background compaction.
+Rotation attempts to move the index head to the next sector while maintaining at least 1 free sector. This triggers a compaction when no sector would be free. It's possible to rotate before completely filling a sector. For example we may want to reserve space for a maximum tx size and/or to reserve some usable index space during a background compaction.
 
 Compaction can also be done independently. This is mostly a future concern. For example, we may notice that an index contains many obsolete records during index replay. Perhaps some simple heuristics like a minimum number of obsolete records or a percentage would trigger a compaction. Compaction would then likely reduce the total number of records that need to be replayed in the future. For memory backed indexes this may not be worth it, but for a non-caching lookup, the total cache size increases lookup time.
 
@@ -243,7 +243,7 @@ Only records from the oldest index sector are copied during a rotation, but the 
 
 If power fails before the new sector is marked valid, the old sequence remains authoritative. If power fails after the new sector is marked valid but before the old sector is tombstoned, the serial sequence identifies the newer valid set.
 
-Index maintenance can run in the background like erase. Under pressure, a writer can fall back to on-demand rotation if it needs append space before the background task has freed any.
+Background index maintenance is still a TODO: like erase, rotation/compaction should be able to run in the background, with a writer under pressure falling back to on-demand rotation if it needs append space before the background task has freed any. Currently rotation and compaction only happen on demand from the index append path.
 
 Index transactions are deferred. A likely design is to reserve `head == 1` as a control-record marker, since `head == 0` is a delete tombstone and sector `1` is always inside the index range. Transaction begin/end metadata can be encoded in `slot`; full CRC mode can burn one following 32-bit record for the CRC. That keeps ordinary records unchanged while allowing atomic multi-record updates later.
 This would allow multiple index changes to be atomic, and CRC protected. Similar to LittleFS metadata commit batches.
@@ -352,15 +352,14 @@ as a failed format rather than a normal recovery path.
 
 Cold start cost is bounded by reading the compact index.
 
-Startup caching is configurable:
+Startup caching is configurable via `FFFS_INDEX_CACHE_MODE`:
 
-- Low-RAM mode can scan the index and read root metadata only when an operation needs it.
-- Default mode caches the replayed index in a hash table of
-  `(slot, head)` entries, which makes missing lookups cheap without metadata
-  reads.
-- Larger-MCU mode can cache live root metadata and/or span lists to make `stat`, `ls`, open, and seek mostly RAM operations.
+- No-cache mode scans the index and reads root metadata only when an operation needs it.
+- The default hash mode caches the replayed index in a hash table of `(slot, head)` entries, which makes missing lookups cheap without metadata reads.
+- Full slot-head mode stores one head value per possible slot for direct lookup.
+- A future larger-MCU mode could cache live root metadata and/or span lists to make `stat`, `ls`, open, and seek mostly RAM operations.
 
-The embedded core should be usable without hidden heap allocation. Mount should take caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
+The embedded core is usable without hidden heap allocation. Mount takes caller-provided buffers/caches sized from explicit configuration and decoded format limits. Host tools may use dynamic allocation freely.
 
 Mount also takes a caller-provided global scratch buffer. The core must work
 with a small buffer, but larger scratch improves operations that scan
@@ -470,7 +469,7 @@ workload performs frequent directory listings over a large namespace. Direct ful
 
 ## Allocation Bitmap Hints
 
-Allocation state can be tracked at FASTFFS sector level with an in-memory
+Allocation state is tracked at FASTFFS sector level with an in-memory
 bitmap. It is not persisted. On mount, the map starts from runtime-known state,
 such as index sectors being unavailable, and allocation/GC refine it during
 normal scans. The baseline can also be built with no allocation map, in which
@@ -488,8 +487,8 @@ allocation rules, so normal allocation and normal GC can skip it. "Full" uses
 the allocator's practical rule: no useful allocation window remains, the hard
 `FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` limit was reached, or continuation
 metadata makes the sector ineligible for normal root sharing. Temporary
-reservations may also set bits to mask
-reserved sectors, and must clear them when the reservation is released, shrunk,
+reservations also set bits to mask
+reserved sectors, and clear them when the reservation is released, shrunk,
 or consumed.
 
 GC usually consults the bitmap before reading a sector. Deletes clear the old
@@ -497,9 +496,9 @@ file's known sector chain back to unknown, so GC can
 later reclassify those sectors.
 Allocation-pressure GC can run a second pass that ignores the bitmap.
 
-A writer can set the bit when it knows the sector is full under the current
+A writer sets the bit when it knows the sector is full under the current
 allocation rules, such as after writing continuation metadata or consuming the
-remaining useful free window. GC can set the bit after it has classified live
+remaining useful free window. GC sets the bit after it has classified live
 metadata and proven the sector is full under normal allocation rules: it has a
 live continuation, has reached the live-root record cap, or has no erased
 window large enough for a new root record plus `FFFS_ALLOC_MIN_USABLE_FREE`.
@@ -576,7 +575,7 @@ Delete:
 
 ## Sector-Local Layout
 
-Sectors can pack data and metadata together:
+Sectors pack data and metadata together:
 
 ```text
 | data grows forward ... free space ... metadata grows backward |
@@ -589,7 +588,7 @@ data________________md1
 dataDDDDAAAATTTAAA_MD2md1
 ```
 
-Small files and file roots can share a sector. Larger files can spill into
+Small files and file roots can share a sector. Larger files spill into
 continuation sectors.
 
 ## Sector Footer
@@ -610,7 +609,7 @@ write. Later metadata records in the same sector are written farther toward the
 front of the sector as metadata grows backward; they do not rewrite the footer
 and are not contiguous with it.
 
-Example footer shape:
+Footer layout:
 
 ```c
 struct fffs_sector_footer {
@@ -621,7 +620,7 @@ struct fffs_sector_footer {
 };
 ```
 
-The serial is 32-bit. It should advance when a sector is claimed for use after
+The serial is 32-bit. It advances when a sector is claimed for use after
 erase, or equivalently at the first write that makes the sector FASTFFS-owned.
 At one increment per claimed sector, 32 bits is unlikely to wrap before the
 flash has exhausted its useful erase life for the target devices. If wrap ever
@@ -743,7 +742,7 @@ Open for read:
 
 Sequential reads follow linked span metadata and should be close to raw flash speed.
 
-Seek can follow the linked span structure. If needed, cache the span list after open or first seek.
+Seek follows the linked span structure. A future option could cache the span list after open or first seek.
 
 ## Writes
 
@@ -796,21 +795,20 @@ Allocation should consider the following:
 * Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or allocation hints.
 * Appendable-file spans, including the first, use exclusive allocation: empty sectors that hold only that file's spans, with no foreign roots. This keeps the chain single-move compactable and reserves tail runway. The appendable type is encoded in the record type, so the existing rule that normal allocation skips exclusive sectors keeps foreign roots out of the tail sector while open, after close, and across remount, with no new allocator state.
 
-A reasonable starting minimum data threshold is 128-256 bytes. The exact formula
-is a tunable definition, but runtime allocation should be a simple range check.
+The minimum data threshold is `FFFS_ALLOC_MIN_USABLE_FREE`, default 128 bytes, applied as a simple range check at allocation time.
 
 Allocator policy should also reserve some metadata slack for later tombstones
 and amendment records. The exact reserve is TBD. It might be configurable, with
 reserve = 0 effectively disabling MD amendment records.
 
-The allocator may temporarily reserve some sectors in a contiguous run for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size should be limited and configurable.
+The allocator may temporarily reserve some sectors in a contiguous run for a file, if those sectors appear to be potentially free, and later allocate them in sequence when requested. These are temporarily unavailable for allocation/reservation to other files. The allocator may change the reservations for any open file as needed, for example under space pressure. The reservation size is limited by `FFFS_ALLOC_RESERVE_SECTORS`.
 
 Reservations don't need to be blank checked or verified until allocated.
 
-Reservation state can be represented as temporary unavailable bits in the
-allocation bitmap. These bits must be cleared when a reservation is released,
+Reservation state is represented as temporary unavailable bits in the
+allocation bitmap. These bits are cleared when a reservation is released,
 shrunk, consumed, or fails allocation. If allocation cannot find space while
-respecting the bitmap, it can cut reservations and retry. If cutting
+respecting the bitmap, it cuts reservations and retries. If cutting
 reservations does not release any sectors, all file reservations were already
 zero.
 
@@ -819,7 +817,7 @@ using the open/in flight file data to see what sectors are not fully written,
 and by skipping over sectors that are reserved for or currently used by open
 writers.
 
-Under reservation pressure, the allocator should cut reservations for open files by half, rounded down (right shift by 1). This either freed up one or more reserved sectors, or all reservations were already zero. This would hopefully free up smaller but still contiguous ranges. Every file gets equal 50% cut. If a file was cut and then later wrote and alloced, it would attempt to extend/reclaim the contiguous reservation if available. Less active writers would have smaller and smaller reservations, while active writers would reclaim reservations more aggressively.
+Under reservation pressure, the allocator cuts reservations for open files by half, rounded down (right shift by 1). This either frees up one or more reserved sectors, or all reservations were already zero. This frees smaller but still contiguous ranges. Every file gets an equal 50% cut. If a file is cut and then later writes and allocates, it attempts to extend/reclaim the contiguous reservation if available. Less active writers end up with smaller and smaller reservations, while active writers reclaim reservations more aggressively.
 
 ## Open File Handles
 
@@ -1097,7 +1095,7 @@ The preferred scheduling knob is elapsed time, not a filesystem-wide "collect
 everything" operation. User code can call a GC step whenever it has idle time,
 measure its own wall-clock budget, and call again while idle time remains. A
 future helper could loop over GC steps until a supplied time budget is exhausted,
-but the core can remain usable with a simple one-step API and caller-managed
+but the core remains usable with the simple one-step API and caller-managed
 scheduling.
 
 Data-sector compaction is currently root-only. This is intentionally narrower
