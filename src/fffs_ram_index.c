@@ -58,7 +58,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
     for (uint16_t d = 0; d <= FFFS_MAX_PROBE_DISTANCE; d++) {
         uint16_t candidate_head = fs->index_heads[candidate];
         if (candidate_head == 0) {
-            if (!have_free) {
+            if (!have_free && !fffs_slot_is_pinned(fs, candidate)) {
                 first_free = candidate;
                 have_free = true;
             }

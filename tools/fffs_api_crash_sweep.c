@@ -401,11 +401,11 @@ static int runtime_clone(struct api_runtime_state *dst,
     if (tx->active) {
         dst->open_file = *open_file;
         dst->open_file.fs = &dst->fs;
-        dst->open_file.inflight_next = NULL;
-        dst->fs.inflight_writers = dst->open_file.inflight_registered ?
+        dst->open_file.open_next = NULL;
+        dst->fs.open_files = dst->open_file.open_registered ?
             &dst->open_file : NULL;
     } else {
-        dst->fs.inflight_writers = NULL;
+        dst->fs.open_files = NULL;
     }
     dst->mounted = true;
     return FFFS_OK;

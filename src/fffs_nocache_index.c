@@ -182,11 +182,13 @@ static int newer_record_for_slot(struct index_scan *scan,
     return FFFS_OK;
 }
 
-static int resolve_reached_slot(uint16_t base,
+static int resolve_reached_slot(struct fffs *fs, uint16_t base,
         uint32_t occupied[FFFS_PROBE_BITSET_WORDS], uint16_t *slot) {
     for (size_t d = 0; d <= FFFS_MAX_PROBE_DISTANCE; d++) {
-        if (!fffs_bitset_get(occupied, d)) {
-            *slot = candidate_slot(base, d);
+        uint16_t candidate = candidate_slot(base, d);
+        if (!fffs_bitset_get(occupied, d) &&
+                !fffs_slot_is_pinned(fs, candidate)) {
+            *slot = candidate;
             return FFFS_OK;
         }
     }
@@ -314,7 +316,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         }
     }
 
-    int err = resolve_reached_slot(base, occupied, slot);
+    int err = resolve_reached_slot(fs, base, occupied, slot);
     if (err != FFFS_OK) {
         return err;
     }

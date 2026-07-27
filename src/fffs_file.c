@@ -4,7 +4,7 @@
  * Copyright (c) 2026 Ben Hencke
  *
  * FASTFFS file-handle operations: open/read/seek/write/close, streaming
- * cursor state, inflight writer checks, and contiguous span accumulation.
+ * cursor state, open-file checks, and contiguous span accumulation.
  */
 
 #include "fffs_internal.h"
@@ -77,29 +77,29 @@ bool fffs_invalidate_old_chain(struct fffs *fs, uint16_t slot,
     return true;
 }
 
-static void register_inflight_writer(struct fffs_file *file) {
-    if (file->inflight_registered) {
+static void register_open_file(struct fffs_file *file) {
+    if (file->open_registered) {
         return;
     }
-    file->inflight_next = file->fs->inflight_writers;
-    file->fs->inflight_writers = file;
-    file->inflight_registered = true;
+    file->open_next = file->fs->open_files;
+    file->fs->open_files = file;
+    file->open_registered = true;
 }
 
-static void unregister_inflight_writer(struct fffs_file *file) {
-    if (!file->inflight_registered || !file->fs) {
+static void unregister_open_file(struct fffs_file *file) {
+    if (!file->open_registered || !file->fs) {
         return;
     }
-    struct fffs_file **p = &file->fs->inflight_writers;
+    struct fffs_file **p = &file->fs->open_files;
     while (*p) {
         if (*p == file) {
-            *p = file->inflight_next;
+            *p = file->open_next;
             break;
         }
-        p = &(*p)->inflight_next;
+        p = &(*p)->open_next;
     }
-    file->inflight_next = NULL;
-    file->inflight_registered = false;
+    file->open_next = NULL;
+    file->open_registered = false;
 }
 
 static void stage_root_prefix(struct fffs_file *file, const char *name) {
@@ -126,9 +126,9 @@ static uint16_t pending_span_len(const struct fffs_file *file) {
     return (uint16_t)(file->current - file->span_head + 1u);
 }
 
-bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector) {
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
+bool fffs_sector_is_open_for_writing(struct fffs *fs, uint16_t sector) {
+    for (struct fffs_file *file = fs->open_files; file;
+            file = file->open_next) {
         if (file->closed || (file->flags & FFFS_O_WRONLY) == 0) {
             continue;
         }
@@ -143,10 +143,10 @@ bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector) {
     return false;
 }
 
-bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot) {
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
-        if (file->closed || (file->flags & FFFS_O_WRONLY) == 0) {
+bool fffs_slot_is_pinned(struct fffs *fs, uint16_t slot) {
+    for (struct fffs_file *file = fs->open_files; file;
+            file = file->open_next) {
+        if (file->closed) {
             continue;
         }
         if (file->slot == slot) {
@@ -224,6 +224,7 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
         file->span_len = resolved_span_len;
         file->current_next = resolved_next;
         memcpy(file->name, resolved_st.name, strlen(resolved_st.name) + 1);
+        register_open_file(file);
     } else {
         uint16_t sector;
         if (found) {
@@ -240,7 +241,7 @@ int fffs_open(struct fffs *fs, struct fffs_file *file,
         stage_root_prefix(file, name);
         file->span_head = file->current;
         file->span_len = 0;
-        register_inflight_writer(file);
+        register_open_file(file);
     }
 
     return FFFS_OK;
@@ -766,8 +767,8 @@ int fffs_close(struct fffs_file *file) {
             }
         }
         fffs_alloc_release_reservation(file);
-        unregister_inflight_writer(file);
     }
+    unregister_open_file(file);
     file->closed = true;
     FFFS_PROFILE_POP(file->fs, FFFS_PROFILE_CLOSE);
     return err;

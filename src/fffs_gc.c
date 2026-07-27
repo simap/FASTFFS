@@ -122,13 +122,13 @@ static int gc_fsinfo_allows_compaction(struct fffs *fs,
         (uint32_t)(fs->sector_size - candidate->trapped_reclaimable) :
         FFFS_ALLOC_MIN_USABLE_FREE;
     uint32_t needed_flags = FFFS_FSINFO_TOTAL_VALID |
-        FFFS_FSINFO_COMMITTED_BYTES_VALID | FFFS_FSINFO_INFLIGHT_VALID |
+        FFFS_FSINFO_COMMITTED_BYTES_VALID | FFFS_FSINFO_PENDING_VALID |
         FFFS_FSINFO_METADATA_ESTIMATE_VALID;
     if ((info.valid_flags & needed_flags) != needed_flags) {
         return FFFS_OK;
     }
 
-    uint32_t used = info.committed_data_bytes + info.inflight_data_bytes +
+    uint32_t used = info.committed_data_bytes + info.pending_data_bytes +
         info.estimated_metadata_bytes;
     if (info.total_bytes <= used) {
         return FFFS_OK;
@@ -265,7 +265,7 @@ static int gc_compact_root_only_sector(struct fffs *fs, uint16_t source_sector,
 
         if (record.live) {
             if (record.type != FFFS_MD_TYPE_FILE_ROOT_V1 ||
-                    fffs_slot_is_inflight(fs, record.slot)) {
+                    fffs_slot_is_pinned(fs, record.slot)) {
                 err = FFFS_ERR_NO_SPACE;
                 goto fail;
             }
@@ -363,7 +363,7 @@ static int gc_classify_record(struct fffs *fs, size_t sector,
     if (!record->live) {
         return FFFS_OK;
     }
-    if (fffs_slot_is_inflight(fs, record->slot)) {
+    if (fffs_slot_is_pinned(fs, record->slot)) {
         *live = true;
         return FFFS_OK;
     }
@@ -436,7 +436,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
         }
         return FFFS_OK;
     }
-    if (fffs_sector_is_inflight(fs, (uint16_t)s)) {
+    if (fffs_sector_is_open_for_writing(fs, (uint16_t)s)) {
         fs->gc_cursor = fffs_next_data_sector(fs, s);
         fs->gc_md.live_seen = true;
         fs->gc_md.active = false;
@@ -571,8 +571,8 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
             } else if (record.type == FFFS_MD_TYPE_FILE_CONT_V1) {
                 fs->gc_md.live_continuation_seen = true;
             }
-            if (fffs_slot_is_inflight(fs, record.slot)) {
-                fs->gc_md.inflight_seen = true;
+            if (fffs_slot_is_pinned(fs, record.slot)) {
+                fs->gc_md.open_seen = true;
             }
         }
     }
@@ -599,7 +599,7 @@ static int gc_step(struct fffs *fs, enum fffs_gc_action *out_action,
 
     if (fs->gc_md.live_seen) {
         bool root_only_compaction_candidate = fs->gc_md.live_root_seen &&
-            !fs->gc_md.live_continuation_seen && !fs->gc_md.inflight_seen;
+            !fs->gc_md.live_continuation_seen && !fs->gc_md.open_seen;
         bool normal_alloc_full = fs->gc_md.live_continuation_seen ||
             fs->gc_md.live_root_count >=
                 FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR;

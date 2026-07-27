@@ -689,12 +689,12 @@ static int test_fsinfo_refresh_and_cached_accounting(void) {
 
     ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
     ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_TOTAL_VALID) != 0);
-    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_INFLIGHT_VALID) != 0);
+    ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_PENDING_VALID) != 0);
     ASSERT_TRUE((info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) == 0);
     ASSERT_TRUE(info.total_bytes == (uint32_t)((fs.sector_count -
                     fs.index_sectors) * (fs.sector_size - 10)));
-    ASSERT_TRUE(info.inflight_file_count == 0);
-    ASSERT_TRUE(info.inflight_data_bytes == 0);
+    ASSERT_TRUE(info.pending_file_count == 0);
+    ASSERT_TRUE(info.pending_data_bytes == 0);
 
     ASSERT_OK(write_chunks(&fs, "alpha", (const uint8_t *)alpha,
                 strlen(alpha)));
@@ -723,16 +723,16 @@ static int test_fsinfo_refresh_and_cached_accounting(void) {
     ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
     ASSERT_TRUE(info.committed_file_count == 2);
     ASSERT_TRUE(info.committed_data_bytes == strlen(alpha) + strlen(beta));
-    ASSERT_TRUE(info.inflight_file_count == 1);
-    ASSERT_TRUE(info.inflight_data_bytes == strlen(gamma));
+    ASSERT_TRUE(info.pending_file_count == 1);
+    ASSERT_TRUE(info.pending_data_bytes == strlen(gamma));
     ASSERT_OK(fffs_close(&writer));
 
     ASSERT_OK(fffs_fsinfo(&fs, &info, FFFS_FSINFO_FAST));
     ASSERT_TRUE(info.committed_file_count == 3);
     ASSERT_TRUE(info.committed_data_bytes ==
             strlen(alpha) + strlen(beta) + strlen(gamma));
-    ASSERT_TRUE(info.inflight_file_count == 0);
-    ASSERT_TRUE(info.inflight_data_bytes == 0);
+    ASSERT_TRUE(info.pending_file_count == 0);
+    ASSERT_TRUE(info.pending_data_bytes == 0);
 
     ASSERT_OK(write_chunks(&fs, "alpha", (const uint8_t *)alpha_new,
                 strlen(alpha_new)));

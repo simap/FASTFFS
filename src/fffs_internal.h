@@ -336,8 +336,8 @@ int fffs_index_record_is_current(struct fffs *fs,
         bool *current);
 
 /* Inflight writer checks protect sectors for allocation and slots for GC. */
-bool fffs_sector_is_inflight(struct fffs *fs, uint16_t sector);
-bool fffs_slot_is_inflight(struct fffs *fs, uint16_t slot);
+bool fffs_sector_is_open_for_writing(struct fffs *fs, uint16_t sector);
+bool fffs_slot_is_pinned(struct fffs *fs, uint16_t slot);
 size_t fffs_next_data_sector(struct fffs *fs, size_t sector);
 bool fffs_fsinfo_committed_valid(const struct fffs *fs);
 void fffs_fsinfo_invalidate_committed(struct fffs *fs);

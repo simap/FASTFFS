@@ -63,7 +63,7 @@ Measured timing will vary by chip, driver, OS, and test harness. One ESP32-S3 bu
 
 ## Global Index
 
-The global index is an append-only namespace journal. It is the authoritative source for file existence.
+The global index is an append-only namespace log. It is the authoritative source for file existence.
 
 Conceptually, the namespace is a hash table using open addressing with bounded linear probing. Index records store the resolved hash slot and point to the sector where the file root metadata resides.
 
@@ -464,7 +464,7 @@ with sector count; an 8 MB filesystem with 4 KB sectors needs 256 bytes.
 Smaller coarse maps can be compile-time variants with inline storage.
 
 The bitmap is an optimization, not the source of truth. On-flash sector
-footers, metadata records, tombstones, inflight state, reservations, and blank
+footers, metadata records, tombstones, open writer state, reservations, and blank
 checks remain authoritative. A `0` bit means unknown or worth inspecting; it is
 not proof of erased or usable space. For data sectors, a `1` bit normally means
 the sector is known to contain live data and be full under current normal
@@ -762,9 +762,11 @@ Metadata may be physically valid before the file is committed. Namespace visibil
 
 Append is add-to-end only.
 
-A committed file can be reopened for append, continuing its chain with the reverse tail records and amendment records described in Sector Metadata. Appended data is programmed first, then a new tail record or size amendment commits it. A flush whose committing record lands in the current index-visible tail sector needs no index append, because the index still points at that sector and the newest valid record for the slot wins. A flush that moves to a new sector writes the tail record there and appends an index record republishing the slot. A crash between data programming and the committing record reverts the file to its last committed size.
+Appendable is a file type chosen at create time, and only appendable files can be reopened for append. An appendable file continues its chain with the reverse tail records and amendment records described in Sector Metadata. Appended data is programmed first, then a new tail record or size amendment commits it. A flush whose committing record lands in the current index-visible tail sector needs no index append, because the index still points at that sector and the newest valid record for the slot wins. A flush that moves to a new sector writes the tail record there and appends an index record republishing the slot. A crash between data programming and the committing record reverts the file to its last committed size.
 
-`FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` bounds lookup fan-out in shared sectors. Log sectors are single-slot, so they may use a separate, larger record cap whose cost is tail-read size during scans rather than lookup cost.
+Appendable files have exclusive sector allocations. This allows any remaining space in the sector to be used for appends without excess fragmentation. It also allows a longer append/amend MD record set to be created without interfering with regular file search operations.
+
+`FFFS_ALLOC_MAX_MD_RECORDS_PER_SECTOR` bounds lookup fan-out in shared sectors. Appendable-file sectors are exclusive, so they may use a separate, larger record cap whose cost is tail-read size during scans rather than lookup cost.
 
 ### Allocation Strategy
 
@@ -776,7 +778,7 @@ Allocation should consider the following:
 * Normal root allocations should skip sectors containing continuation metadata, but may share sectors containing other roots.
 * Ideally contiguous sectors are allocated when available. 
 * Sectors must be verified to have erased usable space before being allocated. Allocation must verify flash contents, not just metadata or allocation hints.
-* Append/log file spans, including the first, use continuation placement: empty exclusive sectors only. This keeps the chain single-move compactable and reserves tail runway. Log placement is encoded in the record type, so the existing continuation-skip rule keeps foreign roots out of the tail sector while open, after close, and across remount, with no new allocator state.
+* Appendable-file spans, including the first, use exclusive allocation: empty sectors that hold only that file's spans, with no foreign roots. This keeps the chain single-move compactable and reserves tail runway. The appendable type is encoded in the record type, so the existing rule that normal allocation skips exclusive sectors keeps foreign roots out of the tail sector while open, after close, and across remount, with no new allocator state.
 
 A reasonable starting minimum data threshold is 128-256 bytes. The exact formula
 is a tunable definition, but runtime allocation should be a simple range check.
@@ -860,8 +862,8 @@ Duplicate raw hashes are not the baseline because they change delete and replay 
 ## Replayed Index Cache
 
 The replayed index cache is an in-memory accelerator for the authoritative
-append-only index journal. It is not a second source of truth. Mount replay
-applies index records in journal order:
+append-only index log. It is not a second source of truth. Mount replay
+applies index records in log order:
 
 - a put record stores or replaces the current `slot -> head` mapping,
 - a delete record removes the current mapping for that slot,
@@ -1108,7 +1110,7 @@ If erase-only GC cannot free a sector and fsinfo estimates enough unused space
 to try a root-only move, GC copies live roots out of the best candidate. Each
 copied root is written as ordinary root metadata at a valid destination window,
 and an index record is appended so the copied root becomes current. The
-destination allocator skips the source sector and inflight sectors. It uses a
+destination allocator skips the source sector and sectors open for writing. It uses a
 relaxed root-placement policy, so copied roots may land in sectors that contain
 continuation metadata under pressure, while still requiring erased writable
 space and rejecting ordinary allocation conflicts. If all live roots are copied,
@@ -1121,7 +1123,7 @@ space alone. Compacting mixed continuation/root sectors, continuation-only tail
 waste, linked span prefixes, and whole files requires a separate general
 compaction design that accounts for copied bytes, destination space, source
 sectors made freeable, new trapped space, erase cost, wear, and foreground
-stall time. Future append files add to this category.
+stall time. Future appendable files add to this category.
 
 Wear leveling is intentionally simple in the baseline. Index rotation spreads index wear across the configured index sectors. The allocation cursor writes through unused/free sectors before wrapping, so with reasonable free space, data wear rotates through the partition. Static wear leveling by moving existing compact files is not planned for v1. If needed later, a non-file sector metadata record can store an erase counter; GC can update it after erase, and allocation can choose low-count sectors or a bounded low-count candidate near the cursor.
 

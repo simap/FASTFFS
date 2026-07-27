@@ -65,7 +65,7 @@ enum fffs_fsinfo_valid_flags {
     FFFS_FSINFO_TOTAL_VALID = 0x01,
     FFFS_FSINFO_COMMITTED_FILES_VALID = 0x02,
     FFFS_FSINFO_COMMITTED_BYTES_VALID = 0x04,
-    FFFS_FSINFO_INFLIGHT_VALID = 0x08,
+    FFFS_FSINFO_PENDING_VALID = 0x08,
     FFFS_FSINFO_METADATA_ESTIMATE_VALID = 0x10,
 };
 
@@ -165,8 +165,8 @@ struct fffs_fsinfo {
     uint32_t total_bytes;
     uint32_t committed_file_count;
     uint32_t committed_data_bytes;
-    uint32_t inflight_file_count;
-    uint32_t inflight_data_bytes;
+    uint32_t pending_file_count;
+    uint32_t pending_data_bytes;
     uint32_t estimated_metadata_bytes;
 };
 
@@ -179,7 +179,7 @@ struct fffs_md_walk {
     bool live_seen;
     bool live_root_seen;
     bool live_continuation_seen;
-    bool inflight_seen;
+    bool open_seen;
     bool active;
 };
 
@@ -191,7 +191,7 @@ struct fffs_compaction_candidate {
 
 struct fffs {
     struct fffs_backend backend;
-    struct fffs_file *inflight_writers;
+    struct fffs_file *open_files;
     void *index_cache;
     uint16_t *index_heads;
     size_t index_hash_table_size;
@@ -243,7 +243,7 @@ typedef struct fffs_stat fffs_dirent;
 
 struct fffs_file {
     struct fffs *fs;
-    struct fffs_file *inflight_next;
+    struct fffs_file *open_next;
     uint32_t flags;
     uint16_t slot;
     uint16_t head;
@@ -270,7 +270,7 @@ struct fffs_file {
     uint8_t cache[FFFS_FILE_CACHE_SIZE];
     bool current_needs_footer;
     bool closed;
-    bool inflight_registered;
+    bool open_registered;
 };
 
 struct fffs_dir {

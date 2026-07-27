@@ -319,12 +319,15 @@ int fffs_fsinfo(struct fffs *fs, struct fffs_fsinfo *info, uint32_t flags) {
             (fs->sector_size - FFFS_SECTOR_FOOTER_SIZE));
     info->valid_flags |= FFFS_FSINFO_TOTAL_VALID;
 
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
-        info->inflight_file_count += 1;
-        info->inflight_data_bytes += file->size;
+    for (struct fffs_file *file = fs->open_files; file;
+            file = file->open_next) {
+        if ((file->flags & FFFS_O_WRONLY) == 0) {
+            continue;
+        }
+        info->pending_file_count += 1;
+        info->pending_data_bytes += file->size;
     }
-    info->valid_flags |= FFFS_FSINFO_INFLIGHT_VALID;
+    info->valid_flags |= FFFS_FSINFO_PENDING_VALID;
 
     if (fffs_fsinfo_committed_valid(fs)) {
         info->committed_file_count = fs->committed_file_count;

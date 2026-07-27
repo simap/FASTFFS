@@ -787,16 +787,16 @@ static void print_no_space_diagnostics(struct fffs *fs,
         (info.valid_flags & FFFS_FSINFO_TOTAL_VALID) != 0;
     bool committed_bytes_valid =
         (info.valid_flags & FFFS_FSINFO_COMMITTED_BYTES_VALID) != 0;
-    bool inflight_valid =
-        (info.valid_flags & FFFS_FSINFO_INFLIGHT_VALID) != 0;
+    bool pending_valid =
+        (info.valid_flags & FFFS_FSINFO_PENDING_VALID) != 0;
     bool metadata_valid =
         (info.valid_flags & FFFS_FSINFO_METADATA_ESTIMATE_VALID) != 0;
     bool file_count_valid =
         (info.valid_flags & FFFS_FSINFO_COMMITTED_FILES_VALID) != 0;
     uint32_t used = 0;
-    bool used_valid = committed_bytes_valid && inflight_valid;
+    bool used_valid = committed_bytes_valid && pending_valid;
     if (used_valid) {
-        used = info.committed_data_bytes + info.inflight_data_bytes;
+        used = info.committed_data_bytes + info.pending_data_bytes;
         if (metadata_valid) {
             used += info.estimated_metadata_bytes;
         }
@@ -810,11 +810,11 @@ static void print_no_space_diagnostics(struct fffs *fs,
         model_limit - model->live_bytes : 0;
 
     fprintf(stderr,
-            "no_space fsinfo valid=0x%08x total_valid=%d used_valid=%d file_count_valid=%d metadata_valid=%d total=%u used_est=%u fs_free_valid=%d fs_free_est=%u files=%u committed_data=%u inflight_files=%u inflight_data=%u metadata=%u request=%u model_live=%u model_live_limit=%u model_free_budget=%u fragmentation_hint=%d\n",
+            "no_space fsinfo valid=0x%08x total_valid=%d used_valid=%d file_count_valid=%d metadata_valid=%d total=%u used_est=%u fs_free_valid=%d fs_free_est=%u files=%u committed_data=%u pending_files=%u pending_data=%u metadata=%u request=%u model_live=%u model_live_limit=%u model_free_budget=%u fragmentation_hint=%d\n",
             info.valid_flags, total_valid, used_valid, file_count_valid,
             metadata_valid, info.total_bytes, used, fs_free_valid, fs_free,
             info.committed_file_count, info.committed_data_bytes,
-            info.inflight_file_count, info.inflight_data_bytes,
+            info.pending_file_count, info.pending_data_bytes,
             info.estimated_metadata_bytes, event->size, model->live_bytes,
             model_limit, model_free,
             fs_free_valid && fs_free >= event->size &&

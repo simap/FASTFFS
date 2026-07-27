@@ -149,7 +149,7 @@ int fffs_index_resolve(struct fffs *fs, const char *name,
         }
 
         if (!occupied) {
-            if (!have_free) {
+            if (!have_free && !fffs_slot_is_pinned(fs, candidate)) {
                 first_free = candidate;
                 have_free = true;
             }

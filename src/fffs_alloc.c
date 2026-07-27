@@ -52,8 +52,8 @@ static bool sector_in_reservation(const struct fffs_file *file,
 static bool sector_reserved_by_other(struct fffs_file *owner,
         uint16_t sector) {
     struct fffs *fs = owner->fs;
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
+    for (struct fffs_file *file = fs->open_files; file;
+            file = file->open_next) {
         if (file == owner || file->closed ||
                 (file->flags & FFFS_O_WRONLY) == 0) {
             continue;
@@ -160,7 +160,7 @@ int fffs_alloc_find_compaction_root_window(struct fffs *fs,
             if ((normal_allocation &&
                     fffs_alloc_map_maybe_used(fs, (uint16_t)s)) ||
                     s == source_sector ||
-                    fffs_sector_is_inflight(fs, (uint16_t)s)) {
+                    fffs_sector_is_open_for_writing(fs, (uint16_t)s)) {
                 s = fffs_next_data_sector(fs, s);
                 continue;
             }
@@ -208,7 +208,7 @@ static bool sector_can_be_reserved(struct fffs_file *file, uint16_t sector) {
     if (fffs_alloc_map_maybe_used(fs, sector)) {
         return false;
     }
-    if (fffs_sector_is_inflight(fs, sector)) {
+    if (fffs_sector_is_open_for_writing(fs, sector)) {
         return false;
     }
     return !sector_reserved_by_other(file, sector);
@@ -221,8 +221,8 @@ static bool sector_can_be_reserved(struct fffs_file *file, uint16_t sector) {
  */
 static bool halve_reservations(struct fffs *fs) {
     bool releasedAny = false;
-    for (struct fffs_file *file = fs->inflight_writers; file;
-            file = file->inflight_next) {
+    for (struct fffs_file *file = fs->open_files; file;
+            file = file->open_next) {
         if (file->closed || (file->flags & FFFS_O_WRONLY) == 0 ||
                 file->reserve_count == 0) {
             continue;
@@ -285,7 +285,7 @@ static int try_reserved_sector(struct fffs_file *file, uint16_t *sector,
         return FFFS_ERR_NO_SPACE;
     }
     uint16_t candidate = file->reserve_first;
-    if (fffs_sector_is_inflight(file->fs, candidate) ||
+    if (fffs_sector_is_open_for_writing(file->fs, candidate) ||
             sector_reserved_by_other(file, candidate)) {
         fffs_alloc_release_reservation(file);
         *skip_sector = candidate;
@@ -337,7 +337,7 @@ static int alloc_sector_once(struct fffs_file *file, uint16_t *sector,
             s = fffs_next_data_sector(fs, s);
             continue;
         }
-        if (fffs_sector_is_inflight(fs, (uint16_t)s) ||
+        if (fffs_sector_is_open_for_writing(fs, (uint16_t)s) ||
                 sector_reserved_by_other(file, (uint16_t)s)) {
             s = fffs_next_data_sector(fs, s);
             continue;
